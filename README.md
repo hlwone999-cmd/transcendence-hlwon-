@@ -1,23 +1,44 @@
-# Kalkulator Lot XAUUSD (IDR)
+# Transcendence — Kalkulator Lot XAUUSD (IDR)
 
-Kalkulator lot untuk trading XAUUSD dengan akun berdenominasi Rupiah. Cukup isi **maksimal SL (pips)**, balance, dan risk %, lalu lot dihitung otomatis. Dilengkapi tabel semua lot, matriks risk %, dan simulasi Monte Carlo.
+Aplikasi Flutter (Android) dari kalkulator lot XAUUSD berdenominasi Rupiah.
+**Semua algoritma dan UI/UX dipertahankan 100% sama** dengan versi web
+(arsip lengkapnya ada di folder [`legacy-web/`](legacy-web/)).
 
-## Cara pakai
+Cukup isi **maksimal SL (pips)**, balance, dan risk % — lot dihitung otomatis.
+Dilengkapi tabel semua lot 0.01–10.00, matriks risk %, Rules Recovery 1–35,
+kurs live, Monte Carlo, dan export CSV.
 
-1. Ekstrak ZIP.
-2. Buka `index.html` di browser (klik dua kali). Tidak perlu install apa pun.
+## Build & Install
 
-Butuh internet hanya untuk font Google dan kurs USD/IDR live. Kalau offline, kalkulator tetap jalan dengan kurs yang kamu isi manual.
+### Cara cepat (GitHub Actions)
+1. Push ke `main` → workflow **Build APK** berjalan otomatis.
+2. Buka tab **Actions** → pilih run terbaru → unduh artifact **transcendence-apk**.
+3. Install `app-release.apk` di HP (izinkan install dari sumber tidak dikenal).
 
-## Isi file
+### Build manual
+```bash
+flutter pub get
+flutter build apk --release
+# hasil: build/app/outputs/flutter-apk/app-release.apk
+```
+
+Dikembangkan dengan **Flutter 3.47.1 (stable, Dart 3.13.1)**.
+
+## Struktur kode
 
 | File | Fungsi |
 |---|---|
-| `index.html` | Struktur halaman |
-| `style.css` | Tampilan (otomatis mengikuti mode gelap/terang perangkat) |
-| `script.js` | Semua logika: kalkulasi lot, tabel, kurs live, export CSV, Monte Carlo |
+| `lib/engine.dart` | Seluruh algoritma: parseAmt, kalkulasi lot, tabel, matriks, Rules Recovery, format angka id-ID |
+| `lib/montecarlo.dart` | Simulasi Monte Carlo (port 1:1 `runMC`, dijalankan di Isolate) |
+| `lib/charts.dart` | Grafik fan & histogram (replika canvas `drawMC`) |
+| `lib/sticky_table.dart` | Tabel dengan header & kolom pertama menempel (replika `.tbl` web) |
+| `lib/tables_build.dart` | Sel tabel rekomendasi & matriks (pick/tight/fit/me/dead) |
+| `lib/ui_kit.dart` | Palet warna & komponen dasar (replika style.css) |
+| `lib/main.dart` | Halaman utama, Rules Recovery, kurs live, export CSV, penyimpanan |
+| `legacy-web/` | Versi web asli (index.html, script.js, style.css) sebagai arsip |
+| `test/engine_test.dart` | Uji paritas angka antara port Dart dan perilaku web |
 
-## Algoritma
+## Algoritma (identik dengan versi web)
 
 ```
 Risk (Rp)    = Balance × Risk %
@@ -28,29 +49,31 @@ TP pips      = SL pips × rasio R:R
 Target (Rp)  = Risk (Rp) × rasio R:R
 ```
 
-Asumsi XAUUSD: 1 lot = 100 oz, 1 pip = $0,10 per oz, sehingga **0,01 lot × 10 pips = $1**. Cek contract size di broker kamu; beberapa broker atau akun cent berbeda. Angka `10` pada rumus di atas adalah nilai $ per pip untuk 1 lot (100 oz × $0,10). Kalau contract size brokermu berbeda, ubah angka itu di `script.js`.
+Asumsi XAUUSD: 1 lot = 100 oz, 1 pip = $0,10 per oz, sehingga **0,01 lot × 10 pips = $1**.
+Lot otomatis mentok **10.00 lot**; bila kebutuhan lebih besar, muncul peringatan
+beserta SL minimal yang dibutuhkan.
 
 ## Fitur
 
-- **Rules Recovery 1–35** — pilih rules dari tabel recovery (pola: naik +20%, SL 10%), balance/risk/rasio terisi otomatis dan lot langsung muncul. Ada tombol mode recovery: balance jadi sisa setelah SL 10%, risk X 7,41% dengan rasio 1:1 — sekali menang balik persis ke balance rules sebelumnya (Rules 1: X 11,11% balik ke balance awal). Pilihan tersimpan otomatis, opsi "Manual" mengembalikan kontrol penuh.
-- **Lot otomatis** dari maksimal SL, lengkap dengan risiko aktual, TP pips, target profit, dan nilai per pip. Batas 10.00 lot — kalau kebutuhannya lebih besar, muncul peringatan merah beserta SL minimal yang dibutuhkan.
-- **Tabel lot 0.01–10.00** (kelipatan 0.01) berisi SL pips, TP pips, risk, dan target.
-- **Matriks SL pips × risk %** (1% sampai 100%) untuk semua lot.
-- **Kurs live** dari API publik (open.er-api.com, cadangan frankfurter.app), tanpa API key. Tersedia juga tombol kurs tetap 10.000 untuk broker lokal.
-- **Monte Carlo**: win rate, jumlah trade, spread/komisi, batas drawdown, compounding. Menampilkan peluang profit, ekspektasi per trade (R), win rate impas, drawdown, loss beruntun, dan grafik.
-- **Export CSV** tabel lot.
-- Input tersimpan otomatis di browser (localStorage).
+- **Rules Recovery 1–35** — balance/risk/rasio terisi otomatis dari tabel PDF
+  (pola: naik +20%, SL 10%, recovery 7,41%). Mode recovery 1:1 dengan X% —
+  sekali menang balik persis ke balance rules sebelumnya.
+- **Lot otomatis** dari maksimal SL + risiko aktual, TP pips, target profit,
+  nilai per pip, batas 10.00 lot.
+- **Tabel lot 0.01–10.00** (1000 baris, kelipatan 0.01) dengan baris terpilih
+  ditandai emas dan otomatis di-scroll ke tengah.
+- **Matriks SL pips × risk %** (1%–100% + risk terisi) dengan kotak bergaris
+  emas untuk lot yang masih muat.
+- **Kurs live** dari API publik (open.er-api.com, cadangan frankfurter.app),
+  tanpa API key; tersedia kurs tetap Rp10.000.
+- **Monte Carlo**: win rate, jumlah trade, spread/komisi, batas drawdown,
+  compounding; grafik perjalanan balance & sebaran balance akhir.
+- **Export CSV** tabel lot lewat share sheet Android.
+- Input tersimpan otomatis (SharedPreferences, padanan localStorage web).
 - Format angka fleksibel: `10.000.000`, `10,000,000`, `10jt`, `150rb`.
-
-## Kustomisasi
-
-- Daftar lot: konstanta `LOTS` di `script.js`.
-- Persentase kolom matriks: konstanta `PCTS`.
-- Sumber kurs: array `KURS_SOURCES`.
-- Warna: variabel CSS di bagian atas `style.css`.
+- Mode gelap/terang mengikuti sistem (palet sama dengan web).
 
 ## Catatan
 
-- Spread, komisi, dan slippage belum masuk hitungan lot (hanya di Monte Carlo lewat kolom biaya).
-- Hasil Monte Carlo hanya sebaik win rate yang diisi. Gunakan data dari catatan trading nyata atau backtest.
+- Spread, komisi, dan slippage belum masuk hitungan lot (hanya di Monte Carlo).
 - Alat bantu hitung, bukan saran keuangan. CFD berisiko tinggi.
