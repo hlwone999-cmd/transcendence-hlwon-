@@ -2,6 +2,10 @@
 // Builder sel untuk tabel rekomendasi & matriks — replika markup/klas CSS web
 // (pick = baris emas "◀", tight = pudar, me = kolom risk terisi, fit = kotak
 // bergaris emas, dead = pudar).
+//
+// PERBAIKAN PERFORMA: string & flag sel dihitung SEKALI per perubahan data
+// (specs), sedangkan widget Text/Container hanya dibuat untuk sel yang
+// terlihat (dipanggil lazy oleh StickyTable). Tabel 1000 baris jadi ringan.
 import 'package:flutter/material.dart';
 import 'engine.dart';
 import 'sticky_table.dart';
@@ -46,53 +50,83 @@ List<TblCol> mainCols(Palette p) => [
               right: true, bg: p.paper)),
     ];
 
-List<List<Widget>> mainCells(CalcResult c, Palette p) {
-  final out = <List<Widget>>[];
+/// Data ringan per baris tabel rekomendasi (tanpa widget — murah dibuat).
+class MainRowSpec {
+  final String lot;
+  final bool pick, tight;
+  final String sl, tp, r, t;
+  const MainRowSpec(
+      this.lot, this.pick, this.tight, this.sl, this.tp, this.r, this.t);
+}
+
+/// Hitung specs sekali per perubahan data (dipanggil via cache identitas).
+List<MainRowSpec> mainRowSpecs(CalcResult c) {
+  final out = <MainRowSpec>[];
   for (final r in c.rows) {
     final pick = c.pick >= 0 && identical(r, c.rows[c.pick]);
     final tight = r.sl < 10;
-    final bg = pick ? p.goldsoft : null;
-    final lotStyle = _t(14, FontWeight.w700, tight ? p.muted : p.ink);
-    final lot = RichText(
-      maxLines: 1,
-      text: TextSpan(children: [
-        TextSpan(text: lotTxt(r.lot), style: lotStyle),
-        if (pick)
-          TextSpan(
-              text: ' ◀', style: _t(14, FontWeight.w700, p.gold, tab: false)),
-      ]),
-    );
-    out.add([
-      _cell(lot, right: false, bg: bg),
-      _cell(
-          Opacity(
-              opacity: tight ? 0.45 : 1,
-              child: Text(one(r.sl), style: _t(14, FontWeight.w600, p.red))),
-          right: true,
-          bg: bg),
-      _cell(
-          Opacity(
-              opacity: tight ? 0.45 : 1,
-              child: Text(one(r.tp), style: _t(14, FontWeight.w600, p.good))),
-          right: true,
-          bg: bg),
-      _cell(
-          Opacity(
-              opacity: tight ? 0.45 : 1,
-              child:
-                  Text(groupInt(r.r), style: _t(14, FontWeight.w400, p.ink))),
-          right: true,
-          bg: bg),
-      _cell(
-          Opacity(
-              opacity: tight ? 0.45 : 1,
-              child:
-                  Text(groupInt(r.t), style: _t(14, FontWeight.w400, p.ink))),
-          right: true,
-          bg: bg),
-    ]);
+    out.add(MainRowSpec(lotTxt(r.lot), pick, tight, one(r.sl), one(r.tp),
+        groupInt(r.r), groupInt(r.t)));
   }
   return out;
+}
+
+/// Builder sel lazy untuk tabel rekomendasi — visual sama persis dengan
+/// mainCells() lama (rich text ◀, pudar bila tight, bg emas bila pick).
+CellBuilder mainCellBuilder(List<MainRowSpec> specs, Palette p) {
+  return (BuildContext context, int row, int col) {
+    final s = specs[row];
+    final bg = s.pick ? p.goldsoft : null;
+    switch (col) {
+      case 0:
+        final lotStyle = _t(14, FontWeight.w700, s.tight ? p.muted : p.ink);
+        return _cell(
+          RichText(
+            maxLines: 1,
+            text: TextSpan(children: [
+              TextSpan(text: s.lot, style: lotStyle),
+              if (s.pick)
+                TextSpan(
+                    text: ' ◀', style: _t(14, FontWeight.w700, p.gold, tab: false)),
+            ]),
+          ),
+          right: false,
+          bg: bg,
+        );
+      case 1:
+        return _cell(
+          Opacity(
+              opacity: s.tight ? 0.45 : 1,
+              child: Text(s.sl, style: _t(14, FontWeight.w600, p.red))),
+          right: true,
+          bg: bg,
+        );
+      case 2:
+        return _cell(
+          Opacity(
+              opacity: s.tight ? 0.45 : 1,
+              child: Text(s.tp, style: _t(14, FontWeight.w600, p.good))),
+          right: true,
+          bg: bg,
+        );
+      case 3:
+        return _cell(
+          Opacity(
+              opacity: s.tight ? 0.45 : 1,
+              child: Text(s.r, style: _t(14, FontWeight.w400, p.ink))),
+          right: true,
+          bg: bg,
+        );
+      default:
+        return _cell(
+          Opacity(
+              opacity: s.tight ? 0.45 : 1,
+              child: Text(s.t, style: _t(14, FontWeight.w400, p.ink))),
+          right: true,
+          bg: bg,
+        );
+    }
+  };
 }
 
 // ---------------- matriks SL pips per lot × % risiko ----------------
@@ -124,35 +158,59 @@ List<TblCol> matrixCols(MatrixResult m, double bal, Palette p) {
   return cols;
 }
 
-List<List<Widget>> matrixCells(MatrixResult m, Palette p) {
-  final out = <List<Widget>>[];
+/// Data ringan per sel matriks.
+class MatrixCellSpec {
+  final String text;
+  final bool fit, dead, me;
+  const MatrixCellSpec(this.text, this.fit, this.dead, this.me);
+}
+
+class MatrixRowSpec {
+  final String lot;
+  final List<MatrixCellSpec> cells;
+  const MatrixRowSpec(this.lot, this.cells);
+}
+
+/// Hitung specs matriks sekali per perubahan data.
+List<MatrixRowSpec> matrixRowSpecs(MatrixResult m) {
+  final out = <MatrixRowSpec>[];
   for (int i = 0; i < kLots.length; i++) {
-    final row = <Widget>[
-      _cell(Text(lotTxt(kLots[i]), style: _t(14, FontWeight.w700, p.ink)),
-          right: false),
-    ];
+    final cells = <MatrixCellSpec>[];
     for (int j = 0; j < m.pcts.length; j++) {
-      final me = m.pcts[j] == m.rp;
-      final fit = m.fitIdx[j] == i;
-      final dead = m.pips[i][j] < 10;
-      final txt = Text(one(m.pips[i][j]),
-          style: _t(14, fit ? FontWeight.w700 : FontWeight.w400,
-              fit ? p.gold : (dead ? p.muted : p.ink)));
-      row.add(_cell(
-        fit
-            ? Container(
-                margin: const EdgeInsets.all(2),
-                alignment: Alignment.centerRight,
-                padding: const EdgeInsets.only(right: 8),
-                decoration: BoxDecoration(
-                    border: Border.all(width: 2, color: p.gold)),
-                child: txt)
-            : Opacity(opacity: dead ? 0.45 : 1, child: txt),
-        right: true,
-        bg: me ? p.goldsoft : null,
-      ));
+      cells.add(MatrixCellSpec(one(m.pips[i][j]), m.fitIdx[j] == i,
+          m.pips[i][j] < 10, m.pcts[j] == m.rp));
     }
-    out.add(row);
+    out.add(MatrixRowSpec(lotTxt(kLots[i]), cells));
   }
   return out;
+}
+
+/// Builder sel lazy matriks — visual sama persis dengan matrixCells() lama.
+CellBuilder matrixCellBuilder(List<MatrixRowSpec> specs, Palette p) {
+  return (BuildContext context, int row, int col) {
+    final s = specs[row];
+    if (col == 0) {
+      return _cell(Text(s.lot, style: _t(14, FontWeight.w700, p.ink)),
+          right: false);
+    }
+    final c = s.cells[col - 1];
+    final me = c.me;
+    final bg = me ? p.goldsoft : null;
+    final txt = Text(c.text,
+        style: _t(14, c.fit ? FontWeight.w700 : FontWeight.w400,
+            c.fit ? p.gold : (c.dead ? p.muted : p.ink)));
+    return _cell(
+      c.fit
+          ? Container(
+              margin: const EdgeInsets.all(2),
+              alignment: Alignment.centerRight,
+              padding: const EdgeInsets.only(right: 8),
+              decoration: BoxDecoration(
+                  border: Border.all(width: 2, color: p.gold)),
+              child: txt)
+          : Opacity(opacity: c.dead ? 0.45 : 1, child: txt),
+      right: true,
+      bg: bg,
+    );
+  };
 }

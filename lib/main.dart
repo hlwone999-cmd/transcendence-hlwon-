@@ -392,6 +392,24 @@ class _HomeScreenState extends State<HomeScreen> {
     scheduleMC();
   }
 
+  // Cache specs sel: dibangun sekali per objek hasil hitung (identitas),
+  // bukan setiap build — tabel 1000 baris jadi murah saat setState.
+  List<MainRowSpec> _mainSpecsCache = const [];
+  CalcResult? _mainSpecsSrc;
+  List<MainRowSpec> _mainSpecs(CalcResult c) {
+    if (identical(_mainSpecsSrc, c)) return _mainSpecsCache;
+    _mainSpecsSrc = c;
+    return _mainSpecsCache = mainRowSpecs(c);
+  }
+
+  List<MatrixRowSpec> _matrixSpecsCache = const [];
+  MatrixResult? _matrixSpecsSrc;
+  List<MatrixRowSpec> _matrixSpecs(MatrixResult m) {
+    if (identical(_matrixSpecsSrc, m)) return _matrixSpecsCache;
+    _matrixSpecsSrc = m;
+    return _matrixSpecsCache = matrixRowSpecs(m);
+  }
+
   // ---------------- monte carlo (debounce 250ms + isolate) -----------------
 
   void scheduleMC() {
@@ -400,61 +418,86 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _runMcNow() async {
-    final bal = numMoney(balance.text);
-    final rp = numPlain(risk.text);
-    final rr = numPlain(ratio.text);
-    final w = numPlain(wr.text);
-    final sl = numPlain(plan.text);
-    final cst = numPlain(cost.text);
-    final dd = numPlain(ddLim.text);
-    if (![bal, rp, rr, w].every((v) => v != null && v.isFinite && v > 0) ||
-        dd == null ||
-        !dd.isFinite) {
+    try {
+      final bal = numMoney(balance.text);
+      final rp = numPlain(risk.text);
+      final rr = numPlain(ratio.text);
+      final w = numPlain(wr.text);
+      final sl = numPlain(plan.text);
+      final cst = numPlain(cost.text);
+      final dd = numPlain(ddLim.text);
+      if (![bal, rp, rr, w].every((v) => v != null && v.isFinite && v > 0) ||
+          dd == null ||
+          !dd.isFinite) {
+        if (!mounted) return;
+        // Sama seperti web: MC=null, verdict "Lengkapi input di atas."
+        setState(() {
+          mc = null;
+          mcVerdictNum = '';
+          mcSub = '';
+          mcStats = [];
+        });
+        return;
+      }
+      final p = McParams(
+          bal!,
+          rp! / 100,
+          rr!,
+          (sl != null && sl.isFinite && sl > 0) ? sl : 0,
+          w! / 100,
+          cst != null && cst.isFinite && cst > 0 ? cst : 0,
+          dd / 100,
+          (int.tryParse('${numPlain(nTr.text)?.round() ?? 100}') ?? 100)
+              .clamp(1, 2000)
+              .toInt(),
+          (int.tryParse('${numPlain(nSim.text)?.round() ?? 5000}') ?? 5000)
+              .clamp(200, 20000)
+              .toInt(),
+          comp);
+      McResult res;
+      try {
+        res = await Isolate.run(() => runMc(p));
+      } catch (_) {
+        // Cadangan: sebagian device/ROM gagal spawn isolate — hitung langsung
+        // di isolate utama supaya simulasi tetap bisa dijalankan.
+        res = runMc(p);
+      }
       if (!mounted) return;
-      setState(() => mcVerdictNum = '');
-      return;
+      final med = pctl(res.ends, .5);
+      final pPr = res.pProfit;
+      setState(() {
+        mc = res;
+        mcVerdictNum = '${(pPr * 100).round()}%';
+        mcVerdictGood = pPr >= .5;
+        mcSub = 'Ekspektasi ${res.exp >= 0 ? '+' : ''}${res.exp.toStringAsFixed(2)}R per trade'
+            '${res.cR != 0 ? ' (sudah dipotong biaya ${one(cost.text != '' ? (numPlain(cost.text) ?? 0) : 0)} pips = ${res.cR.toStringAsFixed(2)}R)' : ''}'
+            '. Win rate impas: ${(res.beWr * 100).toStringAsFixed(1)}%.'
+            '${res.exp < 0 ? ' Dengan angka ini sistemnya rugi dalam jangka panjang.' : ''}';
+        mcStats = [
+          (idr(med), 'Median balance akhir'),
+          ('${med >= res.bal ? '+' : ''}${((med / res.bal - 1) * 100).toStringAsFixed(1)}%',
+              'Median return'),
+          (idr(pctl(res.ends, .05)), 'Skenario buruk (5%)'),
+          (idr(pctl(res.ends, .95)), 'Skenario bagus (95%)'),
+          ('${(pctl(res.mdd, .5) * 100).toStringAsFixed(1)}%', 'Median max drawdown'),
+          ('${(pctl(res.mdd, .95) * 100).toStringAsFixed(1)}%', 'Drawdown terburuk (95%)'),
+          ('${(res.hitDD / res.s * 100).round()}%',
+              'Peluang drawdown ≥ ${(res.dd * 100).round()}%'),
+          ('${pctl(res.streak, .5).round()}×',
+              'Median loss beruntun terpanjang (95%: ${pctl(res.streak, .95).round()}×)'),
+          if (res.blown > 0)
+            ('${(res.blown / res.s * 100).round()}%', 'Akun habis'),
+        ];
+      });
+    } catch (e) {
+      // Semua kegagalan tak terduga ditampilkan — bukan diam tanpa hasil.
+      if (!mounted) return;
+      setState(() {
+        mcVerdictNum = '';
+        mcSub = 'Simulasi gagal dijalankan (${e.runtimeType}). '
+            'Coba kecilkan jumlah simulasi lalu ubah salah satu input untuk mengulang.';
+      });
     }
-    final p = McParams(
-        bal!,
-        rp! / 100,
-        rr!,
-        (sl != null && sl.isFinite && sl > 0) ? sl : 0,
-        w! / 100,
-        cst != null && cst.isFinite && cst > 0 ? cst : 0,
-        dd / 100,
-        (int.tryParse('${numPlain(nTr.text)?.round() ?? 100}') ?? 100)
-            .clamp(1, 2000),
-        (int.tryParse('${numPlain(nSim.text)?.round() ?? 5000}') ?? 5000)
-            .clamp(200, 20000),
-        comp);
-    final res = await Isolate.run(() => runMc(p));
-    if (!mounted) return;
-    final med = pctl(res.ends, .5);
-    final pPr = res.pProfit;
-    setState(() {
-      mc = res;
-      mcVerdictNum = '${(pPr * 100).round()}%';
-      mcVerdictGood = pPr >= .5;
-      mcSub = 'Ekspektasi ${res.exp >= 0 ? '+' : ''}${res.exp.toStringAsFixed(2)}R per trade'
-          '${res.cR != 0 ? ' (sudah dipotong biaya ${one(cost.text != '' ? (numPlain(cost.text) ?? 0) : 0)} pips = ${res.cR.toStringAsFixed(2)}R)' : ''}'
-          '. Win rate impas: ${(res.beWr * 100).toStringAsFixed(1)}%.'
-          '${res.exp < 0 ? ' Dengan angka ini sistemnya rugi dalam jangka panjang.' : ''}';
-      mcStats = [
-        (idr(med), 'Median balance akhir'),
-        ('${med >= res.bal ? '+' : ''}${((med / res.bal - 1) * 100).toStringAsFixed(1)}%',
-            'Median return'),
-        (idr(pctl(res.ends, .05)), 'Skenario buruk (5%)'),
-        (idr(pctl(res.ends, .95)), 'Skenario bagus (95%)'),
-        ('${(pctl(res.mdd, .5) * 100).toStringAsFixed(1)}%', 'Median max drawdown'),
-        ('${(pctl(res.mdd, .95) * 100).toStringAsFixed(1)}%', 'Drawdown terburuk (95%)'),
-        ('${(res.hitDD / res.s * 100).round()}%',
-            'Peluang drawdown ≥ ${(res.dd * 100).round()}%'),
-        ('${pctl(res.streak, .5).round()}×',
-            'Median loss beruntun terpanjang (95%: ${pctl(res.streak, .95).round()}×)'),
-        if (res.blown > 0)
-          ('${(res.blown / res.s * 100).round()}%', 'Akun habis'),
-      ];
-    });
   }
 
   // ---------------- export CSV ---------------------------------------------
@@ -674,6 +717,8 @@ class _HomeScreenState extends State<HomeScreen> {
     ]);
 
     // ---- tabel utama ----
+    // Specs sel di-cache per objek data (identitas) supaya setState tetap
+    // ringan; widget sel hanya dibuat untuk baris yang terlihat (lazy).
     final mainTable = tCalc == null || !tCalc!.ok
         ? Container(
             height: 42,
@@ -687,8 +732,10 @@ class _HomeScreenState extends State<HomeScreen> {
                 'Lengkapi balance, kurs, risk, dan rasio dengan angka lebih dari nol.',
                 style: TextStyle(fontFamily: kBodyFont, fontSize: 14, color: p.muted)))
         : StickyTable(
+            key: const Key('mainTable'),
             cols: mainCols(p),
-            cells: mainCells(tCalc!, p),
+            rowCount: tCalc!.rows.length,
+            cellBuilder: mainCellBuilder(_mainSpecs(tCalc!), p),
             pickRow: tCalc!.pick,
             maxHeight: mh,
             borderColor: p.line,
@@ -698,8 +745,10 @@ class _HomeScreenState extends State<HomeScreen> {
     final matrixTable = (tMatrix == null)
         ? const SizedBox.shrink()
         : StickyTable(
+            key: const Key('matrixTable'),
             cols: matrixCols(tMatrix!, b0 ?? 0, p),
-            cells: matrixCells(tMatrix!, p),
+            rowCount: kLots.length,
+            cellBuilder: matrixCellBuilder(_matrixSpecs(tMatrix!), p),
             pickRow: null,
             maxHeight: mh,
             borderColor: p.line,
