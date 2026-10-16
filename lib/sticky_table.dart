@@ -93,10 +93,14 @@ class _StickyTableState extends State<StickyTable> {
           : widget.maxHeight - widget.headerHeight;
 
       // ---- header ----
+      // Catatan: Row di sini TIDAK boleh pakai crossAxisAlignment.stretch —
+      // di dalam SingleChildScrollView (tinggi tak terbatas) stretch
+      // menghasilkan constraint h=Infinity dan menggagalkan seluruh frame.
+      // Tinggi sel sudah ditentukan eksplisit lewat _cellBox(headerHeight).
       final headerRest = SizedBox(
         width: restW,
+        height: widget.headerHeight,
         child: Row(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             for (int j = 1; j < cols.length; j++)
               _cellBox(cols[j].header, effW[j - 1], widget.headerHeight, null),

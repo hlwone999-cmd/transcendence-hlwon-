@@ -846,6 +846,7 @@ class _HomeScreenState extends State<HomeScreen> {
         DropdownButtonFormField<int?>(
           initialValue: ruleSel ?? -1,
           isDense: true,
+          isExpanded: true, // teks panjang: ellipsis, bukan overflow
           dropdownColor: p.panel,
           style: TextStyle(
               fontFamily: kBodyFont,
