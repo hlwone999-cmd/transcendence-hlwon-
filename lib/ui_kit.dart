@@ -453,7 +453,7 @@ class LabeledField extends StatelessWidget {
       children: [
         Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
           Text(label, style: labelSm(context)),
-          if (labelTrailing != null) labelTrailing!,
+          ?labelTrailing,
         ]),
         const SizedBox(height: 6),
         Container(
@@ -492,7 +492,7 @@ class LabeledField extends StatelessWidget {
                 cursorColor: p.goldSolid,
               ),
             ),
-            if (suffix != null) suffix!,
+            ?suffix,
           ]),
         ),
         if (hint != null) ...[
@@ -523,7 +523,7 @@ class SectionHead extends StatelessWidget {
         child: Text(text,
             style: txt(context, 15, w: FontWeight.w600)),
       ),
-      if (trailing != null) trailing!,
+      ?trailing,
     ]);
   }
 }
