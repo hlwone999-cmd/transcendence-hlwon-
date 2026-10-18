@@ -32,13 +32,17 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     await tester.pumpAndSettle();
 
+    // UI baru: tabel utama ada di tab "Matrix Risiko" — aktifkan dulu.
+    await tester.tap(find.text('Matrix Risiko').first);
+    await tester.pumpAndSettle();
+
     final tableFinder = find.byKey(const Key('mainTable'));
     await tester.ensureVisible(tableFinder);
     await tester.pumpAndSettle();
 
-    // Header "SL pips" dan sel body baris pertama (SL 0.01 lot = "111,5"
+    // Header "SL (PIPS)" dan sel body baris pertama (SL 0.01 lot = "111,5"
     // dengan input default: balance 10jt, risk 2%, kurs 17.934).
-    final headerFinder = find.text('SL pips');
+    final headerFinder = find.text('SL (PIPS)');
     final bodyCellFinder = find.descendant(
         of: tableFinder, matching: find.text('111,5'));
     expect(headerFinder, findsOneWidget);
@@ -79,11 +83,15 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     await tester.pumpAndSettle();
 
+    // UI baru: aktifkan tab "Matrix Risiko" dulu agar tabel bisa di-hit-test.
+    await tester.tap(find.text('Matrix Risiko').first);
+    await tester.pumpAndSettle();
+
     final tableFinder = find.byKey(const Key('mainTable'));
     await tester.ensureVisible(tableFinder);
     await tester.pumpAndSettle();
 
-    final headerFinder = find.text('SL pips');
+    final headerFinder = find.text('SL (PIPS)');
     final bodyCellFinder = find.descendant(
         of: tableFinder, matching: find.text('111,5'));
 

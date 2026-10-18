@@ -30,8 +30,19 @@ void main() {
 
     await tester.pumpWidget(const TranscendenceApp());
     await tester.pump(); // biarkan _restore() selesai
-    // Sebelum MC selesai: verdict kosong sesuai web ("Lengkapi input di atas.")
-    expect(find.text('Lengkapi input di atas.'), findsOneWidget);
+
+    // Sebelum MC selesai: hero menampilkan placeholder sesuai desain baru.
+    // Kartu MC ada di tab "Simulasi" yang masih offstage (IndexedStack) —
+    // pakai skipOffstage:false; JANGAN pumpAndSettle dulu karena timer MC
+    // (250ms) bisa terpicu dan fallback isolate sinkron menyelesaikan MC.
+    expect(
+        find.text('Lengkapi parameter di bawah untuk menjalankan simulasi.',
+            skipOffstage: false),
+        findsOneWidget);
+
+    // UI baru: aktifkan tab "Simulasi" agar kartu terlihat & hit-testable.
+    await tester.tap(find.text('Simulasi'));
+    await tester.pump();
 
     // Jalankan timer debounce MC (250ms) — timer fake async.
     await tester.pump(const Duration(milliseconds: 300));
@@ -42,16 +53,18 @@ void main() {
     });
     await tester.pump();
 
-    // Verdict hasil harus muncul (bukan lagi "Lengkapi input di atas.")
-    expect(find.text('Lengkapi input di atas.'), findsNothing,
+    // Verdict hasil harus muncul (bukan lagi placeholder)
+    expect(
+        find.text('Lengkapi parameter di bawah untuk menjalankan simulasi.'),
+        findsNothing,
         reason: 'MC dengan input default valid harus menghasilkan verdict');
-    expect(find.textContaining('Peluang profit setelah 100 trade'),
-        findsOneWidget);
+    expect(find.textContaining('Peluang Profit ('), findsOneWidget);
 
-    // Statistik MC harus terisi
-    expect(find.text('Median balance akhir'), findsOneWidget);
-    expect(find.text('Skenario buruk (5%)'), findsOneWidget);
-    expect(find.text('Skenario bagus (95%)'), findsOneWidget);
+    // Statistik MC harus terisi (label tile gaya Obsidian Precision;
+    // "Median Saldo" muncul 2x: tile + legenda fan chart)
+    expect(find.text('Median Saldo'), findsWidgets);
+    expect(find.text('Skenario Buruk (5%)'), findsOneWidget);
+    expect(find.text('Skenario Bagus (95%)'), findsOneWidget);
 
     // Dua chart harus dirender
     expect(find.byType(FanChart), findsOneWidget);

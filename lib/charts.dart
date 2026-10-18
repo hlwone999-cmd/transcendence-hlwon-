@@ -35,7 +35,7 @@ class ChartColors {
 }
 
 const TextStyle _lbl = TextStyle(
-    fontFamily: 'Instrument Sans', fontSize: 11, height: 1.0, color: Color(0x00000000));
+    fontFamily: 'JetBrains Mono', fontSize: 10, height: 1.0, color: Color(0x00000000));
 
 void _text(Canvas canvas, String s, Offset pos, Color color,
     {TextAlign align = TextAlign.left}) {
@@ -45,8 +45,8 @@ void _text(Canvas canvas, String s, Offset pos, Color color,
           style: _lbl.copyWith(
               color: color,
               // tulis ulang style agar family & size terjaga
-              fontFamily: 'Instrument Sans',
-              fontSize: 11,
+              fontFamily: 'JetBrains Mono',
+              fontSize: 10,
               height: 1.0)),
       textDirection: TextDirection.ltr,
       textAlign: align)
@@ -128,7 +128,7 @@ class _FanPainter extends CustomPainter {
     // garis balance awal
     canvas.drawLine(Offset(L, Y(bal)), Offset(w - R, Y(bal)),
         Paint()..strokeWidth = 1..color = c.ink);
-    // batas drawdown (garis putus-putus merah)
+    // batas drawdown (garis putus-putus merah) + label kecil
     _dashedLine(
         canvas,
         Offset(L, Y(floor)),
@@ -137,6 +137,7 @@ class _FanPainter extends CustomPainter {
         Paint()
           ..strokeWidth = 1
           ..color = c.red);
+    _text(canvas, 'BATAS MAKS DD (${(dd * 100).round()}%)', Offset(L + 2, Y(floor) + 2), c.red);
     // median (emas)
     final med = Path()..moveTo(X(0), Y(mc.bands[0][2]));
     for (int t = 1; t <= N; t++) {

@@ -12,7 +12,9 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets('layout mobile (<880px) harus merender konten', (tester) async {
-    SharedPreferences.setMockInitialValues({});
+    // kurs mode fixed supaya test deterministik (tidak ada fetchLive async
+    // yang selesai setelah body test — penyebab error zona tak tertangkap).
+    SharedPreferences.setMockInitialValues({'lotxau_kursmode': 'fixed'});
     tester.view.physicalSize = const Size(412, 915);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
@@ -39,11 +41,16 @@ void main() {
       debugPrint(e.informationCollector?.call().join('\n') ?? '(tanpa info)');
     }
 
-    // konten kunci harus ada di tree
-    expect(find.text('Kalkulator Lot XAUUSD'), findsOneWidget,
-        reason: 'Header harus terlihat di layout mobile');
-    expect(find.text('Rules Recovery'), findsOneWidget);
-    expect(find.text('Input'), findsOneWidget);
+    // konten kunci harus ada di tree (UI Obsidian Precision)
+    expect(find.text('Transcendence'), findsOneWidget,
+        reason: 'Top bar harus terlihat di layout mobile');
+    expect(find.text('TRADING PLAN STAGE'), findsOneWidget);
+    expect(find.text('RECOMMENDED LOT SIZE'), findsOneWidget);
+    // Tab non-aktif di IndexedStack dianggap offstage oleh finder default —
+    // pakai skipOffstage:false untuk memverifikasi seluruh tab ter-render.
+    expect(find.text('Matrix Setup & SL Pips', skipOffstage: false),
+        findsOneWidget,
+        reason: 'Tab Matrix ada di IndexedStack walaupun tidak aktif');
     expect(structural, isEmpty,
         reason: 'Layout tidak boleh melempar exception struktural');
   });

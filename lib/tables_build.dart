@@ -1,11 +1,11 @@
-// Kalkulator Lot XAUUSD (IDR) — tables_build.dart
-// Builder sel untuk tabel rekomendasi & matriks — replika markup/klas CSS web
-// (pick = baris emas "◀", tight = pudar, me = kolom risk terisi, fit = kotak
-// bergaris emas, dead = pudar).
+// Transcendence — tables_build.dart
+// Builder sel untuk tabel rekomendasi & matriks — gaya "Obsidian Precision":
+// angka monospace rata kanan, hairline divider, SL = salmon, TP = mint,
+// baris pick = tint emas + badge BEST, baris tight = redup.
 //
-// PERBAIKAN PERFORMA: string & flag sel dihitung SEKALI per perubahan data
-// (specs), sedangkan widget Text/Container hanya dibuat untuk sel yang
-// terlihat (dipanggil lazy oleh StickyTable). Tabel 1000 baris jadi ringan.
+// PERFORMA (tetap seperti sebelumnya): string & flag sel dihitung SEKALI per
+// perubahan data (specs), widget hanya dibuat untuk baris yang terlihat
+// (dipanggil lazy oleh StickyTable).
 import 'package:flutter/material.dart';
 import 'engine.dart';
 import 'sticky_table.dart';
@@ -23,31 +23,41 @@ Widget _cell(Widget child,
   );
 }
 
-TextStyle _t(double size, FontWeight w, Color c, {bool tab = true}) =>
+TextStyle _mono(double size, FontWeight w, Color c, {bool tab = true}) =>
     TextStyle(
-        fontFamily: kBodyFont,
+        fontFamily: kMonoFont,
         fontSize: size,
         fontWeight: w,
+        height: 1.2,
+        letterSpacing: 0.2,
         color: c,
         fontFeatures: tab ? tabular : null);
+
+TextStyle _lbl(double size, FontWeight w, Color c) => TextStyle(
+    fontFamily: kBodyFont,
+    fontSize: size,
+    fontWeight: w,
+    letterSpacing: 0.8,
+    color: c);
 
 // ---------------- tabel rekomendasi (0.01 – 10.00) ----------------
 
 List<TblCol> mainCols(Palette p) => [
-      TblCol(64, _cell(Text('Lot', style: _t(12.5, FontWeight.w600, p.muted)),
-          right: false, bg: p.paper)),
-      TblCol(84,
-          _cell(Text('SL pips', style: _t(12.5, FontWeight.w600, p.muted)),
-              right: true, bg: p.paper)),
-      TblCol(84,
-          _cell(Text('TP pips', style: _t(12.5, FontWeight.w600, p.muted)),
-              right: true, bg: p.paper)),
-      TblCol(132,
-          _cell(Text('Risk (Rp)', style: _t(12.5, FontWeight.w600, p.muted)),
-              right: true, bg: p.paper)),
-      TblCol(132,
-          _cell(Text('Target (Rp)', style: _t(12.5, FontWeight.w600, p.muted)),
-              right: true, bg: p.paper)),
+      TblCol(72,
+          _cell(Text('LOT SIZE', style: _lbl(10.5, FontWeight.w500, p.muted)),
+              right: false, bg: p.surface1)),
+      TblCol(86,
+          _cell(Text('SL (PIPS)', style: _lbl(10.5, FontWeight.w500, p.muted)),
+              right: true, bg: p.surface1)),
+      TblCol(86,
+          _cell(Text('TP (PIPS)', style: _lbl(10.5, FontWeight.w500, p.muted)),
+              right: true, bg: p.surface1)),
+      TblCol(126,
+          _cell(Text('RISIKO (RP)', style: _lbl(10.5, FontWeight.w500, p.muted)),
+              right: true, bg: p.surface1)),
+      TblCol(126,
+          _cell(Text('TARGET (RP)', style: _lbl(10.5, FontWeight.w500, p.muted)),
+              right: true, bg: p.surface1)),
     ];
 
 /// Data ringan per baris tabel rekomendasi (tanpa widget — murah dibuat).
@@ -71,25 +81,50 @@ List<MainRowSpec> mainRowSpecs(CalcResult c) {
   return out;
 }
 
-/// Builder sel lazy untuk tabel rekomendasi — visual sama persis dengan
-/// mainCells() lama (rich text ◀, pudar bila tight, bg emas bila pick).
+/// Builder sel lazy untuk tabel rekomendasi.
 CellBuilder mainCellBuilder(List<MainRowSpec> specs, Palette p) {
   return (BuildContext context, int row, int col) {
     final s = specs[row];
     final bg = s.pick ? p.goldsoft : null;
     switch (col) {
       case 0:
-        final lotStyle = _t(14, FontWeight.w700, s.tight ? p.muted : p.ink);
         return _cell(
-          RichText(
-            maxLines: 1,
-            text: TextSpan(children: [
-              TextSpan(text: s.lot, style: lotStyle),
-              if (s.pick)
-                TextSpan(
-                    text: ' ◀', style: _t(14, FontWeight.w700, p.gold, tab: false)),
-            ]),
-          ),
+          Row(children: [
+            if (s.pick)
+              Container(
+                width: 6,
+                height: 6,
+                margin: const EdgeInsets.only(right: 6),
+                decoration:
+                    BoxDecoration(shape: BoxShape.circle, color: p.gold),
+              )
+            else
+              const SizedBox(width: 12),
+            Flexible(
+              child: Text(s.lot,
+                  maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: _mono(13, FontWeight.w600,
+                      s.tight ? p.muted : (s.pick ? p.gold : p.ink))),
+            ),
+            if (s.pick) ...[
+              const SizedBox(width: 6),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                decoration: BoxDecoration(
+                  color: p.goldSolid,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text('BEST',
+                    style: TextStyle(
+                        fontFamily: kBodyFont,
+                        fontSize: 8.5,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.6,
+                        color: p.onGold)),
+              ),
+            ],
+          ]),
           right: false,
           bg: bg,
         );
@@ -97,7 +132,8 @@ CellBuilder mainCellBuilder(List<MainRowSpec> specs, Palette p) {
         return _cell(
           Opacity(
               opacity: s.tight ? 0.45 : 1,
-              child: Text(s.sl, style: _t(14, FontWeight.w600, p.red))),
+              child: Text(s.sl,
+                  style: _mono(13, FontWeight.w500, p.red))),
           right: true,
           bg: bg,
         );
@@ -105,7 +141,8 @@ CellBuilder mainCellBuilder(List<MainRowSpec> specs, Palette p) {
         return _cell(
           Opacity(
               opacity: s.tight ? 0.45 : 1,
-              child: Text(s.tp, style: _t(14, FontWeight.w600, p.good))),
+              child: Text(s.tp,
+                  style: _mono(13, FontWeight.w500, p.mint))),
           right: true,
           bg: bg,
         );
@@ -113,7 +150,7 @@ CellBuilder mainCellBuilder(List<MainRowSpec> specs, Palette p) {
         return _cell(
           Opacity(
               opacity: s.tight ? 0.45 : 1,
-              child: Text(s.r, style: _t(14, FontWeight.w400, p.ink))),
+              child: Text(s.r, style: _mono(13, FontWeight.w400, p.ink))),
           right: true,
           bg: bg,
         );
@@ -121,7 +158,7 @@ CellBuilder mainCellBuilder(List<MainRowSpec> specs, Palette p) {
         return _cell(
           Opacity(
               opacity: s.tight ? 0.45 : 1,
-              child: Text(s.t, style: _t(14, FontWeight.w400, p.ink))),
+              child: Text(s.t, style: _mono(13, FontWeight.w400, p.muted))),
           right: true,
           bg: bg,
         );
@@ -133,9 +170,9 @@ CellBuilder mainCellBuilder(List<MainRowSpec> specs, Palette p) {
 
 List<TblCol> matrixCols(MatrixResult m, double bal, Palette p) {
   final cols = <TblCol>[
-    TblCol(64,
-        _cell(Text('Lot', style: _t(12.5, FontWeight.w600, p.muted)),
-            right: false, bg: p.paper)),
+    TblCol(72,
+        _cell(Text('LOT SIZE', style: _lbl(10.5, FontWeight.w500, p.muted)),
+            right: false, bg: p.surface1)),
   ];
   for (final pc in m.pcts) {
     final me = pc == m.rp;
@@ -147,13 +184,14 @@ List<TblCol> matrixCols(MatrixResult m, double bal, Palette p) {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text('${jsNum(pc).replaceFirst('.', ',')}%',
-                    style: _t(12.5, FontWeight.w600, p.muted)),
+                    style: _mono(11, FontWeight.w600,
+                        me ? p.gold : p.muted)),
                 Text(idr(bal * pc / 100),
-                    style: _t(11, FontWeight.w500, p.muted)),
+                    style: _lbl(9, FontWeight.w400, p.dim)),
               ],
             ),
             right: true,
-            bg: me ? p.goldsoft : p.paper)));
+            bg: me ? p.goldsoft : p.surface1)));
   }
   return cols;
 }
@@ -185,20 +223,22 @@ List<MatrixRowSpec> matrixRowSpecs(MatrixResult m) {
   return out;
 }
 
-/// Builder sel lazy matriks — visual sama persis dengan matrixCells() lama.
+/// Builder sel lazy matriks.
 CellBuilder matrixCellBuilder(List<MatrixRowSpec> specs, Palette p) {
   return (BuildContext context, int row, int col) {
     final s = specs[row];
     if (col == 0) {
-      return _cell(Text(s.lot, style: _t(14, FontWeight.w700, p.ink)),
+      return _cell(Text(s.lot, style: _mono(13, FontWeight.w600, p.ink)),
           right: false);
     }
     final c = s.cells[col - 1];
     final me = c.me;
     final bg = me ? p.goldsoft : null;
     final txt = Text(c.text,
-        style: _t(14, c.fit ? FontWeight.w700 : FontWeight.w400,
-            c.fit ? p.gold : (c.dead ? p.muted : p.ink)));
+        style: _mono(
+            13,
+            c.fit ? FontWeight.w700 : FontWeight.w400,
+            c.fit ? p.gold : (c.dead ? p.dim : p.ink)));
     return _cell(
       c.fit
           ? Container(
@@ -206,7 +246,8 @@ CellBuilder matrixCellBuilder(List<MatrixRowSpec> specs, Palette p) {
               alignment: Alignment.centerRight,
               padding: const EdgeInsets.only(right: 8),
               decoration: BoxDecoration(
-                  border: Border.all(width: 2, color: p.gold)),
+                  border: Border.all(width: 2, color: p.goldSolid),
+                  borderRadius: BorderRadius.circular(4)),
               child: txt)
           : Opacity(opacity: c.dead ? 0.45 : 1, child: txt),
       right: true,
