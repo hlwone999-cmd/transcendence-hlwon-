@@ -333,7 +333,7 @@ class _HomeScreenState extends State<HomeScreen> {
     riAft = idr(d.after);
     riAftL = 'Setelah SL 10% (−${idr(d.sl)})';
     riX = '$xpct%';
-    riXL = 'X recovery: +${idr(d.diff)} → ${d.prev != null ? 'Rules ${d.n - 1}' : 'balance awal'}';
+    riXL = 'X buangan: +${idr(d.diff)} → ${d.prev != null ? 'Rules ${d.n - 1}' : 'balance awal'}';
     if (ruleMode == 'rec') {
       recBtnText = '← Kembali ke mode rules (10% · 1:2)';
       riNote =
@@ -786,7 +786,7 @@ class _HomeScreenState extends State<HomeScreen> {
             _miniCard(p,
                 icon: Icons.restart_alt,
                 iconColor: p.gold,
-                label: 'RECOVERY',
+                label: 'BUANGAN',
                 value: d != null ? riX : '–',
                 sub: d != null ? '+${shortIdr(d.diff.toDouble())}' : 'Pilih Rule',
                 valueColor: p.gold),
