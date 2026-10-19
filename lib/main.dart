@@ -21,6 +21,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'charts.dart';
 import 'engine.dart';
+import 'journal.dart';
 import 'montecarlo.dart';
 import 'sticky_table.dart';
 import 'tables_build.dart';
@@ -603,6 +604,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _calcTab(p, mh), // 0 Kalkulator
       _matrixTab(p, mh), // 1 Matrix Risiko
       _simTab(p, mh), // 2 Simulasi
+      const JournalPage(), // 3 Jurnal (fitur baru)
     ];
 
     return Scaffold(
@@ -630,6 +632,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   _navItem(p, 0, Icons.calculate_outlined, 'Kalkulator'),
                   _navItem(p, 1, Icons.grid_view_outlined, 'Matrix Risiko'),
                   _navItem(p, 2, Icons.trending_up, 'Simulasi'),
+                  _navItem(p, 3, Icons.menu_book_outlined, 'Jurnal'),
                 ],
               ),
             ),
@@ -666,13 +669,14 @@ class _HomeScreenState extends State<HomeScreen> {
   IconData _filled(IconData i) {
     if (i == Icons.calculate_outlined) return Icons.calculate;
     if (i == Icons.grid_view_outlined) return Icons.grid_view;
+    if (i == Icons.menu_book_outlined) return Icons.menu_book;
     return i;
   }
 
   // ---- top bar ----
 
   Widget _topBar(Palette p) {
-    final tabNames = const ['Kalkulator', 'Matrix Risiko', 'Simulasi'];
+    final tabNames = const ['Kalkulator', 'Matrix Risiko', 'Simulasi', 'Jurnal'];
     return Container(
       height: 64,
       padding: const EdgeInsets.symmetric(horizontal: 16),

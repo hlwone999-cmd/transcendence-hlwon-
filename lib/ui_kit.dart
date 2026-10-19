@@ -246,13 +246,16 @@ class BadgePill extends StatelessWidget {
           Icon(icon, size: 12, color: color),
           const SizedBox(width: 4),
         ],
-        Text(text,
-            style: TextStyle(
-                fontFamily: kBodyFont,
-                fontSize: 10,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.8,
-                color: color)),
+        Flexible(
+          child: Text(text,
+              maxLines: 1, overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  fontFamily: kBodyFont,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.8,
+                  color: color)),
+        ),
       ]),
     );
   }
@@ -330,13 +333,18 @@ class GhostButton extends StatelessWidget {
               Icon(icon, size: 15, color: textColor ?? p.gold),
               const SizedBox(width: 6),
             ],
-            Text(text,
-                style: TextStyle(
-                    fontFamily: kMonoFont,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    letterSpacing: 0.4,
-                    color: textColor ?? p.ink)),
+            // Flexible: teks panjang (tanggal panjang, label dinamis) tidak
+            // boleh bikin Row overflow di layar sempit.
+            Flexible(
+              child: Text(text,
+                  maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      fontFamily: kMonoFont,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                      letterSpacing: 0.4,
+                      color: textColor ?? p.ink)),
+            ),
           ]),
         ),
       ),
