@@ -31,6 +31,11 @@ void main() {
       expect(be.outcome, 0);
       expect(be.pnl, 0);
       expect(be.buangan, 0);
+      // SL murni = 10% balance rule awal — berdiri sendiri tanpa buangan
+      expect(sl.slMurni, ruleBal(2) - rDiv10(ruleBal(2), 9)); // 240rb − 216rb
+      expect(sl.slMurni + sl.buangan, ruleBal(2) - ruleBal(1)); // = gap penuh
+      expect(tp.slMurni, 0);
+      expect(be.slMurni, 0);
     });
 
     test('tanda manual TP/SL & miss', () {
@@ -45,6 +50,7 @@ void main() {
           at: d(2026, 1, 5), pair: 'X', price: 1, ruleA: 2, ruleB: 2, mark: 'SL');
       expect(slSama.outcome, -1);
       expect(slSama.buangan, 0);
+      expect(slSama.slMurni, 0); // tidak turun rules → tidak masuk drawdown
       // miss: bukan TP/SL walau rules turun & tanda SL
       final miss = JournalEntry(
           at: d(2026, 1, 5), pair: 'X', price: 1, ruleA: 3, ruleB: 1,
@@ -52,6 +58,7 @@ void main() {
       expect(miss.outcome, 2);
       expect(miss.pnl, 0);
       expect(miss.buangan, 0);
+      expect(miss.slMurni, 0);
     });
 
     test('JSON roundtrip (dengan tanda & eksekusi)', () {
@@ -105,15 +112,51 @@ void main() {
       expect(s.balanceNow, ruleBal(2)); // trade terakhir 1 → 2
     });
 
-    test('drawdown harian/mingguan/bulanan/all', () {
-      // Kurva: (5/1 09.00, 200rb) → (5/1 09.00, 240rb) → (5/1 14.00, 200rb)
-      //        → (6/1 11.00, 240rb)
-      // DD 5 Jan: puncak 240rb → lembah 200rb = 40rb (16,67% dari 240rb).
-      expect(s.daily.rp, 0); // hari "ini" (6/1) cuma naik, tak ada penurunan
-      expect(s.weekly.rp, 40000); // minggu sama mencakup 5 & 6 Jan
-      expect(s.monthly.rp, 40000);
-      expect(s.all.rp, 40000);
-      expect(s.all.pct, closeTo(40000 / 240000 * 100, 0.01));
+    test('drawdown = akumulasi nominal SL murni per periode (tanpa buangan)',
+        () {
+      // Satu-satunya SL: 5/1 14.00 rule 2 → 1. SL murni = 10% dari balance
+      // rule 2 = 240rb − 216rb = 24rb — BUKAN selisih penuh 40rb (SL+buangan).
+      final slNom = ruleBal(2) - rDiv10(ruleBal(2), 9);
+      expect(slNom, 24000);
+      expect(s.daily.rp, 0); // hari "ini" (6/1) tidak ada SL
+      expect(s.weekly.rp, slNom); // minggu sama mencakup 5 & 6 Jan
+      expect(s.monthly.rp, slNom);
+      expect(s.all.rp, slNom);
+      // % = SL murni terhadap balance awal periode (awal jurnal = rule 1)
+      expect(s.all.pct, closeTo(slNom / ruleBal(1) * 100, 0.01)); // 12%
+    });
+
+    test('SL hari ini → drawdown harian & mingguan langsung terisi', () {
+      // "now" digeser ke 5/1 — tanggal yang sama dengan trade SL-nya.
+      final sNow = computeJournalStats(entries, 1, d(2026, 1, 5, 15));
+      final slNom = ruleBal(2) - rDiv10(ruleBal(2), 9);
+      expect(sNow.daily.rp, slNom);
+      expect(sNow.weekly.rp, slNom);
+      expect(sNow.monthly.rp, slNom);
+      expect(sNow.all.rp, slNom);
+      // % harian: balance awal 5/1 = balance awal jurnal (belum ada trade)
+      expect(sNow.daily.pct, closeTo(slNom / ruleBal(1) * 100, 0.01));
+    });
+
+    test('SL di hari/pekan berbeda terpisah per periode', () {
+      final sMix = computeJournalStats([
+        JournalEntry(
+            at: d(2026, 1, 5, 9), pair: 'X', price: 1, ruleA: 3, ruleB: 2,
+            mark: 'SL'), // Senin 5/1 — pekan lalu
+        JournalEntry(
+            at: d(2026, 1, 12, 9), pair: 'X', price: 1, ruleA: 2, ruleB: 1,
+            mark: 'SL'), // Senin 12/1 — pekan ini ("now")
+      ], 3, d(2026, 1, 12, 10));
+      final sl3 = ruleBal(3) - rDiv10(ruleBal(3), 9); // 28.800
+      final sl2 = ruleBal(2) - rDiv10(ruleBal(2), 9); // 24.000
+      expect(sl3, 28800);
+      expect(sl2, 24000);
+      expect(sMix.daily.rp, sl2); // hanya SL hari ini
+      expect(sMix.weekly.rp, sl2); // minggu 12/1 tidak memuat SL 5/1
+      expect(sMix.monthly.rp, sl3 + sl2); // dua-duanya di bulan Januari
+      expect(sMix.all.rp, sl3 + sl2);
+      // % harian: balance awal 12/1 = ruleBal(2) (hasil trade 5/1)
+      expect(sMix.daily.pct, closeTo(sl2 / ruleBal(2) * 100, 0.01)); // 10%
     });
 
     test('jurnal kosong → semua nol, balance = start rule', () {
@@ -156,7 +199,7 @@ void main() {
       expect(s3.buangan, 0);
       expect(s3.winrate, 100); // hanya trade yang diambil yang dihitung
       expect(s3.balanceNow, ruleBal(5)); // miss tidak menggerakkan balance
-      expect(s3.all.rp, 0); // kurva balance hanya dari trade yang diambil
+      expect(s3.all.rp, 0); // miss & TP tidak menyumbang SL murni
     });
 
     test('SL tanpa buangan (rule sama) terpisah dari total buangan', () {
@@ -172,6 +215,8 @@ void main() {
       expect(s4.buangan,
           rDiv10(ruleBal(4), 9) - ruleBal(3)); // hanya yang turun rules
       expect(s4.winrate, 0);
+      // Drawdown hanya dari SL yang turun rules — SL murni, tanpa buangan
+      expect(s4.all.rp, ruleBal(4) - rDiv10(ruleBal(4), 9)); // 34.560
     });
 
     test('buangan murni = selisih antar rule − nominal SL (10%)', () {
