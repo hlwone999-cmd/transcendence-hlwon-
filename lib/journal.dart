@@ -115,7 +115,7 @@ class JournalEntry {
 
 class Dd {
   final int rp; // total nominal SL murni dalam periode (Rupiah)
-  final double pct; // rp terhadap balance awal periode (%)
+  final double pct; // rp terhadap balance rules awal trade SL (≈10% per SL)
   const Dd(this.rp, this.pct);
 }
 
@@ -137,20 +137,11 @@ DateTime _mondayOf(DateTime d) =>
 /// Drawdown = total nominal SL murni yang terjadi dalam satu periode
 /// (harian / mingguan / bulanan / total) — TANPA buangan, sesuai permintaan:
 /// SL berdiri sendiri, buangan dilaporkan terpisah di TOTAL BUANGAN.
-/// Persen dihitung terhadap balance di awal periode sebagai referensi modal.
+/// Persen = SL murni terhadap balance rules awal trade (rule A) — tiap SL
+/// di tangga rules memang 10% dari balance rule awalnya, jadi % mengikuti
+/// balance SAAT trade terjadi, bukan balance awal jurnal.
 Dd _ddSum(int slSum, int refBal) =>
     Dd(slSum, slSum > 0 && refBal > 0 ? slSum / refBal * 100 : 0);
-
-/// Balance di awal periode (waktu `t`): mulai dari balance awal jurnal,
-/// lalu terapkan semua trade yang diambil sebelum `t`.
-int _balAt(List<JournalEntry> takenSorted, int startBal, DateTime t) {
-  int bal = startBal;
-  for (final e in takenSorted) {
-    if (!e.at.isBefore(t)) break;
-    bal = ruleBal(e.ruleB);
-  }
-  return bal;
-}
 
 /// Hitung semua statistik jurnal. `now` dipisahkan supaya test deterministik.
 JournalStats computeJournalStats(
@@ -186,24 +177,36 @@ JournalStats computeJournalStats(
   // Drawdown = akumulasi nominal SL murni per periode (SL berdiri sendiri,
   // tanpa buangan). Trade TP/BE/miss tidak menyumbang drawdown — begitu
   // trade SL dicatat, semua periode yang memuat tanggalnya langsung terisi.
+  // Persen: tiap SL murni = 10% dari balance rule awalnya, jadi referensi
+  // % = jumlah balance rules awal (rule A) dari trade SL di periode itu.
   int slDay = 0, slWeek = 0, slMonth = 0, slAll = 0;
+  int baseDay = 0, baseWeek = 0, baseMonth = 0, baseAll = 0;
   for (final e in taken) {
     final v = e.slMurni;
     if (v == 0) continue;
+    final base = ruleBal(e.ruleA);
     slAll += v;
-    if (sameDay(e.at)) slDay += v;
-    if (sameWeek(e.at)) slWeek += v;
-    if (sameMonth(e.at)) slMonth += v;
+    baseAll += base;
+    if (sameDay(e.at)) {
+      slDay += v;
+      baseDay += base;
+    }
+    if (sameWeek(e.at)) {
+      slWeek += v;
+      baseWeek += base;
+    }
+    if (sameMonth(e.at)) {
+      slMonth += v;
+      baseMonth += base;
+    }
   }
 
   return JournalStats(total, tp, sl, miss, winrate, buang, startBal,
       balanceNow,
-      // % drawdown mengacu ke balance di awal periode masing-masing.
-      _ddSum(
-          slDay, _balAt(taken, startBal, DateTime(now.year, now.month, now.day))),
-      _ddSum(slWeek, _balAt(taken, startBal, _mondayOf(now))),
-      _ddSum(slMonth, _balAt(taken, startBal, DateTime(now.year, now.month, 1))),
-      _ddSum(slAll, startBal));
+      _ddSum(slDay, baseDay),
+      _ddSum(slWeek, baseWeek),
+      _ddSum(slMonth, baseMonth),
+      _ddSum(slAll, baseAll));
 }
 
 // ---------------------------------------------------------------------------
@@ -608,8 +611,9 @@ class _JournalPageState extends State<JournalPage> {
           cell('TOTAL', s.all, p.red),
         ]),
         const SizedBox(height: 10),
-        Text('Nominal SL murni per periode — buangan tidak ikut dihitung '
-            'di sini (lihat TOTAL BUANGAN).',
+        Text('Nominal SL murni per periode (% dari balance rules saat '
+            'trade) — buangan tidak ikut dihitung di sini (lihat TOTAL '
+            'BUANGAN).',
             style: txt(context, 10.5, color: p.dim, height: 1.35)),
       ],
     );

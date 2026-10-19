@@ -133,8 +133,8 @@ void main() {
       expect(s.weekly.rp, slNom); // minggu sama mencakup 5 & 6 Jan
       expect(s.monthly.rp, slNom);
       expect(s.all.rp, slNom);
-      // % = SL murni terhadap balance awal periode (awal jurnal = rule 1)
-      expect(s.all.pct, closeTo(slNom / ruleBal(1) * 100, 0.01)); // 12%
+      // % = SL murni terhadap balance rule awal trade (rule 2) = 10%
+      expect(s.all.pct, closeTo(slNom / ruleBal(2) * 100, 0.01)); // 10%
     });
 
     test('SL hari ini → drawdown harian & mingguan langsung terisi', () {
@@ -145,8 +145,8 @@ void main() {
       expect(sNow.weekly.rp, slNom);
       expect(sNow.monthly.rp, slNom);
       expect(sNow.all.rp, slNom);
-      // % harian: balance awal 5/1 = balance awal jurnal (belum ada trade)
-      expect(sNow.daily.pct, closeTo(slNom / ruleBal(1) * 100, 0.01));
+      // % harian = SL murni / balance rule awal trade (rule 2) = 10%
+      expect(sNow.daily.pct, closeTo(slNom / ruleBal(2) * 100, 0.01));
     });
 
     test('SL di hari/pekan berbeda terpisah per periode', () {
@@ -166,8 +166,33 @@ void main() {
       expect(sMix.weekly.rp, sl2); // minggu 12/1 tidak memuat SL 5/1
       expect(sMix.monthly.rp, sl3 + sl2); // dua-duanya di bulan Januari
       expect(sMix.all.rp, sl3 + sl2);
-      // % harian: balance awal 12/1 = ruleBal(2) (hasil trade 5/1)
+      // % harian = SL murni / balance rule awal trade hari ini (rule 2)
       expect(sMix.daily.pct, closeTo(sl2 / ruleBal(2) * 100, 0.01)); // 10%
+    });
+
+    test('kasus user: start rule 1, SL 5→4 → persen = 10% (bukan 20,7%)', () {
+      // SL murni 41.472 = 10% dari balance rule 5 (414.720) — SAAT trade.
+      // Persen TIDAK memakai balance awal jurnal (rule 1 = 200rb) — kalau
+      // dipakai, 41.472/200rb = 20,7% (angka salah yang pernah dikeluhkan).
+      final sU = computeJournalStats([
+        JournalEntry(
+            at: d(2026, 1, 5, 9), pair: 'XAUUSD', price: 4000,
+            ruleA: 5, ruleB: 4, mark: 'SL'),
+      ], 1, d(2026, 1, 5, 10));
+      expect(sU.monthly.rp, 41472);
+      expect(sU.monthly.pct, closeTo(10.0, 0.01));
+      expect(sU.all.pct, closeTo(10.0, 0.01));
+      // dua SL bertingkat (5→4 lalu 4→3): total 76.032, % rata-rata tetap 10%
+      final sW = computeJournalStats([
+        JournalEntry(
+            at: d(2026, 1, 5, 9), pair: 'X', price: 1,
+            ruleA: 5, ruleB: 4, mark: 'SL'),
+        JournalEntry(
+            at: d(2026, 1, 6, 9), pair: 'X', price: 1,
+            ruleA: 4, ruleB: 3, mark: 'SL'),
+      ], 5, d(2026, 1, 6, 10));
+      expect(sW.all.rp, 41472 + 34560);
+      expect(sW.all.pct, closeTo(10.0, 0.01));
     });
 
     test('jurnal kosong → semua nol, balance = start rule', () {
