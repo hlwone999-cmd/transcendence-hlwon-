@@ -1,7 +1,7 @@
 // Transcendence — tables_build.dart
 // Builder sel untuk tabel rekomendasi & matriks — gaya "Obsidian Precision":
 // angka monospace rata kanan, hairline divider, SL = salmon, TP = mint,
-// baris pick = tint emas + badge BEST, baris tight = redup.
+// baris pick = tint emas + titik emas (tanpa badge), baris tight = redup.
 //
 // PERFORMA (tetap seperti sebelumnya): string & flag sel dihitung SEKALI per
 // perubahan data (specs), widget hanya dibuat untuk baris yang terlihat
@@ -106,24 +106,6 @@ CellBuilder mainCellBuilder(List<MainRowSpec> specs, Palette p) {
                   style: _mono(13, FontWeight.w600,
                       s.tight ? p.muted : (s.pick ? p.gold : p.ink))),
             ),
-            if (s.pick) ...[
-              const SizedBox(width: 6),
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
-                decoration: BoxDecoration(
-                  color: p.goldSolid,
-                  borderRadius: BorderRadius.circular(4),
-                ),
-                child: Text('BEST',
-                    style: TextStyle(
-                        fontFamily: kBodyFont,
-                        fontSize: 8.5,
-                        fontWeight: FontWeight.w700,
-                        letterSpacing: 0.6,
-                        color: p.onGold)),
-              ),
-            ],
           ]),
           right: false,
           bg: bg,
