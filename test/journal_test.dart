@@ -322,11 +322,11 @@ void main() {
     // isi rules awal = Rule 1, rules akhir = Rule 2 (TP)
     await tester.tap(find.byKey(const Key('jurnal_ruleA')));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Rule 1 · Rp200rb').last);
+    await tester.tap(find.text('Rule 1 · Rp200.000').last);
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('jurnal_ruleB')));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Rule 2 · Rp240rb').last);
+    await tester.tap(find.text('Rule 2 · Rp240.000').last);
     await tester.pumpAndSettle();
 
     // pilih bias SELL → preview ikut menampilkan pil SELL

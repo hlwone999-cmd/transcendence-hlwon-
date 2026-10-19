@@ -540,8 +540,11 @@ class _JournalPageState extends State<JournalPage> {
                     for (int n = 1; n <= kRuleBalances.length; n++)
                       DropdownMenuItem(
                           value: n,
-                          child: Text(
-                              'Rule $n · ${shortIdr(ruleBal(n).toDouble())}'))
+                          child: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              alignment: Alignment.centerLeft,
+                              // Nominal PERSIS — sama dgn dropdown rules.
+                              child: Text('Rule $n · ${idr(ruleBal(n))}'))),
                   ],
                   onChanged: (v) {
                     if (v == null) return;
@@ -793,7 +796,12 @@ class _JournalPageState extends State<JournalPage> {
               for (int n = 1; n <= kRuleBalances.length; n++)
                 DropdownMenuItem(
                     value: n,
-                    child: Text('Rule $n · ${shortIdr(ruleBal(n).toDouble())}'))
+                    child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerLeft,
+                        // Nominal PERSIS (bukan format singkat Rp346rb yang
+                        // membulatkan 345.600 → terlihat kelebihan ~1k).
+                        child: Text('Rule $n · ${idr(ruleBal(n))}'))),
             ],
             onChanged: (val) {
               setState(() {
