@@ -6,6 +6,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:transcendence/engine.dart';
 import 'package:transcendence/journal.dart';
 import 'package:transcendence/main.dart';
 
@@ -24,8 +25,9 @@ void main() {
       expect(tp.outcome, 1);
       expect(tp.pnl, ruleBal(3) - ruleBal(2)); // +20% gap
       expect(sl.outcome, -1);
-      expect(sl.buangan, ruleBal(2) - ruleBal(1)); // 240rb − 200rb
-      expect(sl.pnl, -(ruleBal(2) - ruleBal(1)));
+      // buangan murni: balance setelah SL (90%) − balance rule 1
+      expect(sl.buangan, rDiv10(ruleBal(2), 9) - ruleBal(1)); // 216rb − 200rb
+      expect(sl.pnl, -(ruleBal(2) - ruleBal(1))); // pergeseran balance = gap penuh
       expect(be.outcome, 0);
       expect(be.pnl, 0);
       expect(be.buangan, 0);
@@ -94,8 +96,8 @@ void main() {
       expect(s.winrate, closeTo(66.6667, 0.01));
     });
 
-    test('total buangan = selisih rule saat SL', () {
-      expect(s.buangan, ruleBal(2) - ruleBal(1)); // 40.000
+    test('total buangan = buangan murni, bukan gabungan SL + buangan', () {
+      expect(s.buangan, rDiv10(ruleBal(2), 9) - ruleBal(1)); // 216rb − 200rb
     });
 
     test('balance sekarang dari rules akhir trade terakhir', () {
@@ -167,8 +169,24 @@ void main() {
             mark: 'SL'),
       ], 4, d(2026, 1, 5, 23));
       expect(s4.sl, 2); // dua-duanya SL
-      expect(s4.buangan, ruleBal(4) - ruleBal(3)); // hanya yang turun rules
+      expect(s4.buangan,
+          rDiv10(ruleBal(4), 9) - ruleBal(3)); // hanya yang turun rules
       expect(s4.winrate, 0);
+    });
+
+    test('buangan murni = selisih antar rule − nominal SL (10%)', () {
+      // Trade rule 5 → 4: selisih penuh 69.120 terbagi dua —
+      //   nominal SL 10% = 41.472, buangan murni = 27.648.
+      final e = JournalEntry(
+          at: d(2026, 1, 5), pair: 'X', price: 1, ruleA: 5, ruleB: 4,
+          mark: 'SL');
+      final gap = ruleBal(5) - ruleBal(4); // 69.120 (gabungan)
+      final slNom = ruleBal(5) - rDiv10(ruleBal(5), 9); // 41.472 (SL 10%)
+      expect(gap, 69120); // sanity angka user di screenshot
+      expect(slNom, 41472);
+      expect(e.buangan, 27648); // PURE buangan — bukan 69.120
+      expect(e.buangan, rDiv10(ruleBal(5), 9) - ruleBal(4));
+      expect(e.buangan + slNom, gap); // SL + buangan = selisih penuh
     });
   });
 

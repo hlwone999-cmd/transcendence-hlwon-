@@ -6,9 +6,13 @@
 //   - HASIL    : TP / SL (otomatis mengikuti arah rules, tetap bisa diubah)
 //   - EKSEKUSI : KEAMBIL / MISS — trade yang di-miss tidak dihitung TP/SL,
 //                tidak mengubah balance, tapi tetap masuk total trade.
-// Buangan hanya dari trade yang TURUN rules (SL):
+// Buangan hanya dari trade yang TURUN rules (SL) — dan yang dihitung
+// BUANGAN MURNI saja (bukan gabungan SL + buangan):
 //   - rules naik (akhir > awal)  = TP  (+ selisih balance antar rule)
-//   - rules turun (akhir < awal) = SL  → "buangan" = selisih balance rule
+//   - rules turun (akhir < awal) = SL  → buangan murni = balance setelah
+//     SL (90%, rumus rDiv10 engine.dart) − balance rule tujuan.
+//     (Selisih penuh antar rule = nominal SL 10% + buangan — jangan
+//     tertukar; sama seperti "X buangan" di tab Kalkulator.)
 //   - sama tanpa tanda (entry lama) = BE (0)
 // Statistik: total trade, total TP, total SL, winrate, TOTAL BUANGAN,
 // balance sekarang (berantai dari "Mulai dari Rule"), dan drawdown
@@ -81,9 +85,14 @@ class JournalEntry {
   /// Trade miss tidak mengubah balance.
   int get pnl => taken ? ruleBal(ruleB) - ruleBal(ruleA) : 0;
 
-  /// Buangan saat SL: berapa balance "terbuang" karena turun rules.
+  /// Buangan MURNI saat SL turun rules — bukan selisih penuh antar rule.
+  ///
+  /// Selisih penuh rule(A) − rule(B) itu GABUNGAN: nominal SL (10% dari
+  /// balance rule awal) + buangan murni. Buangan murni = balance setelah
+  /// SL (90% dari balance rule awal, rumus rDiv10 engine.dart) − balance
+  /// rule tujuan — definisi sama dengan "X buangan" di tab Kalkulator.
   int get buangan =>
-      outcome < 0 && ruleB < ruleA ? ruleBal(ruleA) - ruleBal(ruleB) : 0;
+      outcome < 0 && ruleB < ruleA ? rDiv10(ruleBal(ruleA), 9) - ruleBal(ruleB) : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -453,7 +462,8 @@ class _JournalPageState extends State<JournalPage> {
         Text(idr(s.buangan),
             style: mono(context, 22, w: FontWeight.w600, color: p.red)),
         const SizedBox(height: 4),
-        Text('Akumulasi balance terbuang dari trade yang turun rules.',
+        Text('Akumulasi balance terbuang dari trade yang turun rules — '
+            'di luar nominal SL.',
             style: txt(context, 10.5, color: p.dim, height: 1.35)),
       ]),
     );
