@@ -36,6 +36,8 @@ void main() {
       expect(sl.slMurni + sl.buangan, ruleBal(2) - ruleBal(1)); // = gap penuh
       expect(tp.slMurni, 0);
       expect(be.slMurni, 0);
+      // bias default kosong (entry lama) — tidak dipakai dalam hitungan
+      expect(tp.bias, '');
     });
 
     test('tanda manual TP/SL & miss', () {
@@ -59,6 +61,12 @@ void main() {
       expect(miss.pnl, 0);
       expect(miss.buangan, 0);
       expect(miss.slMurni, 0);
+      // bias arah trade tersimpan apa adanya, tidak mengubah outcome
+      final sell = JournalEntry(
+          at: d(2026, 1, 5), pair: 'X', price: 1, ruleA: 2, ruleB: 1,
+          mark: 'SL', bias: 'SELL');
+      expect(sell.bias, 'SELL');
+      expect(sell.outcome, -1);
     });
 
     test('JSON roundtrip (dengan tanda & eksekusi)', () {
@@ -69,16 +77,19 @@ void main() {
           ruleA: 7,
           ruleB: 8,
           mark: 'SL',
-          taken: false);
+          taken: false,
+          bias: 'SELL');
       final back = JournalEntry.fromJson(e.toJson());
       expect(back.mark, 'SL');
       expect(back.taken, false);
+      expect(back.bias, 'SELL');
       expect(back.outcome, 2);
       // entry lama tanpa mark/taken → kompatibel: diturunkan dari rules
       final legacy = JournalEntry.fromJson(
           {'at': '2026-03-14T21:05:00.000', 'pair': 'XAUUSD', 'price': 4000, 'a': 5, 'b': 4});
       expect(legacy.mark, '');
       expect(legacy.taken, true);
+      expect(legacy.bias, ''); // entry lama tanpa bias → kosong (tanpa pil)
       expect(legacy.outcome, -1);
     });
   });
@@ -263,6 +274,10 @@ void main() {
     expect(find.text('TOTAL BUANGAN'), findsOneWidget);
     expect(find.text('KEAMBIL'), findsOneWidget);
     expect(find.text('MISS'), findsOneWidget);
+    // segmen bias BUY/SELL ada di form
+    expect(find.text('BIAS'), findsOneWidget);
+    expect(find.text('BUY'), findsOneWidget);
+    expect(find.text('SELL'), findsOneWidget);
     expect(find.text('Belum ada trade. Catat trade pertamamu di form atas — '
         'tandai hasilnya TP/SL dan apakah keambil atau miss.'), findsOneWidget);
 
@@ -289,6 +304,11 @@ void main() {
     await tester.tap(find.text('Rule 2 · Rp240rb').last);
     await tester.pumpAndSettle();
 
+    // pilih bias SELL → preview ikut menampilkan pil SELL
+    await tester.tap(find.text('SELL'));
+    await tester.pump();
+    expect(find.text('SELL'), findsNWidgets(2)); // opsi form + pil preview
+
     await tester.tap(find.text('Simpan Trade'));
     await tester.pump();
     // hanguskan timer snackbar (4s) supaya tidak ada timer pending saat test
@@ -300,6 +320,8 @@ void main() {
     expect(find.text('Rule 1'), findsWidgets);
     expect(find.text('TP'), findsWidgets);
     expect(find.byIcon(Icons.delete_outline), findsOneWidget);
+    // pil bias SELL di riwayat + opsi SELL di form (preview hilang: ruleB null)
+    expect(find.text('SELL'), findsNWidgets(2));
     final s = computeJournalStats(const [], 1, DateTime.now());
     expect(s.startBal, 200000); // sanity engine
   });

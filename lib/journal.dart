@@ -2,7 +2,7 @@
 // FITUR BARU: Jurnal Trade.
 //
 // Catat trade: tanggal + jam, pair, price entry, rules awal → rules akhir,
-// plus dua penanda manual per trade:
+// bias arah trade (BUY/SELL), plus dua penanda manual per trade:
 //   - HASIL    : TP / SL (otomatis mengikuti arah rules, tetap bisa diubah)
 //   - EKSEKUSI : KEAMBIL / MISS — trade yang di-miss tidak dihitung TP/SL,
 //                tidak mengubah balance, tapi tetap masuk total trade.
@@ -44,6 +44,7 @@ class JournalEntry {
   final int ruleB; // rules akhir
   final String mark; // 'TP' | 'SL' | '' (entry lama → diturunkan dari rules)
   final bool taken; // true = keambil, false = miss
+  final String bias; // 'BUY' | 'SELL' | '' (entry lama tanpa bias)
   const JournalEntry({
     required this.at,
     required this.pair,
@@ -52,6 +53,7 @@ class JournalEntry {
     required this.ruleB,
     this.mark = '',
     this.taken = true,
+    this.bias = '',
   });
 
   Map<String, dynamic> toJson() => {
@@ -62,6 +64,7 @@ class JournalEntry {
         'b': ruleB,
         'mark': mark,
         'taken': taken,
+        'bias': bias,
       };
 
   static JournalEntry fromJson(Map<String, dynamic> j) => JournalEntry(
@@ -72,6 +75,7 @@ class JournalEntry {
         ruleB: (j['b'] as num?)?.toInt() ?? 1,
         mark: '${j['mark'] ?? ''}',
         taken: (j['taken'] as bool?) ?? true,
+        bias: '${j['bias'] ?? ''}',
       );
 
   /// 1 = TP, -1 = SL, 0 = BE (entry lama tanpa tanda, rules sama),
@@ -225,6 +229,7 @@ class _JournalPageState extends State<JournalPage> {
   int? _ruleB;
   String _mark = 'TP'; // tanda hasil trade: 'TP' | 'SL'
   bool _taken = true; // eksekusi: true = keambil, false = miss
+  String _bias = 'BUY'; // bias arah trade: 'BUY' | 'SELL'
 
   @override
   void initState() {
@@ -313,6 +318,7 @@ class _JournalPageState extends State<JournalPage> {
       ruleB: _ruleB!,
       mark: _mark,
       taken: _taken,
+      bias: _bias,
     );
     setState(() {
       _entries.add(e);
@@ -322,6 +328,7 @@ class _JournalPageState extends State<JournalPage> {
       _price.clear();
       _mark = 'TP';
       _taken = true;
+      _bias = 'BUY';
     });
     _persist();
     _toast(
@@ -345,7 +352,8 @@ class _JournalPageState extends State<JournalPage> {
             RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
         title: Text('Hapus trade?', style: txt(ctx, 16, w: FontWeight.w600)),
         content: Text(
-            '${e.pair} · ${_fmtDate(e.at)} ${_fmtTime(e.at)}\nRule ${e.ruleA} → ${e.ruleB}',
+            '${e.pair}${e.bias.isEmpty ? '' : ' · ${e.bias}'} · '
+            '${_fmtDate(e.at)} ${_fmtTime(e.at)}\nRule ${e.ruleA} → ${e.ruleB}',
             style: txt(ctx, 13, color: p.muted)),
         actions: [
           TextButton(
@@ -616,7 +624,8 @@ class _JournalPageState extends State<JournalPage> {
             ruleA: _ruleA!,
             ruleB: _ruleB!,
             mark: _mark,
-            taken: _taken)
+            taken: _taken,
+            bias: _bias)
         : null;
 
     return ObsCard(
@@ -680,6 +689,11 @@ class _JournalPageState extends State<JournalPage> {
             ),
           ),
         ]),
+        const SizedBox(height: 12),
+        // ---- bias arah trade: BUY / SELL ----
+        _seg(p, 'BIAS', [('BUY', _bias == 'BUY'), ('SELL', _bias == 'SELL')],
+            _bias == 'BUY' ? p.mintSolid : p.redSolid,
+            (v) => setState(() => _bias = v)),
         if (preview != null) ...[
           const SizedBox(height: 12),
           Container(
@@ -691,6 +705,8 @@ class _JournalPageState extends State<JournalPage> {
             ),
             child: Row(children: [
               _outcomeBadge(p, preview.outcome),
+              const SizedBox(width: 6),
+              _biasBadge(p, preview.bias),
               const Spacer(),
               if (preview.outcome == 2)
                 Text('tidak dihitung',
@@ -860,6 +876,22 @@ class _JournalPageState extends State<JournalPage> {
     );
   }
 
+  /// Pil arah trade: BUY (hijau) / SELL (merah). Entry lama tanpa bias
+  /// tidak menampilkan apa-apa.
+  Widget _biasBadge(Palette p, String bias) {
+    if (bias.isEmpty) return const SizedBox.shrink();
+    final buy = bias == 'BUY';
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+          color: buy ? p.goodsoft : p.redsoft,
+          borderRadius: BorderRadius.circular(7)),
+      child: Text(bias,
+          style: mono(context, 11.5, w: FontWeight.w700,
+              color: buy ? p.mint : p.red)),
+    );
+  }
+
   List<Widget> _listCards(Palette p, JournalStats s) {
     final sorted = [..._entries]..sort((a, b) => b.at.compareTo(a.at));
     return [
@@ -885,6 +917,10 @@ class _JournalPageState extends State<JournalPage> {
                   ),
                   const SizedBox(width: 8),
                   Flexible(child: BadgePill(e.pair, color: p.gold, bg: p.cardHi)),
+                  if (e.bias.isNotEmpty) ...[
+                    const SizedBox(width: 6),
+                    Flexible(child: _biasBadge(p, e.bias)),
+                  ],
                 ]),
                 const SizedBox(height: 5),
                 Row(children: [
