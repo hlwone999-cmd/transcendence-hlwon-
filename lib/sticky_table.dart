@@ -13,6 +13,12 @@
 //    5–12 kolom ≈ 16.000 widget setiap rebuild → berat & patah-patah).
 //    Sekarang baris dirender lazy lewat ListView.builder — hanya baris yang
 //    terlihat yang dibangun, dengan repaint boundary per baris.
+// 3. Slot/ruang kosong antara header dan baris pertama yang ikut kegeser
+//    saat tabel discroll: ListView tanpa `padding` eksplisit otomatis
+//    menyuntik MediaQuery.padding (tinggi status bar ~42px, area tabel ada
+//    di luar SafeArea) sebagai SliverPadding → muncul ruang kosong selebar
+//    satu baris di atas list & ikut bergeser saat drag. Solusi: padding:
+//    EdgeInsets.zero pada kedua ListView vertikal.
 // Catatan: Row di sini TIDAK boleh pakai crossAxisAlignment.stretch — di
 // dalam SingleChildScrollView (tinggi tak terbatas) stretch menghasilkan
 // constraint h=Infinity dan menggagalkan seluruh frame. Tinggi sel sudah
@@ -212,6 +218,7 @@ class _StickyTableState extends State<StickyTable> {
                         controller: _vFirst,
                         itemExtent: widget.rowHeight,
                         itemCount: n,
+                        padding: EdgeInsets.zero,
                         physics: const ClampingScrollPhysics(),
                         itemBuilder: (context, i) => _cellBox(
                             widget.cellBuilder(context, i, 0), w0,
@@ -230,6 +237,7 @@ class _StickyTableState extends State<StickyTable> {
                             controller: _vRest,
                             itemExtent: widget.rowHeight,
                             itemCount: n,
+                            padding: EdgeInsets.zero,
                             physics: const ClampingScrollPhysics(),
                             itemBuilder: (context, i) => _cellBox(
                                 Row(children: [
