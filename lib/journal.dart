@@ -1,11 +1,15 @@
 // Transcendence — journal.dart
 // FITUR BARU: Jurnal Trade.
 //
-// Catat trade: tanggal + jam, pair, price entry, rules awal → rules akhir.
-// Hasil diturunkan otomatis dari tangga rules (engine.dart):
+// Catat trade: tanggal + jam, pair, price entry, rules awal → rules akhir,
+// plus dua penanda manual per trade:
+//   - HASIL    : TP / SL (otomatis mengikuti arah rules, tetap bisa diubah)
+//   - EKSEKUSI : KEAMBIL / MISS — trade yang di-miss tidak dihitung TP/SL,
+//                tidak mengubah balance, tapi tetap masuk total trade.
+// Buangan hanya dari trade yang TURUN rules (SL):
 //   - rules naik (akhir > awal)  = TP  (+ selisih balance antar rule)
 //   - rules turun (akhir < awal) = SL  → "buangan" = selisih balance rule
-//   - sama                       = BE  (0)
+//   - sama tanpa tanda (entry lama) = BE (0)
 // Statistik: total trade, total TP, total SL, winrate, TOTAL BUANGAN,
 // balance sekarang (berantai dari "Mulai dari Rule"), dan drawdown
 // harian / mingguan / bulanan / all (peak-to-trough di atas kurva balance).
@@ -32,12 +36,16 @@ class JournalEntry {
   final double price;
   final int ruleA; // rules awal
   final int ruleB; // rules akhir
+  final String mark; // 'TP' | 'SL' | '' (entry lama → diturunkan dari rules)
+  final bool taken; // true = keambil, false = miss
   const JournalEntry({
     required this.at,
     required this.pair,
     required this.price,
     required this.ruleA,
     required this.ruleB,
+    this.mark = '',
+    this.taken = true,
   });
 
   Map<String, dynamic> toJson() => {
@@ -46,6 +54,8 @@ class JournalEntry {
         'price': price,
         'a': ruleA,
         'b': ruleB,
+        'mark': mark,
+        'taken': taken,
       };
 
   static JournalEntry fromJson(Map<String, dynamic> j) => JournalEntry(
@@ -54,16 +64,26 @@ class JournalEntry {
         price: (j['price'] as num?)?.toDouble() ?? 0,
         ruleA: (j['a'] as num?)?.toInt() ?? 1,
         ruleB: (j['b'] as num?)?.toInt() ?? 1,
+        mark: '${j['mark'] ?? ''}',
+        taken: (j['taken'] as bool?) ?? true,
       );
 
-  /// 1 = TP (naik rules), -1 = SL (turun rules), 0 = BE (sama).
-  int get outcome => ruleB > ruleA ? 1 : (ruleB < ruleA ? -1 : 0);
+  /// 1 = TP, -1 = SL, 0 = BE (entry lama tanpa tanda, rules sama),
+  /// 2 = MISS (tidak diambil — bukan TP/SL, balance tidak berubah).
+  int get outcome {
+    if (!taken) return 2;
+    if (mark == 'SL') return -1;
+    if (mark == 'TP') return 1;
+    return ruleB > ruleA ? 1 : (ruleB < ruleA ? -1 : 0);
+  }
 
   /// P/L sesuai tangga rules: balance rule akhir − balance rule awal.
-  int get pnl => ruleBal(ruleB) - ruleBal(ruleA);
+  /// Trade miss tidak mengubah balance.
+  int get pnl => taken ? ruleBal(ruleB) - ruleBal(ruleA) : 0;
 
   /// Buangan saat SL: berapa balance "terbuang" karena turun rules.
-  int get buangan => outcome < 0 ? ruleBal(ruleA) - ruleBal(ruleB) : 0;
+  int get buangan =>
+      outcome < 0 && ruleB < ruleA ? ruleBal(ruleA) - ruleBal(ruleB) : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -77,13 +97,13 @@ class Dd {
 }
 
 class JournalStats {
-  final int total, tp, sl;
-  final double winrate; // 0..100
-  final int buangan; // total Rp terbuang dari semua SL
+  final int total, tp, sl, miss;
+  final double winrate; // 0..100 — TP / (TP+SL); miss & BE di luar penyebut
+  final int buangan; // total Rp terbuang dari semua SL (turun rules)
   final int startBal, balanceNow;
   final Dd daily, weekly, monthly, all;
   const JournalStats(
-      this.total, this.tp, this.sl, this.winrate, this.buangan,
+      this.total, this.tp, this.sl, this.miss, this.winrate, this.buangan,
       this.startBal, this.balanceNow,
       this.daily, this.weekly, this.monthly, this.all);
 }
@@ -126,8 +146,12 @@ Dd _ddAll(List<(DateTime, int)> pts) {
 JournalStats computeJournalStats(
     List<JournalEntry> entries, int startRule, DateTime now) {
   final list = [...entries]..sort((a, b) => a.at.compareTo(b.at));
-  int tp = 0, sl = 0, buang = 0;
+  int tp = 0, sl = 0, miss = 0, buang = 0;
   for (final e in list) {
+    if (e.outcome == 2) {
+      miss++; // miss: bukan TP/SL, tidak mengubah balance
+      continue;
+    }
     if (e.outcome > 0) tp++;
     if (e.outcome < 0) {
       sl++;
@@ -135,14 +159,19 @@ JournalStats computeJournalStats(
     }
   }
   final total = list.length;
-  final winrate = total == 0 ? 0.0 : tp / total * 100;
+  // Winrate dari trade yang menghasilkan saja — miss & BE di luar penyebut.
+  final decided = tp + sl;
+  final winrate = decided == 0 ? 0.0 : tp / decided * 100;
   final startBal = ruleBal(startRule);
-  final balanceNow = list.isEmpty ? startBal : ruleBal(list.last.ruleB);
+
+  // Hanya trade yang benar-benar diambil yang menggerakkan balance.
+  final taken = list.where((e) => e.outcome != 2).toList();
+  final balanceNow = taken.isEmpty ? startBal : ruleBal(taken.last.ruleB);
 
   // Kurva balance kronologis: titik awal (anchor) + hasil tiap trade.
   final pts = <(DateTime, int)>[];
-  if (list.isNotEmpty) pts.add((list.first.at, startBal));
-  for (final e in list) {
+  if (taken.isNotEmpty) pts.add((taken.first.at, startBal));
+  for (final e in taken) {
     pts.add((e.at, ruleBal(e.ruleB)));
   }
 
@@ -151,9 +180,9 @@ JournalStats computeJournalStats(
   bool sameWeek(DateTime t) => _mondayOf(t) == _mondayOf(now);
   bool sameMonth(DateTime t) => t.year == now.year && t.month == now.month;
 
-  return JournalStats(total, tp, sl, winrate, buang, startBal, balanceNow,
-      _ddOf(pts, sameDay), _ddOf(pts, sameWeek), _ddOf(pts, sameMonth),
-      _ddAll(pts));
+  return JournalStats(total, tp, sl, miss, winrate, buang, startBal,
+      balanceNow, _ddOf(pts, sameDay), _ddOf(pts, sameWeek),
+      _ddOf(pts, sameMonth), _ddAll(pts));
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +206,8 @@ class _JournalPageState extends State<JournalPage> {
   final _price = TextEditingController();
   int? _ruleA;
   int? _ruleB;
+  String _mark = 'TP'; // tanda hasil trade: 'TP' | 'SL'
+  bool _taken = true; // eksekusi: true = keambil, false = miss
 
   @override
   void initState() {
@@ -263,6 +294,8 @@ class _JournalPageState extends State<JournalPage> {
       price: price,
       ruleA: _ruleA!,
       ruleB: _ruleB!,
+      mark: _mark,
+      taken: _taken,
     );
     setState(() {
       _entries.add(e);
@@ -270,14 +303,18 @@ class _JournalPageState extends State<JournalPage> {
       _ruleA = e.ruleB;
       _ruleB = null;
       _price.clear();
+      _mark = 'TP';
+      _taken = true;
     });
     _persist();
     _toast(
-        e.outcome > 0
-            ? 'Trade TP tersimpan · +${idr(e.pnl)}'
-            : e.outcome < 0
-                ? 'Trade SL tersimpan · buangan ${idr(e.buangan)}'
-                : 'Trade BE tersimpan.',
+        e.outcome == 2
+            ? 'Trade ke-miss tersimpan · tidak dihitung TP/SL.'
+            : e.outcome > 0
+                ? 'Trade TP tersimpan · +${idr(e.pnl)}'
+                : e.outcome < 0
+                    ? 'Trade SL tersimpan · buangan ${idr(e.buangan)}'
+                    : 'Trade BE tersimpan.',
         err: e.outcome < 0);
   }
 
@@ -329,8 +366,8 @@ class _JournalPageState extends State<JournalPage> {
         children: [
           SectionHead(Icons.history_edu, 'Trading Journal'),
           const SizedBox(height: 4),
-          Text('Catat tiap trade — statistik & drawdown terhitung otomatis '
-              'dari tangga rules.',
+          Text('Catat tiap trade, tandai hasilnya TP/SL dan apakah keambil '
+              'atau miss — statistik & drawdown terhitung otomatis.',
               style: txt(context, 12, color: p.muted)),
           const SizedBox(height: 14),
 
@@ -353,6 +390,11 @@ class _JournalPageState extends State<JournalPage> {
             _mini(p, 'WINRATE',
                 '${s.winrate.toStringAsFixed(1).replaceFirst('.', ',')}%', p.gold),
           ]),
+          if (s.miss > 0) ...[
+            const SizedBox(height: 6),
+            Text('${s.miss} trade di-miss · tidak dihitung TP/SL & balance',
+                style: txt(context, 11, color: p.dim)),
+          ],
           const SizedBox(height: 10),
 
           // ---- drawdown ----
@@ -373,7 +415,7 @@ class _JournalPageState extends State<JournalPage> {
               color: p.surface1,
               children: [
                 Text('Belum ada trade. Catat trade pertamamu di form atas — '
-                    'hasil TP/SL otomatis dari rules awal → akhir.',
+                    'tandai hasilnya TP/SL dan apakah keambil atau miss.',
                     style: txt(context, 12.5, color: p.muted, height: 1.5)),
               ],
             )
@@ -388,39 +430,31 @@ class _JournalPageState extends State<JournalPage> {
 
   Widget _buanganCard(Palette p, JournalStats s) {
     return Container(
+      width: double.infinity,
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: p.card,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(width: 1, color: p.redsoft),
       ),
-      child: Row(children: [
-        Expanded(
-          child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-            Row(children: [
-              Icon(Icons.output_rounded, size: 15, color: p.red),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text('TOTAL BUANGAN (SL TURUN RULES)',
-                    maxLines: 1, overflow: TextOverflow.ellipsis,
-                    style: labelSm(context, color: p.muted)),
-              ),
-            ]),
-            const SizedBox(height: 6),
-            Text(idr(s.buangan),
-                style: mono(context, 22, w: FontWeight.w600, color: p.red)),
-          ]),
-        ),
-        const SizedBox(width: 10),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(
-              color: p.redsoft, borderRadius: BorderRadius.circular(8)),
-          child: Text('${s.sl}× SL',
-              style: mono(context, 12, w: FontWeight.w600, color: p.red)),
-        ),
+      child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+        Row(children: [
+          Icon(Icons.output_rounded, size: 15, color: p.red),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text('TOTAL BUANGAN',
+                maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: labelSm(context, color: p.muted)),
+          ),
+        ]),
+        const SizedBox(height: 6),
+        Text(idr(s.buangan),
+            style: mono(context, 22, w: FontWeight.w600, color: p.red)),
+        const SizedBox(height: 4),
+        Text('Akumulasi balance terbuang dari trade yang turun rules.',
+            style: txt(context, 10.5, color: p.dim, height: 1.35)),
       ]),
     );
   }
@@ -558,7 +592,9 @@ class _JournalPageState extends State<JournalPage> {
             pair: _pair.text,
             price: 0,
             ruleA: _ruleA!,
-            ruleB: _ruleB!)
+            ruleB: _ruleB!,
+            mark: _mark,
+            taken: _taken)
         : null;
 
     return ObsCard(
@@ -600,6 +636,28 @@ class _JournalPageState extends State<JournalPage> {
           const SizedBox(width: 8),
           Expanded(child: _ruleDropdown(p, false)),
         ]),
+        const SizedBox(height: 12),
+        // ---- eksekusi (keambil/miss) + tanda hasil (TP/SL) ----
+        Row(children: [
+          Expanded(
+            child: _seg(p, 'EKSEKUSI', [('KEAMBIL', _taken), ('MISS', !_taken)],
+                _taken ? p.goldSolid : p.redSolid,
+                (v) => setState(() => _taken = v == 'KEAMBIL')),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: AbsorbPointer(
+              absorbing: !_taken,
+              child: Opacity(
+                opacity: _taken ? 1 : 0.4,
+                child: _seg(p, 'HASIL TRADE',
+                    [('TP', _mark == 'TP'), ('SL', _mark == 'SL')],
+                    _mark == 'TP' ? p.mintSolid : p.redSolid,
+                    (v) => setState(() => _mark = v)),
+              ),
+            ),
+          ),
+        ]),
         if (preview != null) ...[
           const SizedBox(height: 12),
           Container(
@@ -612,20 +670,24 @@ class _JournalPageState extends State<JournalPage> {
             child: Row(children: [
               _outcomeBadge(p, preview.outcome),
               const Spacer(),
-              Text(
-                preview.outcome > 0
-                    ? '+${idr(preview.pnl)}'
-                    : preview.outcome < 0
-                        ? '−${idr(preview.pnl.abs())}'
-                        : 'Rp0',
-                style: mono(context, 13.5,
-                    w: FontWeight.w600,
-                    color: preview.outcome > 0
-                        ? p.mint
-                        : preview.outcome < 0
-                            ? p.red
-                            : p.muted),
-              ),
+              if (preview.outcome == 2)
+                Text('tidak dihitung',
+                    style: txt(context, 11.5, color: p.muted))
+              else
+                Text(
+                  preview.outcome > 0
+                      ? '+${idr(preview.pnl)}'
+                      : preview.outcome < 0
+                          ? '−${idr(preview.pnl.abs())}'
+                          : 'Rp0',
+                  style: mono(context, 13.5,
+                      w: FontWeight.w600,
+                      color: preview.outcome > 0
+                          ? p.mint
+                          : preview.outcome < 0
+                              ? p.red
+                              : p.muted),
+                ),
             ]),
           ),
         ],
@@ -699,6 +761,7 @@ class _JournalPageState extends State<JournalPage> {
                 } else {
                   _ruleB = val;
                 }
+                _syncMark();
               });
             },
           ),
@@ -707,12 +770,65 @@ class _JournalPageState extends State<JournalPage> {
     ]);
   }
 
+  /// Tanda hasil mengikuti arah rules secara otomatis — turun = SL,
+  /// naik = TP. Rules sama: tanda terakhir dipertahankan (bisa dipakai
+  /// untuk "SL kecil yang tidak pindah rule").
+  void _syncMark() {
+    if (_ruleA == null || _ruleB == null) return;
+    if (_ruleB! < _ruleA!) {
+      _mark = 'SL';
+    } else if (_ruleB! > _ruleA!) {
+      _mark = 'TP';
+    }
+  }
+
+  Widget _seg(Palette p, String label, List<(String, bool)> opts, Color cAct,
+      void Function(String) onSel) {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Text(label, style: labelSm(context, color: p.muted)),
+      const SizedBox(height: 6),
+      Container(
+        padding: const EdgeInsets.all(3),
+        decoration: BoxDecoration(
+          color: p.surface1,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(width: 1, color: p.line),
+        ),
+        child: Row(
+          children: [
+            for (final (name, active) in opts)
+              Expanded(
+                child: GestureDetector(
+                  onTap: () => onSel(name),
+                  behavior: HitTestBehavior.opaque,
+                  child: Container(
+                    alignment: Alignment.center,
+                    padding: const EdgeInsets.symmetric(vertical: 7),
+                    decoration: BoxDecoration(
+                      color: active ? cAct : Colors.transparent,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(name,
+                        maxLines: 1, overflow: TextOverflow.ellipsis,
+                        style: mono(context, 11.5, w: FontWeight.w700,
+                            color: active ? Colors.white : p.muted)),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    ]);
+  }
+
   Widget _outcomeBadge(Palette p, int outcome) {
-    final (txt2, c, bg) = outcome > 0
-        ? ('TP', p.mint, p.goodsoft)
-        : outcome < 0
-            ? ('SL', p.red, p.redsoft)
-            : ('BE', p.muted, p.cardHi);
+    final (txt2, c, bg) = outcome == 2
+        ? ('MISS', p.warm, p.cardHi)
+        : outcome > 0
+            ? ('TP', p.mint, p.goodsoft)
+            : outcome < 0
+                ? ('SL', p.red, p.redsoft)
+                : ('BE', p.muted, p.cardHi);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
       decoration: BoxDecoration(
@@ -775,18 +891,22 @@ class _JournalPageState extends State<JournalPage> {
               _outcomeBadge(p, e.outcome),
               const SizedBox(height: 4),
               Text(
-                e.outcome > 0
-                    ? '+${idr(e.pnl)}'
-                    : e.outcome < 0
-                        ? '−${idr(e.pnl.abs())}'
-                        : 'Rp0',
+                e.outcome == 2
+                    ? 'miss'
+                    : e.outcome > 0
+                        ? '+${idr(e.pnl)}'
+                        : e.outcome < 0
+                            ? '−${idr(e.pnl.abs())}'
+                            : 'Rp0',
                 style: mono(context, 12.5,
                     w: FontWeight.w600,
-                    color: e.outcome > 0
-                        ? p.mint
-                        : e.outcome < 0
-                            ? p.red
-                            : p.muted),
+                    color: e.outcome == 2
+                        ? p.dim
+                        : e.outcome > 0
+                            ? p.mint
+                            : e.outcome < 0
+                                ? p.red
+                                : p.muted),
               ),
             ]),
             IconButton(

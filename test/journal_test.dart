@@ -31,19 +31,46 @@ void main() {
       expect(be.buangan, 0);
     });
 
-    test('JSON roundtrip', () {
+    test('tanda manual TP/SL & miss', () {
+      // tanda manual menang atas arah rules
+      final tpSama = JournalEntry(
+          at: d(2026, 1, 5), pair: 'X', price: 1, ruleA: 2, ruleB: 2, mark: 'TP');
+      expect(tpSama.outcome, 1);
+      expect(tpSama.pnl, 0);
+      // SL di rule yang sama (SL kecil, tidak pindah rule): SL terhitung,
+      // tapi buangan 0 karena tidak turun rules — terpisah dari buangan.
+      final slSama = JournalEntry(
+          at: d(2026, 1, 5), pair: 'X', price: 1, ruleA: 2, ruleB: 2, mark: 'SL');
+      expect(slSama.outcome, -1);
+      expect(slSama.buangan, 0);
+      // miss: bukan TP/SL walau rules turun & tanda SL
+      final miss = JournalEntry(
+          at: d(2026, 1, 5), pair: 'X', price: 1, ruleA: 3, ruleB: 1,
+          mark: 'SL', taken: false);
+      expect(miss.outcome, 2);
+      expect(miss.pnl, 0);
+      expect(miss.buangan, 0);
+    });
+
+    test('JSON roundtrip (dengan tanda & eksekusi)', () {
       final e = JournalEntry(
           at: DateTime(2026, 3, 14, 21, 5),
           pair: 'xauusd',
           price: 4021.5,
           ruleA: 7,
-          ruleB: 8);
+          ruleB: 8,
+          mark: 'SL',
+          taken: false);
       final back = JournalEntry.fromJson(e.toJson());
-      expect(back.at, e.at);
-      expect(back.pair, e.pair);
-      expect(back.price, e.price);
-      expect(back.ruleA, 7);
-      expect(back.ruleB, 8);
+      expect(back.mark, 'SL');
+      expect(back.taken, false);
+      expect(back.outcome, 2);
+      // entry lama tanpa mark/taken → kompatibel: diturunkan dari rules
+      final legacy = JournalEntry.fromJson(
+          {'at': '2026-03-14T21:05:00.000', 'pair': 'XAUUSD', 'price': 4000, 'a': 5, 'b': 4});
+      expect(legacy.mark, '');
+      expect(legacy.taken, true);
+      expect(legacy.outcome, -1);
     });
   });
 
@@ -106,7 +133,42 @@ void main() {
       expect(s2.total, 2);
       expect(s2.tp, 1);
       expect(s2.sl, 0);
-      expect(s2.winrate, closeTo(50, 0.01));
+      expect(s2.miss, 0);
+      // winrate = TP / (TP + SL) — BE di luar penyebut
+      expect(s2.winrate, closeTo(100, 0.01));
+    });
+
+    test('trade miss: masuk total, bukan TP/SL, balance tidak berubah', () {
+      final s3 = computeJournalStats([
+        JournalEntry(
+            at: d(2026, 1, 5), pair: 'X', price: 1, ruleA: 4, ruleB: 3,
+            mark: 'SL', taken: false),
+        JournalEntry(
+            at: d(2026, 1, 5), pair: 'X', price: 1, ruleA: 4, ruleB: 5,
+            mark: 'TP'),
+      ], 4, d(2026, 1, 5, 23));
+      expect(s3.total, 2);
+      expect(s3.miss, 1);
+      expect(s3.tp, 1);
+      expect(s3.sl, 0);
+      expect(s3.buangan, 0);
+      expect(s3.winrate, 100); // hanya trade yang diambil yang dihitung
+      expect(s3.balanceNow, ruleBal(5)); // miss tidak menggerakkan balance
+      expect(s3.all.rp, 0); // kurva balance hanya dari trade yang diambil
+    });
+
+    test('SL tanpa buangan (rule sama) terpisah dari total buangan', () {
+      final s4 = computeJournalStats([
+        JournalEntry(
+            at: d(2026, 1, 5), pair: 'X', price: 1, ruleA: 4, ruleB: 4,
+            mark: 'SL'),
+        JournalEntry(
+            at: d(2026, 1, 5), pair: 'X', price: 1, ruleA: 4, ruleB: 3,
+            mark: 'SL'),
+      ], 4, d(2026, 1, 5, 23));
+      expect(s4.sl, 2); // dua-duanya SL
+      expect(s4.buangan, ruleBal(4) - ruleBal(3)); // hanya yang turun rules
+      expect(s4.winrate, 0);
     });
   });
 
@@ -135,9 +197,11 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Trading Journal'), findsOneWidget);
-    expect(find.text('TOTAL BUANGAN (SL TURUN RULES)'), findsOneWidget);
+    expect(find.text('TOTAL BUANGAN'), findsOneWidget);
+    expect(find.text('KEAMBIL'), findsOneWidget);
+    expect(find.text('MISS'), findsOneWidget);
     expect(find.text('Belum ada trade. Catat trade pertamamu di form atas — '
-        'hasil TP/SL otomatis dari rules awal → akhir.'), findsOneWidget);
+        'tandai hasilnya TP/SL dan apakah keambil atau miss.'), findsOneWidget);
 
     // validasi: simpan tanpa isi rules → toast error, tidak ada entry
     await tester.enterText(
