@@ -396,7 +396,8 @@ class _HomeScreenState extends State<HomeScreen> {
     AutoOut a;
     if (c.ok) {
       a = computeAuto(pl, bal!, ks!, rp!, ra!, c.riskUsd);
-      if (!a.empty) _lastAutoSub = a.sub;
+      // sub "0.00" tidak disimpan — supaya tidak muncul lagi saat state kosong
+      if (!a.empty && a.big != '0.00') _lastAutoSub = a.sub;
       matrix = computeMatrix(bal, ks, rp, pl);
     } else {
       a = AutoOut(true, '–', false, _lastAutoSub, '–', '–', '–', '–');
@@ -944,6 +945,11 @@ class _HomeScreenState extends State<HomeScreen> {
       rrSub = auto.pip == '–' ? '' : '1 pip ≈ ${auto.pip}';
     }
     final subText = auto.sub.isEmpty ? _lastAutoSub : auto.sub;
+    // Paragraf penjelasan "Belum cukup untuk 0.01 lot..." (big == '0.00')
+    // disembunyikan dari UI atas permintaan user (dianggap tulisan ngga
+    // penting). Engine tetap menghasilkan sub — hanya tampilan yang
+    // dilewati. Warning merah lot > 10.00 tetap tampil.
+    final showSub = auto.big != '0.00';
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -1026,9 +1032,11 @@ class _HomeScreenState extends State<HomeScreen> {
                           color: bad ? p.red.withAlpha(200) : p.gold.withAlpha(200))),
                 ],
               ),
-              const SizedBox(height: 4),
-              Text(subText,
-                  style: txt(context, 12, color: p.muted, height: 1.45)),
+              if (showSub) ...[
+                const SizedBox(height: 4),
+                Text(subText,
+                    style: txt(context, 12, color: p.muted, height: 1.45)),
+              ],
               const SizedBox(height: 12),
               Container(
                 padding: const EdgeInsets.all(10),
