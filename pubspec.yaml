@@ -38,6 +38,8 @@ dependencies:
   http: ^1.6.0
   share_plus: ^13.3.1
   path_provider: ^2.1.6
+  excel: ^4.0.6          # baca + tulis file .xlsx (pure Dart)
+  file_picker: ^13.1.0   # pilih file .xlsx saat impor
 
 dev_dependencies:
   flutter_test:

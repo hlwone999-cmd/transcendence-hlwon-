@@ -3,10 +3,14 @@
 // - statistik: total/TP/SL/winrate/buangan/balance
 // - drawdown harian/mingguan/bulanan/all (periode terburuk)
 // - ekspor/impor data jurnal (JSON roundtrip) + kartu KEAMBIL/MISS
+// - ekspor/impor EXCEL (.xlsx): roundtrip semua field, tanggal teks/serial,
+//   baris tidak valid → FormatException
 // - smoke test UI: tab Jurnal merender + simpan trade + validasi + dialog
 //   ekspor/impor
 import 'dart:convert';
+import 'dart:typed_data';
 
+import 'package:excel/excel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -345,6 +349,105 @@ void main() {
     });
   });
 
+  group('ekspor / impor Excel (.xlsx)', () {
+    final entries = [
+      JournalEntry(
+          at: d(2026, 1, 5, 9, 30), pair: 'XAUUSD', price: 4021.5,
+          ruleA: 5, ruleB: 4, mark: 'SL', taken: true, bias: 'SELL'),
+      JournalEntry(
+          at: d(2026, 1, 6, 10), pair: 'XAUUSD', price: 4000,
+          ruleA: 4, ruleB: 5, mark: 'TP', taken: false, bias: 'BUY'),
+      JournalEntry(
+          at: d(2026, 1, 7, 21, 5), pair: 'XAUUSD', price: 3995,
+          ruleA: 5, ruleB: 5), // BE: tanpa tanda, rules sama
+    ];
+
+    test('roundtrip: semua field kembali persis + start rule dari Info', () {
+      final bytes =
+          journalExportXlsx(entries, 3, exportedAt: d(2026, 1, 7, 8));
+      final imp = journalParseImportXlsx(bytes);
+      expect(imp.startRule, 3); // dibaca dari sheet Info
+      expect(imp.entries.length, 3);
+      final a = imp.entries[0];
+      expect(a.at, d(2026, 1, 5, 9, 30)); // sel tanggal Excel → balik persis
+      expect(a.pair, 'XAUUSD');
+      expect(a.price, 4021.5);
+      expect(a.ruleA, 5);
+      expect(a.ruleB, 4);
+      expect(a.mark, 'SL');
+      expect(a.taken, true);
+      expect(a.bias, 'SELL');
+      final b = imp.entries[1];
+      expect(b.taken, false);
+      expect(b.mark, 'TP');
+      expect(b.bias, 'BUY');
+      final c = imp.entries[2];
+      expect(c.mark, ''); // 'BE' di file → kembali tanpa tanda
+      expect(c.outcome, 0);
+      expect(c.taken, true);
+    });
+
+    test('kolom tanggal toleran: teks gaya app & serial angka terbaca', () {
+      final xl = Excel.createExcel();
+      final sh = xl['Jurnal'];
+      sh.appendRow([
+        TextCellValue('Tanggal'), TextCellValue('Pair'),
+        TextCellValue('Harga Entry'), TextCellValue('Rule Awal'),
+        TextCellValue('Rule Akhir'), TextCellValue('Hasil'),
+        TextCellValue('Eksekusi'), TextCellValue('Bias'),
+      ]);
+      // tanggal TEKS gaya app (dd/MM/yyyy HH.mm) + harga koma desimal
+      sh.appendRow([
+        TextCellValue('05/01/2026 09.30'), TextCellValue('xauusd'),
+        TextCellValue('4021,5'), IntCellValue(5), IntCellValue(4),
+        TextCellValue('SL'), TextCellValue('KEAMBIL'), TextCellValue('SELL'),
+      ]);
+      // tanggal ANGKA SERIAL Excel (epoch 30-12-1899) — bentuk yang muncul
+      // kalau file diedit software lain
+      final serial =
+          DateTime.utc(2026, 1, 6, 10).difference(DateTime.utc(1899, 12, 30))
+              .inMilliseconds /
+          86400000.0;
+      sh.appendRow([
+        DoubleCellValue(serial), TextCellValue('XAUUSD'),
+        DoubleCellValue(4000), IntCellValue(4), IntCellValue(5),
+        TextCellValue('TP'), TextCellValue('MISS'), TextCellValue('BUY'),
+      ]);
+      final bytes = Uint8List.fromList(xl.encode()!);
+      final imp = journalParseImportXlsx(bytes);
+      expect(imp.entries.length, 2);
+      expect(imp.entries[0].at, d(2026, 1, 5, 9, 30)); // teks → tanggal
+      expect(imp.entries[0].pair, 'XAUUSD'); // dibesarkan
+      expect(imp.entries[0].price, 4021.5); // '4021,5' → koma desimal
+      expect(imp.entries[0].mark, 'SL');
+      expect(imp.entries[1].at, d(2026, 1, 6, 10)); // serial → tanggal benar
+      expect(imp.entries[1].taken, false); // MISS → tidak diambil
+    });
+
+    test('baris rules tidak valid → FormatException (bukan crash)', () {
+      final xl = Excel.createExcel();
+      final sh = xl['Jurnal'];
+      sh.appendRow([
+        TextCellValue('Tanggal'), TextCellValue('Rule Awal'),
+        TextCellValue('Rule Akhir'),
+      ]);
+      sh.appendRow([
+        TextCellValue('05/01/2026'), IntCellValue(1), IntCellValue(2),
+      ]);
+      sh.appendRow([
+        TextCellValue('06/01/2026'), TextCellValue('tujuh'), IntCellValue(2),
+      ]);
+      final bytes = Uint8List.fromList(xl.encode()!);
+      expect(() => journalParseImportXlsx(bytes), throwsFormatException);
+    });
+
+    test('file sampah → FormatException (ditangkap UI)', () {
+      expect(
+          () => journalParseImportXlsx(Uint8List.fromList([1, 2, 3, 4])),
+          throwsFormatException);
+    });
+  });
+
   TestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets('tab Jurnal: render, simpan trade, validasi', (tester) async {
@@ -440,14 +543,16 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Ekspor Data Jurnal'), findsOneWidget);
     expect(find.text('Salin'), findsOneWidget);
-    expect(find.text('Bagikan'), findsOneWidget);
+    expect(find.text('Excel'), findsOneWidget);
     await tester.tap(find.text('Tutup'));
     await tester.pumpAndSettle();
 
-    // --- IMPOR: format sampah → toast error, data lama tetap utuh ---
+    // --- IMPOR: dialog punya tombol PILIH FILE EXCEL; format sampah →
+    // toast error, data lama tetap utuh ---
     await tester.tap(find.text('IMPOR'));
     await tester.pumpAndSettle();
     expect(find.text('Impor Data Jurnal'), findsOneWidget);
+    expect(find.text('PILIH FILE EXCEL'), findsOneWidget);
     await tester.enterText(
         find.byKey(const Key('jurnal_import_text')), 'sampah');
     await tester.tap(find.text('Impor'), warnIfMissed: true);
@@ -456,8 +561,7 @@ void main() {
     // error impor, lalu hanguskan timer-nya.
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
-    expect(find.text('Format tidak dikenali — tempel JSON hasil ekspor jurnal.'),
-        findsOneWidget);
+    expect(find.textContaining('Impor gagal'), findsOneWidget);
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
     expect(find.text('Rule 1'), findsWidgets);

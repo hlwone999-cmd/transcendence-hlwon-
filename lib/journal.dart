@@ -22,16 +22,21 @@
 // HP), TOTAL = akumulasi seluruh SL murni (10% dari balance rule awal —
 // TANPA buangan, SL berdiri sendiri; buangan dilaporkan terpisah di
 // kartu TOTAL BUANGAN). Eksekusi juga diringkas di kartu KEAMBIL (trade
-// yang benar-benar diambil) dan MISS. Data jurnal bisa di-EKSPOR (teks
-// JSON — salin ke clipboard / bagikan) lalu di-IMPOR lagi (tempel JSON)
-// untuk backup atau pindah perangkat.
+// yang benar-benar diambil) dan MISS. Data jurnal bisa di-EKSPOR ke file
+// EXCEL (.xlsx — dibagikan lewat share sheet, bisa dibuka/diedit di Excel
+// / Google Sheets) atau disalin sebagai teks JSON; IMPOR menerima file
+// .xlsx maupun JSON tempelan — untuk backup atau pindah perangkat.
 //
 // Modul ini STANDALONE: tidak mengubah algoritma/kalkulator existing.
 // Data disimpan di SharedPreferences (journal_entries & journal_start).
 import 'dart:convert';
+import 'dart:io'; // File — simpan xlsx ke temp sebelum dibagikan
 
+import 'package:excel/excel.dart' hide Border, TextSpan; // baca + tulis .xlsx
+import 'package:file_picker/file_picker.dart'; // pilih .xlsx saat impor
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'; // Clipboard — salin hasil ekspor
+import 'package:path_provider/path_provider.dart'; // folder temp
 import 'package:share_plus/share_plus.dart'; // bagikan hasil ekspor
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -166,6 +171,275 @@ JournalImport journalParseImport(String raw) {
       .whereType<Map>()
       .map((m) => JournalEntry.fromJson(Map<String, dynamic>.from(m)))
       .toList();
+  return JournalImport(entries, start.clamp(1, kRuleBalances.length));
+}
+
+// ---------------------------------------------------------------------------
+// Ekspor / Impor EXCEL (.xlsx) — fungsi murni, tanpa I/O (mudah dites)
+// ---------------------------------------------------------------------------
+
+/// Nama sheet standar di file ekspor: sheet "Jurnal" berisi tabel trade,
+/// sheet "Info" menyimpan "Mulai dari Rule" dkk.
+const String kXlsxSheetJurnal = 'Jurnal';
+const String kXlsxSheetInfo = 'Info';
+
+const List<String> _kXlsxHeader = [
+  'Tanggal', 'Pair', 'Harga Entry', 'Rule Awal', 'Rule Akhir', 'Hasil',
+  'Eksekusi', 'Bias', 'SL Murni (Rp)', 'Buangan (Rp)', 'P/L (Rp)',
+];
+
+/// Label kolom HASIL: tanda manual (TP/SL); entry tanpa tanda & rules sama
+/// tampil 'BE' supaya jelas dibaca di Excel (impor mengembalikan '').
+String _hasilLabel(JournalEntry e) {
+  if (e.mark.isNotEmpty) return e.mark;
+  if (e.taken && e.ruleA == e.ruleB) return 'BE';
+  return '';
+}
+
+String _p2(int n) => n.toString().padLeft(2, '0'); // 5 → "05" (nama file)
+
+/// Bangun isi file Excel (.xlsx) dari seluruh data jurnal — fungsi murni
+/// (tanpa akses file), sehingga roundtrip-nya bisa dites di unit test.
+///
+/// Sheet "Jurnal": 1 baris header + 1 baris per trade. Tanggal ditulis
+/// sebagai sel tanggal-waktu Excel ASLI (bisa difilter/disort di Excel).
+/// Kolom SL Murni / Buangan / P/L hanya INFO (dihitung ulang dari rules,
+/// diabaikan saat impor) supaya angkanya ikut terlihat saat dibuka.
+/// Sheet "Info": metadata, termasuk "Mulai dari Rule" untuk impor.
+Uint8List journalExportXlsx(List<JournalEntry> entries, int startRule,
+    {DateTime? exportedAt}) {
+  final xl = Excel.createExcel();
+  final sh = xl[kXlsxSheetJurnal];
+  sh.appendRow([for (final h in _kXlsxHeader) TextCellValue(h)]);
+  for (int c = 0; c < _kXlsxHeader.length; c++) {
+    sh.cell(CellIndex.indexByColumnRow(columnIndex: c, rowIndex: 0)).cellStyle =
+        CellStyle(bold: true);
+    sh.setColumnWidth(c, c == 0 ? 18 : 13);
+  }
+  for (final e in entries) {
+    sh.appendRow([
+      DateTimeCellValue.fromDateTime(e.at),
+      TextCellValue(e.pair),
+      DoubleCellValue(e.price),
+      IntCellValue(e.ruleA),
+      IntCellValue(e.ruleB),
+      TextCellValue(_hasilLabel(e)),
+      TextCellValue(e.taken ? 'KEAMBIL' : 'MISS'),
+      TextCellValue(e.bias),
+      IntCellValue(e.slMurni),
+      IntCellValue(e.buangan),
+      IntCellValue(e.pnl),
+    ]);
+  }
+  final info = xl[kXlsxSheetInfo];
+  void infoRow(String k, CellValue v) => info.appendRow([TextCellValue(k), v]);
+  infoRow('Aplikasi', TextCellValue('transcendence'));
+  infoRow('Jenis', TextCellValue('journal'));
+  infoRow('Versi', const IntCellValue(1));
+  infoRow('Diekspor',
+      TextCellValue((exportedAt ?? DateTime.now()).toIso8601String()));
+  infoRow('Mulai dari Rule', IntCellValue(startRule));
+  infoRow('Jumlah Trade', IntCellValue(entries.length));
+  xl.delete('Sheet1'); // buang sheet default — tinggal "Jurnal" & "Info"
+  return Uint8List.fromList(xl.encode()!);
+}
+
+// ---- pembacaan sel yang toleran: nilai bisa teks / angka / tanggal ----
+
+String? _cellText(Data? d) {
+  final v = d?.value;
+  if (v == null) return null;
+  if (v is TextCellValue) {
+    final t = v.value.text;
+    return (t == null || t.trim().isEmpty) ? null : t;
+  }
+  if (v is IntCellValue) return '${v.value}';
+  if (v is DoubleCellValue) return '${v.value}';
+  if (v is BoolCellValue) return v.value ? 'TRUE' : 'FALSE';
+  if (v is DateCellValue || v is DateTimeCellValue) {
+    return _cellDate(d)?.toIso8601String();
+  }
+  return null;
+}
+
+int? _cellInt(Data? d) {
+  final v = d?.value;
+  if (v == null) return null;
+  if (v is IntCellValue) return v.value;
+  if (v is DoubleCellValue) return v.value.round();
+  if (v is TextCellValue) {
+    final m = RegExp(r'-?\d+').firstMatch(v.value.text ?? '');
+    return m == null ? null : int.tryParse(m.group(0)!);
+  }
+  return null;
+}
+
+double? _cellDouble(Data? d) {
+  final v = d?.value;
+  if (v == null) return null;
+  if (v is IntCellValue) return v.value.toDouble();
+  if (v is DoubleCellValue) return v.value;
+  if (v is TextCellValue) return numPlain(v.value.text ?? '');
+  return null;
+}
+
+/// Sel tanggal: DateTimeCellValue/DateCellValue (hasil ekspor app ini),
+/// angka serial Excel (epoch 30-12-1899), atau teks (ISO / dd-MM-yyyy).
+DateTime? _cellDate(Data? d) {
+  final v = d?.value;
+  if (v == null) return null;
+  if (v is DateTimeCellValue) return v.asDateTimeLocal();
+  if (v is DateCellValue) return v.asDateTimeLocal();
+  if (v is IntCellValue) return _serialToDate(v.value.toDouble());
+  if (v is DoubleCellValue) return _serialToDate(v.value);
+  if (v is TextCellValue) return _parseTanggalText(v.value.text ?? '');
+  return null;
+}
+
+/// Serial Excel → tanggal. Komponen hasil dipakai APA ADANYA (tanpa
+/// konversi zona waktu) — persis cara paket excel membaca sel tanggal,
+/// sehingga serial dari file ekspor app ini kembali ke nilai yang sama.
+DateTime _serialToDate(double serial) {
+  final u = DateTime.utc(1899, 12, 30)
+      .add(Duration(milliseconds: (serial * 86400000).round()));
+  return DateTime(u.year, u.month, u.day, u.hour, u.minute);
+}
+
+/// Teks tanggal yang dipahami: ISO 8601, "dd/MM/yyyy HH:mm" / "HH.mm"
+/// (gaya app), "dd-MM-yyyy", dan tanggal polosan — Excel lokal Indonesia
+/// bisa menyimpan tanggal sebagai teks seperti ini.
+DateTime? _parseTanggalText(String raw) {
+  final s = raw.trim();
+  if (s.isEmpty) return null;
+  final iso = DateTime.tryParse(s);
+  if (iso != null) return iso;
+  final m = RegExp(r'^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})'
+          r'(?:[ T,]+(\d{1,2})[:.](\d{2}))?$')
+      .firstMatch(s);
+  if (m == null) return null;
+  return DateTime(
+    int.parse(m.group(3)!),
+    int.parse(m.group(2)!),
+    int.parse(m.group(1)!),
+    int.tryParse(m.group(4) ?? '') ?? 0,
+    int.tryParse(m.group(5) ?? '') ?? 0,
+  );
+}
+
+/// Baca file Excel (.xlsx) hasil ekspor jurnal. Kolom dikenali lewat nama
+/// header (huruf besar/kecil bebas; baris judul di atas header ditoleransi),
+/// baris kosong dilewati. Baris yang tanggal/rules-nya tidak valid melempar
+/// FormatException berisi nomor baris — ditangkap UI → toast, tidak crash.
+JournalImport journalParseImportXlsx(List<int> bytes) {
+  final Excel xl;
+  try {
+    xl = Excel.decodeBytes(bytes);
+  } catch (_) {
+    throw const FormatException('file Excel tidak bisa dibaca');
+  }
+
+  // "Mulai dari Rule" dibaca dari sheet Info (kalau ada).
+  int start = 1;
+  for (final name in xl.tables.keys) {
+    if (name.trim().toLowerCase() != kXlsxSheetInfo.toLowerCase()) continue;
+    for (final row in xl.tables[name]!.rows) {
+      final k = row.isNotEmpty ? _cellText(row[0])?.trim().toLowerCase() : null;
+      if (k == 'mulai dari rule' && row.length > 1) {
+        final v = _cellInt(row[1]);
+        if (v != null) start = v;
+      }
+    }
+  }
+
+  // Sheet jurnal: "Jurnal" (tanpa peduli huruf besar/kecil) atau pertama.
+  Sheet? sheet;
+  for (final name in xl.tables.keys) {
+    if (name.trim().toLowerCase() == kXlsxSheetJurnal.toLowerCase()) {
+      sheet = xl.tables[name];
+      break;
+    }
+  }
+  sheet ??= xl.tables.values.isEmpty ? null : xl.tables.values.first;
+  if (sheet == null) throw const FormatException('sheet jurnal tidak ada');
+
+  // Cari baris header (maks 10 baris pertama): wajib ada kolom "tanggal".
+  final rows = sheet.rows;
+  int headerIdx = -1;
+  final col = <String, int>{};
+  for (int i = 0; i < rows.length && i < 10; i++) {
+    final byName = <String, int>{};
+    for (int c = 0; c < rows[i].length; c++) {
+      final t = _cellText(rows[i][c])?.trim().toLowerCase();
+      if (t != null && t.isNotEmpty && !byName.containsKey(t)) byName[t] = c;
+    }
+    int? findCol(List<String> names) {
+      for (final n in names) {
+        final c = byName[n];
+        if (c != null) return c;
+      }
+      for (final e in byName.entries) {
+        for (final n in names) {
+          if (e.key.contains(n)) return e.value;
+        }
+      }
+      return null;
+    }
+
+    final tgl = findCol(['tanggal', 'date', 'waktu']);
+    if (tgl == null) continue;
+    col['tanggal'] = tgl;
+    col['pair'] = findCol(['pair', 'pasangan']) ?? -1;
+    col['harga'] = findCol(['harga entry', 'harga', 'price']) ?? -1;
+    col['a'] = findCol(['rule awal', 'rules awal']) ?? -1;
+    col['b'] = findCol(['rule akhir', 'rules akhir']) ?? -1;
+    col['hasil'] = findCol(['hasil']) ?? -1;
+    col['eksekusi'] = findCol(['eksekusi']) ?? -1;
+    col['bias'] = findCol(['bias']) ?? -1;
+    headerIdx = i;
+    break;
+  }
+  if (headerIdx < 0) {
+    throw const FormatException('kolom jurnal tidak dikenali');
+  }
+
+  final entries = <JournalEntry>[];
+  for (int i = headerIdx + 1; i < rows.length; i++) {
+    final r = rows[i];
+    if (r.every((d) => d?.value == null)) continue; // baris kosong
+    Data? cell(String key) {
+      final c = col[key] ?? -1;
+      return c >= 0 && c < r.length ? r[c] : null;
+    }
+
+    final at = _cellDate(cell('tanggal'));
+    if (at == null) {
+      throw FormatException('baris ${i + 1}: tanggal tidak terbaca');
+    }
+    final a = _cellInt(cell('a'));
+    final b = _cellInt(cell('b'));
+    if (a == null ||
+        b == null ||
+        a < 1 ||
+        a > kRuleBalances.length ||
+        b < 1 ||
+        b > kRuleBalances.length) {
+      throw FormatException('baris ${i + 1}: rules awal/akhir tidak valid');
+    }
+    final pair = (_cellText(cell('pair')) ?? '').trim();
+    final hasil = (_cellText(cell('hasil')) ?? '').trim().toUpperCase();
+    final ekse = (_cellText(cell('eksekusi')) ?? '').trim().toUpperCase();
+    final bias = (_cellText(cell('bias')) ?? '').trim().toUpperCase();
+    entries.add(JournalEntry(
+      at: at,
+      pair: pair.isEmpty ? '-' : pair.toUpperCase(),
+      price: _cellDouble(cell('harga')) ?? 0,
+      ruleA: a,
+      ruleB: b,
+      mark: hasil == 'TP' ? 'TP' : (hasil == 'SL' ? 'SL' : ''),
+      taken: !ekse.contains('MISS'),
+      bias: bias == 'BUY' ? 'BUY' : (bias == 'SELL' ? 'SELL' : ''),
+    ));
+  }
   return JournalImport(entries, start.clamp(1, kRuleBalances.length));
 }
 
@@ -471,8 +745,9 @@ class _JournalPageState extends State<JournalPage> {
               children: [
                 Text(
                     '${_entries.length} trade · mulai dari Rule $_startRule — '
-                    'teks JSON ini berisi seluruh data jurnal. Salin atau '
-                    'bagikan untuk backup / pindah perangkat.',
+                    'pilih EXCEL untuk file .xlsx (bisa dibuka / diedit di '
+                    'Excel / Google Sheets), atau SALIN JSON untuk backup '
+                    'penuh & pindah perangkat.',
                     style: txt(ctx, 12.5, color: p.muted, height: 1.4)),
                 const SizedBox(height: 10),
                 Container(
@@ -498,12 +773,9 @@ class _JournalPageState extends State<JournalPage> {
           TextButton(
               onPressed: () {
                 Navigator.pop(ctx);
-                SharePlus.instance.share(ShareParams(
-                    text: json,
-                    title:
-                        'Jurnal Transcendence — ${_entries.length} trade'));
+                _exportExcel();
               },
-              child: Text('Bagikan',
+              child: Text('Excel',
                   style: txt(ctx, 13, color: p.gold, w: FontWeight.w600))),
           TextButton(
               onPressed: () {
@@ -524,7 +796,9 @@ class _JournalPageState extends State<JournalPage> {
     // menutup (animasi keluar) memicu "used after disposed" saat rebuild;
     // controller pendek-umur begini cukup dibiarkan di-GC setelah route mati.
     final ctrl = TextEditingController();
-    final ok = await showDialog<bool>(
+    // Hasil dialog: false/null = batal, String = JSON tempelan,
+    // Uint8List = isi file Excel yang dipilih.
+    final r = await showDialog<dynamic>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: p.card,
@@ -539,15 +813,39 @@ class _JournalPageState extends State<JournalPage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                    'Tempel teks JSON hasil ekspor. PERHATIAN: isi jurnal '
-                    'yang sekarang (daftar trade & mulai dari rule) akan '
-                    'DIGANTI dengan data dari tempelan.',
+                    'Pilih file Excel (.xlsx) hasil ekspor, atau tempel teks '
+                    'JSON. PERHATIAN: isi jurnal yang sekarang (daftar trade '
+                    '& mulai dari rule) akan DIGANTI dengan data yang diimpor.',
                     style: txt(ctx, 12.5, color: p.muted, height: 1.4)),
                 const SizedBox(height: 10),
+                GhostButton('PILIH FILE EXCEL',
+                    key: const Key('jurnal_pick_xlsx'),
+                    icon: Icons.grid_on_rounded,
+                    expanded: true,
+                    onTap: () async {
+                  try {
+                    final files = await FilePicker.pickFiles(
+                        type: FileType.custom,
+                        allowedExtensions: ['xlsx']);
+                    final f = files.isEmpty ? null : files.single;
+                    if (f == null || !ctx.mounted) return;
+                    final bytes = await f.readAsBytes();
+                    if (bytes.isEmpty) return;
+                    if (ctx.mounted) Navigator.pop(ctx, bytes);
+                  } catch (_) {
+                    _toast('Pemilih file tidak tersedia di perangkat ini.',
+                        err: true);
+                  }
+                }),
+                const SizedBox(height: 10),
+                Center(
+                    child: Text('— atau tempel JSON —',
+                        style: txt(ctx, 11, color: p.dim))),
+                const SizedBox(height: 8),
                 TextField(
                   key: const Key('jurnal_import_text'),
                   controller: ctrl,
-                  maxLines: 7,
+                  maxLines: 5,
                   style: mono(ctx, 11.5, color: p.ink),
                   decoration: InputDecoration(
                     hintText: '{"app":"transcendence","type":"journal",...}',
@@ -570,20 +868,17 @@ class _JournalPageState extends State<JournalPage> {
               onPressed: () => Navigator.pop(ctx, false),
               child: Text('Batal', style: txt(ctx, 13, color: p.muted))),
           TextButton(
-              onPressed: () => Navigator.pop(ctx, true),
+              onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
               child: Text('Impor',
                   style: txt(ctx, 13, color: p.mint, w: FontWeight.w600))),
         ],
       ),
     );
-    final raw = ctrl.text.trim();
-    if (ok != true) return;
-    if (raw.isEmpty) {
-      _toast('Belum ada teks JSON yang ditempel.', err: true);
-      return;
-    }
+    if (r == null || r == false) return;
     try {
-      final imp = journalParseImport(raw);
+      final imp = r is String
+          ? journalParseImport(r)
+          : journalParseImportXlsx(r as List<int>);
       setState(() {
         _entries = imp.entries;
         _startRule = imp.startRule;
@@ -595,9 +890,35 @@ class _JournalPageState extends State<JournalPage> {
       });
       _persist();
       _toast('${imp.entries.length} trade diimpor — data jurnal diganti.');
+    } on FormatException catch (e) {
+      _toast('Impor gagal: ${e.message}', err: true);
     } catch (_) {
-      _toast('Format tidak dikenali — tempel JSON hasil ekspor jurnal.',
+      _toast('Format tidak dikenali — pilih file Excel hasil ekspor '
+          'atau tempel JSON.',
           err: true);
+    }
+  }
+
+  /// Ekspor ke file Excel (.xlsx): tulis ke folder temp lalu dibagikan
+  /// lewat share sheet (simpan ke Files/Drive, kirim via WA, dll).
+  Future<void> _exportExcel() async {
+    try {
+      final bytes = journalExportXlsx(_entries, _startRule);
+      final dir = await getTemporaryDirectory();
+      final t = DateTime.now();
+      final name = 'jurnal-transcendence-'
+          '${t.year}${_p2(t.month)}${_p2(t.day)}-'
+          '${_p2(t.hour)}${_p2(t.minute)}.xlsx';
+      final f = File('${dir.path}/$name');
+      await f.writeAsBytes(bytes, flush: true);
+      await SharePlus.instance.share(ShareParams(
+        files: [XFile(f.path)],
+        fileNameOverrides: [name],
+        title: name,
+        subject: 'Backup jurnal Transcendence (Excel)',
+      ));
+    } catch (_) {
+      _toast('Gagal membuat file Excel.', err: true);
     }
   }
 
