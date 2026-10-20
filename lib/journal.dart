@@ -21,13 +21,18 @@
 // pun tanggalnya langsung terlihat, tidak tergantung "hari ini" di jam
 // HP), TOTAL = akumulasi seluruh SL murni (10% dari balance rule awal —
 // TANPA buangan, SL berdiri sendiri; buangan dilaporkan terpisah di
-// kartu TOTAL BUANGAN).
+// kartu TOTAL BUANGAN). Eksekusi juga diringkas di kartu KEAMBIL (trade
+// yang benar-benar diambil) dan MISS. Data jurnal bisa di-EKSPOR (teks
+// JSON — salin ke clipboard / bagikan) lalu di-IMPOR lagi (tempel JSON)
+// untuk backup atau pindah perangkat.
 //
 // Modul ini STANDALONE: tidak mengubah algoritma/kalkulator existing.
 // Data disimpan di SharedPreferences (journal_entries & journal_start).
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // Clipboard — salin hasil ekspor
+import 'package:share_plus/share_plus.dart'; // bagikan hasil ekspor
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'engine.dart';
@@ -110,6 +115,58 @@ class JournalEntry {
   int get slMurni => outcome < 0 && ruleB < ruleA
       ? ruleBal(ruleA) - rDiv10(ruleBal(ruleA), 9)
       : 0;
+}
+
+// ---------------------------------------------------------------------------
+// Ekspor / Impor (fungsi murni — mudah dites)
+// ---------------------------------------------------------------------------
+
+/// Bungkus seluruh data jurnal jadi satu teks JSON — untuk backup atau
+/// pindah perangkat (salin ke clipboard / dibagikan sebagai teks).
+String journalExportJson(List<JournalEntry> entries, int startRule,
+    {DateTime? exportedAt}) {
+  return const JsonEncoder.withIndent('  ').convert({
+    'app': 'transcendence',
+    'type': 'journal',
+    'version': 1,
+    'exported': (exportedAt ?? DateTime.now()).toIso8601String(),
+    'start': startRule,
+    'count': entries.length,
+    'entries': entries.map((e) => e.toJson()).toList(),
+  });
+}
+
+/// Hasil impor: daftar trade + "mulai dari rule".
+class JournalImport {
+  final List<JournalEntry> entries;
+  final int startRule;
+  const JournalImport(this.entries, this.startRule);
+}
+
+/// Baca hasil ekspor. Menerima format amplop lengkap ({app, start,
+/// entries}) ataupun daftar entry polosan (list) — start default 1 dan
+/// di-clamp ke jumlah rule yang ada. Melempar FormatException kalau
+/// bentuknya tidak dikenal (ditangkap UI → toast, tidak pernah crash).
+JournalImport journalParseImport(String raw) {
+  final d = jsonDecode(raw);
+  List rawList;
+  int start = 1;
+  if (d is Map) {
+    if (d['entries'] is! List) {
+      throw const FormatException('bagian "entries" tidak ada / bukan list');
+    }
+    rawList = d['entries'] as List;
+    start = (d['start'] as num?)?.toInt() ?? 1;
+  } else if (d is List) {
+    rawList = d;
+  } else {
+    throw const FormatException('bentuk data tidak dikenal');
+  }
+  final entries = rawList
+      .whereType<Map>()
+      .map((m) => JournalEntry.fromJson(Map<String, dynamic>.from(m)))
+      .toList();
+  return JournalImport(entries, start.clamp(1, kRuleBalances.length));
 }
 
 // ---------------------------------------------------------------------------
@@ -393,6 +450,157 @@ class _JournalPageState extends State<JournalPage> {
     }
   }
 
+  // ---- ekspor / impor -----------------------------------------------------
+
+  void _openExport() {
+    final p = Palette.of(context);
+    final json = journalExportJson(_entries, _startRule);
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: p.card,
+        shape:
+            RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        title: Text('Ekspor Data Jurnal',
+            style: txt(ctx, 16, w: FontWeight.w600)),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                    '${_entries.length} trade · mulai dari Rule $_startRule — '
+                    'teks JSON ini berisi seluruh data jurnal. Salin atau '
+                    'bagikan untuk backup / pindah perangkat.',
+                    style: txt(ctx, 12.5, color: p.muted, height: 1.4)),
+                const SizedBox(height: 10),
+                Container(
+                  constraints: const BoxConstraints(maxHeight: 220),
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: p.surface1,
+                    borderRadius: BorderRadius.circular(9),
+                    border: Border.all(width: 1, color: p.line),
+                  ),
+                  child: SingleChildScrollView(
+                    child: SelectableText(json,
+                        style: mono(ctx, 10.5, color: p.ink)),
+                  ),
+                ),
+              ]),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: Text('Tutup', style: txt(ctx, 13, color: p.muted))),
+          TextButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                SharePlus.instance.share(ShareParams(
+                    text: json,
+                    title:
+                        'Jurnal Transcendence — ${_entries.length} trade'));
+              },
+              child: Text('Bagikan',
+                  style: txt(ctx, 13, color: p.gold, w: FontWeight.w600))),
+          TextButton(
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: json));
+                Navigator.pop(ctx);
+                _toast('Data jurnal disalin ke clipboard.');
+              },
+              child: Text('Salin',
+                  style: txt(ctx, 13, color: p.mint, w: FontWeight.w600))),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openImport() async {
+    final p = Palette.of(context);
+    // Catatan: controller TIDAK di-dispose manual — dispose saat dialog masih
+    // menutup (animasi keluar) memicu "used after disposed" saat rebuild;
+    // controller pendek-umur begini cukup dibiarkan di-GC setelah route mati.
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: p.card,
+        shape:
+            RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        title: Text('Impor Data Jurnal',
+            style: txt(ctx, 16, w: FontWeight.w600)),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                    'Tempel teks JSON hasil ekspor. PERHATIAN: isi jurnal '
+                    'yang sekarang (daftar trade & mulai dari rule) akan '
+                    'DIGANTI dengan data dari tempelan.',
+                    style: txt(ctx, 12.5, color: p.muted, height: 1.4)),
+                const SizedBox(height: 10),
+                TextField(
+                  key: const Key('jurnal_import_text'),
+                  controller: ctrl,
+                  maxLines: 7,
+                  style: mono(ctx, 11.5, color: p.ink),
+                  decoration: InputDecoration(
+                    hintText: '{"app":"transcendence","type":"journal",...}',
+                    hintStyle: txt(ctx, 11, color: p.dim),
+                    filled: true,
+                    fillColor: p.surface1,
+                    contentPadding: const EdgeInsets.all(10),
+                    enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(9),
+                        borderSide: BorderSide(color: p.line)),
+                    focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(9),
+                        borderSide: BorderSide(color: p.gold)),
+                  ),
+                ),
+              ]),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: Text('Batal', style: txt(ctx, 13, color: p.muted))),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: Text('Impor',
+                  style: txt(ctx, 13, color: p.mint, w: FontWeight.w600))),
+        ],
+      ),
+    );
+    final raw = ctrl.text.trim();
+    if (ok != true) return;
+    if (raw.isEmpty) {
+      _toast('Belum ada teks JSON yang ditempel.', err: true);
+      return;
+    }
+    try {
+      final imp = journalParseImport(raw);
+      setState(() {
+        _entries = imp.entries;
+        _startRule = imp.startRule;
+        // rantai otomatis: rules awal berikutnya = rules akhir terakhir
+        _ruleA = _entries.isEmpty
+            ? null
+            : _entries.reduce((a, b) => a.at.isAfter(b.at) ? a : b).ruleB;
+        _ruleB = null;
+      });
+      _persist();
+      _toast('${imp.entries.length} trade diimpor — data jurnal diganti.');
+    } catch (_) {
+      _toast('Format tidak dikenali — tempel JSON hasil ekspor jurnal.',
+          err: true);
+    }
+  }
+
   String _fmtDate(DateTime d) =>
       '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year}';
   String _fmtTime(DateTime d) =>
@@ -435,6 +643,13 @@ class _JournalPageState extends State<JournalPage> {
             _mini(p, 'WINRATE',
                 '${s.winrate.toStringAsFixed(1).replaceFirst('.', ',')}%', p.gold),
           ]),
+          const SizedBox(height: 6),
+          Row(children: [
+            // ringkasan eksekusi: keambil vs miss (permintaan user)
+            _mini(p, 'KEAMBIL', '${s.total - s.miss}', p.mint),
+            const SizedBox(width: 8),
+            _mini(p, 'MISS', '${s.miss}', p.dim),
+          ]),
           if (s.miss > 0) ...[
             const SizedBox(height: 6),
             Text('${s.miss} trade di-miss · tidak dihitung TP/SL & balance',
@@ -454,6 +669,20 @@ class _JournalPageState extends State<JournalPage> {
           SectionHead(Icons.receipt_long, 'Riwayat Trade',
               trailing: BadgePill('${_entries.length} trade',
                   color: p.warm, bg: p.cardHi)),
+          const SizedBox(height: 10),
+          Row(children: [
+            Expanded(
+              child: GhostButton('EKSPOR',
+                  icon: Icons.ios_share,
+                  expanded: true,
+                  onTap: _openExport),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: GhostButton('IMPOR',
+                  icon: Icons.save_alt, expanded: true, onTap: _openImport),
+            ),
+          ]),
           const SizedBox(height: 10),
           if (_entries.isEmpty)
             ObsCard(

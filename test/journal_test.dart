@@ -1,8 +1,12 @@
 // Test fitur Jurnal Trade (lib/journal.dart):
 // - model & JSON roundtrip
 // - statistik: total/TP/SL/winrate/buangan/balance
-// - drawdown harian/mingguan/bulanan/all
-// - smoke test UI: tab Jurnal merender + simpan trade + validasi
+// - drawdown harian/mingguan/bulanan/all (periode terburuk)
+// - ekspor/impor data jurnal (JSON roundtrip) + kartu KEAMBIL/MISS
+// - smoke test UI: tab Jurnal merender + simpan trade + validasi + dialog
+//   ekspor/impor
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -286,6 +290,61 @@ void main() {
     });
   });
 
+  group('ekspor / impor data jurnal', () {
+    final entries = [
+      JournalEntry(
+          at: d(2026, 1, 5, 9, 30), pair: 'XAUUSD', price: 4021.5,
+          ruleA: 5, ruleB: 4, mark: 'SL', taken: true, bias: 'SELL'),
+      JournalEntry(
+          at: d(2026, 1, 6, 10), pair: 'XAUUSD', price: 4000,
+          ruleA: 4, ruleB: 5, mark: 'TP', taken: false, bias: 'BUY'),
+    ];
+
+    test('ekspor → impor = data identik (roundtrip semua field)', () {
+      final json =
+          journalExportJson(entries, 3, exportedAt: d(2026, 1, 7, 8));
+      final imp = journalParseImport(json);
+      expect(imp.startRule, 3);
+      expect(imp.entries.length, 2);
+      final a = imp.entries[0];
+      expect(a.at, d(2026, 1, 5, 9, 30));
+      expect(a.pair, 'XAUUSD');
+      expect(a.price, 4021.5);
+      expect(a.ruleA, 5);
+      expect(a.ruleB, 4);
+      expect(a.mark, 'SL');
+      expect(a.taken, true);
+      expect(a.bias, 'SELL');
+      final b = imp.entries[1];
+      expect(b.taken, false);
+      expect(b.mark, 'TP');
+      expect(b.bias, 'BUY');
+      // ekspor ulang hasil impor = teks JSON yang sama persis
+      expect(
+          journalExportJson(imp.entries, imp.startRule,
+              exportedAt: d(2026, 1, 7, 8)),
+          json);
+    });
+
+    test('list polosan diterima; start default 1 & di-clamp ke rule terakhir',
+        () {
+      final imp = journalParseImport(
+          jsonEncode(entries.map((e) => e.toJson()).toList()));
+      expect(imp.entries.length, 2);
+      expect(imp.startRule, 1);
+      final bad =
+          journalParseImport(jsonEncode({'start': 999, 'entries': []}));
+      expect(bad.startRule, kRuleBalances.length); // clamp, bukan crash
+    });
+
+    test('data sampah → FormatException (ditangkap UI, bukan crash)', () {
+      expect(() => journalParseImport('bukan json'), throwsFormatException);
+      expect(() => journalParseImport('{"app":"x"}'), throwsFormatException);
+      expect(() => journalParseImport('42'), throwsFormatException);
+      expect(() => journalParseImport(''), throwsFormatException);
+    });
+  });
+
   TestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets('tab Jurnal: render, simpan trade, validasi', (tester) async {
@@ -312,8 +371,12 @@ void main() {
 
     expect(find.text('Trading Journal'), findsOneWidget);
     expect(find.text('TOTAL BUANGAN'), findsOneWidget);
-    expect(find.text('KEAMBIL'), findsOneWidget);
-    expect(find.text('MISS'), findsOneWidget);
+    // segmen EKSEKUSI + kartu ringkasan eksekusi = masing-masing 2 kemunculan
+    expect(find.text('KEAMBIL'), findsNWidgets(2));
+    expect(find.text('MISS'), findsNWidgets(2));
+    // tombol ekspor/impor data ada di bagian riwayat
+    expect(find.text('EKSPOR'), findsOneWidget);
+    expect(find.text('IMPOR'), findsOneWidget);
     // segmen bias BUY/SELL ada di form
     expect(find.text('BIAS'), findsOneWidget);
     expect(find.text('BUY'), findsOneWidget);
@@ -362,6 +425,43 @@ void main() {
     expect(find.byIcon(Icons.delete_outline), findsOneWidget);
     // pil bias SELL di riwayat + opsi SELL di form (preview hilang: ruleB null)
     expect(find.text('SELL'), findsNWidgets(2));
+
+    // --- EKSPOR: dialog terbuka, JSON terlihat, tutup lagi ---
+    // (Scrollable halaman disebut eksplisit — TextField punya Scrollable
+    // internal sendiri, jadi finder .first di dalam SingleChildScrollView)
+    await tester.scrollUntilVisible(find.text('EKSPOR'), 300,
+        scrollable: find
+            .descendant(
+                of: find.byType(SingleChildScrollView),
+                matching: find.byType(Scrollable))
+            .first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('EKSPOR'));
+    await tester.pumpAndSettle();
+    expect(find.text('Ekspor Data Jurnal'), findsOneWidget);
+    expect(find.text('Salin'), findsOneWidget);
+    expect(find.text('Bagikan'), findsOneWidget);
+    await tester.tap(find.text('Tutup'));
+    await tester.pumpAndSettle();
+
+    // --- IMPOR: format sampah → toast error, data lama tetap utuh ---
+    await tester.tap(find.text('IMPOR'));
+    await tester.pumpAndSettle();
+    expect(find.text('Impor Data Jurnal'), findsOneWidget);
+    await tester.enterText(
+        find.byKey(const Key('jurnal_import_text')), 'sampah');
+    await tester.tap(find.text('Impor'), warnIfMissed: true);
+    // toast error impor masuk ANTREAN ScaffoldMessenger di belakang toast
+    // 'Trade TP tersimpan' — majukan jam supaya antrean sampai ke toast
+    // error impor, lalu hanguskan timer-nya.
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+    expect(find.text('Format tidak dikenali — tempel JSON hasil ekspor jurnal.'),
+        findsOneWidget);
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+    expect(find.text('Rule 1'), findsWidgets);
+
     final s = computeJournalStats(const [], 1, DateTime.now());
     expect(s.startBal, 200000); // sanity engine
   });
