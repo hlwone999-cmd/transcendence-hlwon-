@@ -123,51 +123,54 @@ void main() {
       expect(s.balanceNow, ruleBal(2)); // trade terakhir 1 → 2
     });
 
-    test('drawdown = akumulasi nominal SL murni per periode (tanpa buangan)',
-        () {
+    test('drawdown = SL murni pada periode TERBURUK (tanpa buangan)', () {
       // Satu-satunya SL: 5/1 14.00 rule 2 → 1. SL murni = 10% dari balance
       // rule 2 = 240rb − 216rb = 24rb — BUKAN selisih penuh 40rb (SL+buangan).
       final slNom = ruleBal(2) - rDiv10(ruleBal(2), 9);
       expect(slNom, 24000);
-      expect(s.daily.rp, 0); // hari "ini" (6/1) tidak ada SL
-      expect(s.weekly.rp, slNom); // minggu sama mencakup 5 & 6 Jan
+      // "now" = 6/1, SL-nya 5/1 — tetap terlihat karena yang diambil adalah
+      // hari/minggu/bulan TERBURUK, bukan "hari ini" menurut jam.
+      expect(s.daily.rp, slNom); // hari terburuk = 5/1
+      expect(s.weekly.rp, slNom); // pekan terburuk memuat 5/1
       expect(s.monthly.rp, slNom);
       expect(s.all.rp, slNom);
       // % = SL murni terhadap balance rule awal trade (rule 2) = 10%
       expect(s.all.pct, closeTo(slNom / ruleBal(2) * 100, 0.01)); // 10%
+      expect(s.daily.pct, closeTo(10.0, 0.01));
     });
 
-    test('SL hari ini → drawdown harian & mingguan langsung terisi', () {
-      // "now" digeser ke 5/1 — tanggal yang sama dengan trade SL-nya.
-      final sNow = computeJournalStats(entries, 1, d(2026, 1, 5, 15));
+    test('trade SL bertanggal lampau → harian & mingguan langsung terisi '
+        '(regresi keluhan user)', () {
+      // "now" digeser jauh (17/2) sementara SL-nya 5/1 — implementasi lama
+      // menunjukkan Rp0 karena hanya melihat hari/minggu/bulan "ini".
+      final sPast = computeJournalStats(entries, 1, d(2026, 2, 17, 15));
       final slNom = ruleBal(2) - rDiv10(ruleBal(2), 9);
-      expect(sNow.daily.rp, slNom);
-      expect(sNow.weekly.rp, slNom);
-      expect(sNow.monthly.rp, slNom);
-      expect(sNow.all.rp, slNom);
-      // % harian = SL murni / balance rule awal trade (rule 2) = 10%
-      expect(sNow.daily.pct, closeTo(slNom / ruleBal(2) * 100, 0.01));
+      expect(sPast.daily.rp, slNom);
+      expect(sPast.weekly.rp, slNom);
+      expect(sPast.monthly.rp, slNom);
+      expect(sPast.all.rp, slNom);
+      expect(sPast.daily.pct, closeTo(slNom / ruleBal(2) * 100, 0.01));
     });
 
-    test('SL di hari/pekan berbeda terpisah per periode', () {
+    test('periode terburuk terpilih: SL terbesar menang di tiap tingkat', () {
       final sMix = computeJournalStats([
         JournalEntry(
             at: d(2026, 1, 5, 9), pair: 'X', price: 1, ruleA: 3, ruleB: 2,
-            mark: 'SL'), // Senin 5/1 — pekan lalu
+            mark: 'SL'), // Senin 5/1 — SL 28.800 (hari/pekan/bulan Jan)
         JournalEntry(
-            at: d(2026, 1, 12, 9), pair: 'X', price: 1, ruleA: 2, ruleB: 1,
-            mark: 'SL'), // Senin 12/1 — pekan ini ("now")
-      ], 3, d(2026, 1, 12, 10));
+            at: d(2026, 2, 12, 9), pair: 'X', price: 1, ruleA: 2, ruleB: 1,
+            mark: 'SL'), // Kamis 12/2 — SL 24.000 (bulan Feb)
+      ], 3, d(2026, 2, 12, 10));
       final sl3 = ruleBal(3) - rDiv10(ruleBal(3), 9); // 28.800
       final sl2 = ruleBal(2) - rDiv10(ruleBal(2), 9); // 24.000
       expect(sl3, 28800);
       expect(sl2, 24000);
-      expect(sMix.daily.rp, sl2); // hanya SL hari ini
-      expect(sMix.weekly.rp, sl2); // minggu 12/1 tidak memuat SL 5/1
-      expect(sMix.monthly.rp, sl3 + sl2); // dua-duanya di bulan Januari
-      expect(sMix.all.rp, sl3 + sl2);
-      // % harian = SL murni / balance rule awal trade hari ini (rule 2)
-      expect(sMix.daily.pct, closeTo(sl2 / ruleBal(2) * 100, 0.01)); // 10%
+      expect(sMix.daily.rp, sl3); // hari terburuk = 5/1 (28.800 > 24.000)
+      expect(sMix.weekly.rp, sl3); // pekan 5/1 terburuk (pekan 12/2 cuma 24rb)
+      expect(sMix.monthly.rp, sl3); // bulan terburuk = Jan (Feb cuma 24rb)
+      expect(sMix.all.rp, sl3 + sl2); // TOTAL tetap seluruh SL
+      expect(sMix.daily.pct, closeTo(sl3 / ruleBal(3) * 100, 0.01)); // 10%
+      expect(sMix.all.pct, closeTo(10.0, 0.01));
     });
 
     test('kasus user: start rule 1, SL 5→4 → persen = 10% (bukan 20,7%)', () {
@@ -179,10 +182,14 @@ void main() {
             at: d(2026, 1, 5, 9), pair: 'XAUUSD', price: 4000,
             ruleA: 5, ruleB: 4, mark: 'SL'),
       ], 1, d(2026, 1, 5, 10));
+      expect(sU.daily.rp, 41472);
+      expect(sU.daily.pct, closeTo(10.0, 0.01));
+      expect(sU.weekly.rp, 41472);
       expect(sU.monthly.rp, 41472);
       expect(sU.monthly.pct, closeTo(10.0, 0.01));
       expect(sU.all.pct, closeTo(10.0, 0.01));
-      // dua SL bertingkat (5→4 lalu 4→3): total 76.032, % rata-rata tetap 10%
+      // dua SL bertingkat (5→4 lalu 4→3), 5/1 & 6/1 satu pekan satu bulan:
+      // hari terburuk = 5/1 (41.472); pekan/bulan terburuk = gabungan 76.032
       final sW = computeJournalStats([
         JournalEntry(
             at: d(2026, 1, 5, 9), pair: 'X', price: 1,
@@ -191,6 +198,11 @@ void main() {
             at: d(2026, 1, 6, 9), pair: 'X', price: 1,
             ruleA: 4, ruleB: 3, mark: 'SL'),
       ], 5, d(2026, 1, 6, 10));
+      expect(sW.daily.rp, 41472);
+      expect(sW.daily.pct, closeTo(10.0, 0.01));
+      expect(sW.weekly.rp, 41472 + 34560);
+      expect(sW.weekly.pct, closeTo(10.0, 0.01));
+      expect(sW.monthly.rp, 41472 + 34560);
       expect(sW.all.rp, 41472 + 34560);
       expect(sW.all.pct, closeTo(10.0, 0.01));
     });
@@ -202,6 +214,9 @@ void main() {
       expect(e.buangan, 0);
       expect(e.balanceNow, ruleBal(3));
       expect(e.all.rp, 0);
+      expect(e.daily.rp, 0);
+      expect(e.weekly.rp, 0);
+      expect(e.monthly.rp, 0);
     });
 
     test('BE tidak dihitung TP/SL tapi masuk total', () {

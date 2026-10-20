@@ -16,9 +16,12 @@
 //   - sama tanpa tanda (entry lama) = BE (0)
 // Statistik: total trade, total TP, total SL, winrate, TOTAL BUANGAN,
 // balance sekarang (berantai dari "Mulai dari Rule"), dan drawdown
-// harian / mingguan / bulanan / total = akumulasi nominal SL MURNI per
-// periode (10% dari balance rule awal — TANPA buangan, SL berdiri
-// sendiri; buangan dilaporkan terpisah di kartu TOTAL BUANGAN).
+// harian / mingguan / bulanan = akumulasi SL MURNI pada periode TERBURUK
+// (hari / minggu / bulan dengan penumpukan SL terbesar — trade SL berapa
+// pun tanggalnya langsung terlihat, tidak tergantung "hari ini" di jam
+// HP), TOTAL = akumulasi seluruh SL murni (10% dari balance rule awal —
+// TANPA buangan, SL berdiri sendiri; buangan dilaporkan terpisah di
+// kartu TOTAL BUANGAN).
 //
 // Modul ini STANDALONE: tidak mengubah algoritma/kalkulator existing.
 // Data disimpan di SharedPreferences (journal_entries & journal_start).
@@ -169,43 +172,57 @@ JournalStats computeJournalStats(
   final taken = list.where((e) => e.outcome != 2).toList();
   final balanceNow = taken.isEmpty ? startBal : ruleBal(taken.last.ruleB);
 
-  bool sameDay(DateTime t) =>
-      t.year == now.year && t.month == now.month && t.day == now.day;
-  bool sameWeek(DateTime t) => _mondayOf(t) == _mondayOf(now);
-  bool sameMonth(DateTime t) => t.year == now.year && t.month == now.month;
+  // Drawdown per periode = akumulasi nominal SL murni (SL berdiri sendiri,
+  // tanpa buangan) — yang ditampilkan adalah periode TERBURUK: hari /
+  // minggu / bulan dengan penumpukan SL murni terbesar. BUKAN "hari ini"
+  // menurut jam HP: trade SL berapa pun tanggalnya langsung terlihat di
+  // kartu begitu dicatat (dulu SL bertanggal lampau membuat harian &
+  // mingguan selalu Rp0 → terasa tidak berfungsi). Trade TP/BE/miss
+  // tidak menyumbang drawdown. TOTAL tetap akumulasi seluruh SL murni.
+  // Persen: SL murni periode itu vs jumlah balance rules awal (rule A)
+  // trade SL di periode yang sama (tiap SL = 10% balance rule awalnya).
+  final byDay = <String, List<int>>{}; // kunci periode → [SL, base]
+  final byWeek = <String, List<int>>{};
+  final byMonth = <String, List<int>>{};
+  void bump(Map<String, List<int>> m, String k, int v, int base) {
+    final cur = m[k];
+    if (cur == null) {
+      m[k] = [v, base];
+    } else {
+      cur[0] += v;
+      cur[1] += base;
+    }
+  }
 
-  // Drawdown = akumulasi nominal SL murni per periode (SL berdiri sendiri,
-  // tanpa buangan). Trade TP/BE/miss tidak menyumbang drawdown — begitu
-  // trade SL dicatat, semua periode yang memuat tanggalnya langsung terisi.
-  // Persen: tiap SL murni = 10% dari balance rule awalnya, jadi referensi
-  // % = jumlah balance rules awal (rule A) dari trade SL di periode itu.
-  int slDay = 0, slWeek = 0, slMonth = 0, slAll = 0;
-  int baseDay = 0, baseWeek = 0, baseMonth = 0, baseAll = 0;
+  int slAll = 0, baseAll = 0;
   for (final e in taken) {
     final v = e.slMurni;
     if (v == 0) continue;
     final base = ruleBal(e.ruleA);
     slAll += v;
     baseAll += base;
-    if (sameDay(e.at)) {
-      slDay += v;
-      baseDay += base;
+    final t = e.at;
+    bump(byDay, '${t.year}-${t.month}-${t.day}', v, base);
+    final wk = _mondayOf(t); // pekan Senin–Minggu
+    bump(byWeek, '${wk.year}-${wk.month}-${wk.day}', v, base);
+    bump(byMonth, '${t.year}-${t.month}', v, base);
+  }
+
+  // periode terburuk = penumpukan SL murni terbesar; % memakai base
+  // (jumlah balance rule awal) dari SL-SL di periode terburuk itu juga.
+  Dd best(Map<String, List<int>> m) {
+    List<int>? w;
+    for (final cur in m.values) {
+      if (w == null || cur[0] > w[0]) w = cur;
     }
-    if (sameWeek(e.at)) {
-      slWeek += v;
-      baseWeek += base;
-    }
-    if (sameMonth(e.at)) {
-      slMonth += v;
-      baseMonth += base;
-    }
+    return w == null ? const Dd(0, 0) : _ddSum(w[0], w[1]);
   }
 
   return JournalStats(total, tp, sl, miss, winrate, buang, startBal,
       balanceNow,
-      _ddSum(slDay, baseDay),
-      _ddSum(slWeek, baseWeek),
-      _ddSum(slMonth, baseMonth),
+      best(byDay),
+      best(byWeek),
+      best(byMonth),
       _ddSum(slAll, baseAll));
 }
 
@@ -614,9 +631,10 @@ class _JournalPageState extends State<JournalPage> {
           cell('TOTAL', s.all, p.red),
         ]),
         const SizedBox(height: 10),
-        Text('Nominal SL murni per periode (% dari balance rules saat '
-            'trade) — buangan tidak ikut dihitung di sini (lihat TOTAL '
-            'BUANGAN).',
+        Text('Nominal SL murni pada periode TERBURUK — hari / minggu / '
+            'bulan dengan penumpukan SL terbesar (% dari balance rules '
+            'saat trade). Trade SL berapa pun tanggalnya langsung terlihat '
+            'di sini. Buangan tidak ikut dihitung (lihat TOTAL BUANGAN).',
             style: txt(context, 10.5, color: p.dim, height: 1.35)),
       ],
     );
