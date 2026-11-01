@@ -70,26 +70,26 @@ class JournalEntry {
   });
 
   Map<String, dynamic> toJson() => {
-        'at': at.toIso8601String(),
-        'pair': pair,
-        'price': price,
-        'a': ruleA,
-        'b': ruleB,
-        'mark': mark,
-        'taken': taken,
-        'bias': bias,
-      };
+    'at': at.toIso8601String(),
+    'pair': pair,
+    'price': price,
+    'a': ruleA,
+    'b': ruleB,
+    'mark': mark,
+    'taken': taken,
+    'bias': bias,
+  };
 
   static JournalEntry fromJson(Map<String, dynamic> j) => JournalEntry(
-        at: DateTime.tryParse('${j['at']}') ?? DateTime.now(),
-        pair: '${j['pair'] ?? '-'}',
-        price: (j['price'] as num?)?.toDouble() ?? 0,
-        ruleA: (j['a'] as num?)?.toInt() ?? 1,
-        ruleB: (j['b'] as num?)?.toInt() ?? 1,
-        mark: '${j['mark'] ?? ''}',
-        taken: (j['taken'] as bool?) ?? true,
-        bias: '${j['bias'] ?? ''}',
-      );
+    at: DateTime.tryParse('${j['at']}') ?? DateTime.now(),
+    pair: '${j['pair'] ?? '-'}',
+    price: (j['price'] as num?)?.toDouble() ?? 0,
+    ruleA: (j['a'] as num?)?.toInt() ?? 1,
+    ruleB: (j['b'] as num?)?.toInt() ?? 1,
+    mark: '${j['mark'] ?? ''}',
+    taken: (j['taken'] as bool?) ?? true,
+    bias: '${j['bias'] ?? ''}',
+  );
 
   /// 1 = TP, -1 = SL, 0 = BE (entry lama tanpa tanda, rules sama),
   /// 2 = MISS (tidak diambil — bukan TP/SL, balance tidak berubah).
@@ -110,8 +110,9 @@ class JournalEntry {
   /// balance rule awal) + buangan murni. Buangan murni = balance setelah
   /// SL (90% dari balance rule awal, rumus rDiv10 engine.dart) − balance
   /// rule tujuan — definisi sama dengan "X buangan" di tab Kalkulator.
-  int get buangan =>
-      outcome < 0 && ruleB < ruleA ? rDiv10(ruleBal(ruleA), 9) - ruleBal(ruleB) : 0;
+  int get buangan => outcome < 0 && ruleB < ruleA
+      ? rDiv10(ruleBal(ruleA), 9) - ruleBal(ruleB)
+      : 0;
 
   /// Nominal SL MURNI saat trade SL turun rules — 10% dari balance rule
   /// awal (rumus engine.dart: sl = b − rDiv10(b, 9)), TANPA buangan.
@@ -128,8 +129,11 @@ class JournalEntry {
 
 /// Bungkus seluruh data jurnal jadi satu teks JSON — untuk backup atau
 /// pindah perangkat (salin ke clipboard / dibagikan sebagai teks).
-String journalExportJson(List<JournalEntry> entries, int startRule,
-    {DateTime? exportedAt}) {
+String journalExportJson(
+  List<JournalEntry> entries,
+  int startRule, {
+  DateTime? exportedAt,
+}) {
   return const JsonEncoder.withIndent('  ').convert({
     'app': 'transcendence',
     'type': 'journal',
@@ -184,8 +188,17 @@ const String kXlsxSheetJurnal = 'Jurnal';
 const String kXlsxSheetInfo = 'Info';
 
 const List<String> _kXlsxHeader = [
-  'Tanggal', 'Pair', 'Harga Entry', 'Rule Awal', 'Rule Akhir', 'Hasil',
-  'Eksekusi', 'Bias', 'SL Murni (Rp)', 'Buangan (Rp)', 'P/L (Rp)',
+  'Tanggal',
+  'Pair',
+  'Harga Entry',
+  'Rule Awal',
+  'Rule Akhir',
+  'Hasil',
+  'Eksekusi',
+  'Bias',
+  'SL Murni (Rp)',
+  'Buangan (Rp)',
+  'P/L (Rp)',
 ];
 
 /// Label kolom HASIL: tanda manual (TP/SL); entry tanpa tanda & rules sama
@@ -206,8 +219,11 @@ String _p2(int n) => n.toString().padLeft(2, '0'); // 5 → "05" (nama file)
 /// Kolom SL Murni / Buangan / P/L hanya INFO (dihitung ulang dari rules,
 /// diabaikan saat impor) supaya angkanya ikut terlihat saat dibuka.
 /// Sheet "Info": metadata, termasuk "Mulai dari Rule" untuk impor.
-Uint8List journalExportXlsx(List<JournalEntry> entries, int startRule,
-    {DateTime? exportedAt}) {
+Uint8List journalExportXlsx(
+  List<JournalEntry> entries,
+  int startRule, {
+  DateTime? exportedAt,
+}) {
   final xl = Excel.createExcel();
   final sh = xl[kXlsxSheetJurnal];
   sh.appendRow([for (final h in _kXlsxHeader) TextCellValue(h)]);
@@ -236,8 +252,10 @@ Uint8List journalExportXlsx(List<JournalEntry> entries, int startRule,
   infoRow('Aplikasi', TextCellValue('transcendence'));
   infoRow('Jenis', TextCellValue('journal'));
   infoRow('Versi', const IntCellValue(1));
-  infoRow('Diekspor',
-      TextCellValue((exportedAt ?? DateTime.now()).toIso8601String()));
+  infoRow(
+    'Diekspor',
+    TextCellValue((exportedAt ?? DateTime.now()).toIso8601String()),
+  );
   infoRow('Mulai dari Rule', IntCellValue(startRule));
   infoRow('Jumlah Trade', IntCellValue(entries.length));
   xl.delete('Sheet1'); // buang sheet default — tinggal "Jurnal" & "Info"
@@ -300,8 +318,11 @@ DateTime? _cellDate(Data? d) {
 /// konversi zona waktu) — persis cara paket excel membaca sel tanggal,
 /// sehingga serial dari file ekspor app ini kembali ke nilai yang sama.
 DateTime _serialToDate(double serial) {
-  final u = DateTime.utc(1899, 12, 30)
-      .add(Duration(milliseconds: (serial * 86400000).round()));
+  final u = DateTime.utc(
+    1899,
+    12,
+    30,
+  ).add(Duration(milliseconds: (serial * 86400000).round()));
   return DateTime(u.year, u.month, u.day, u.hour, u.minute);
 }
 
@@ -313,9 +334,10 @@ DateTime? _parseTanggalText(String raw) {
   if (s.isEmpty) return null;
   final iso = DateTime.tryParse(s);
   if (iso != null) return iso;
-  final m = RegExp(r'^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})'
-          r'(?:[ T,]+(\d{1,2})[:.](\d{2}))?$')
-      .firstMatch(s);
+  final m = RegExp(
+    r'^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})'
+    r'(?:[ T,]+(\d{1,2})[:.](\d{2}))?$',
+  ).firstMatch(s);
   if (m == null) return null;
   return DateTime(
     int.parse(m.group(3)!),
@@ -429,16 +451,18 @@ JournalImport journalParseImportXlsx(List<int> bytes) {
     final hasil = (_cellText(cell('hasil')) ?? '').trim().toUpperCase();
     final ekse = (_cellText(cell('eksekusi')) ?? '').trim().toUpperCase();
     final bias = (_cellText(cell('bias')) ?? '').trim().toUpperCase();
-    entries.add(JournalEntry(
-      at: at,
-      pair: pair.isEmpty ? '-' : pair.toUpperCase(),
-      price: _cellDouble(cell('harga')) ?? 0,
-      ruleA: a,
-      ruleB: b,
-      mark: hasil == 'TP' ? 'TP' : (hasil == 'SL' ? 'SL' : ''),
-      taken: !ekse.contains('MISS'),
-      bias: bias == 'BUY' ? 'BUY' : (bias == 'SELL' ? 'SELL' : ''),
-    ));
+    entries.add(
+      JournalEntry(
+        at: at,
+        pair: pair.isEmpty ? '-' : pair.toUpperCase(),
+        price: _cellDouble(cell('harga')) ?? 0,
+        ruleA: a,
+        ruleB: b,
+        mark: hasil == 'TP' ? 'TP' : (hasil == 'SL' ? 'SL' : ''),
+        taken: !ekse.contains('MISS'),
+        bias: bias == 'BUY' ? 'BUY' : (bias == 'SELL' ? 'SELL' : ''),
+      ),
+    );
   }
   return JournalImport(entries, start.clamp(1, kRuleBalances.length));
 }
@@ -460,9 +484,19 @@ class JournalStats {
   final int startBal, balanceNow;
   final Dd daily, weekly, monthly, all;
   const JournalStats(
-      this.total, this.tp, this.sl, this.miss, this.winrate, this.buangan,
-      this.startBal, this.balanceNow,
-      this.daily, this.weekly, this.monthly, this.all);
+    this.total,
+    this.tp,
+    this.sl,
+    this.miss,
+    this.winrate,
+    this.buangan,
+    this.startBal,
+    this.balanceNow,
+    this.daily,
+    this.weekly,
+    this.monthly,
+    this.all,
+  );
 }
 
 DateTime _mondayOf(DateTime d) =>
@@ -479,7 +513,10 @@ Dd _ddSum(int slSum, int refBal) =>
 
 /// Hitung semua statistik jurnal. `now` dipisahkan supaya test deterministik.
 JournalStats computeJournalStats(
-    List<JournalEntry> entries, int startRule, DateTime now) {
+  List<JournalEntry> entries,
+  int startRule,
+  DateTime now,
+) {
   final list = [...entries]..sort((a, b) => a.at.compareTo(b.at));
   int tp = 0, sl = 0, miss = 0, buang = 0;
   for (final e in list) {
@@ -549,12 +586,20 @@ JournalStats computeJournalStats(
     return w == null ? const Dd(0, 0) : _ddSum(w[0], w[1]);
   }
 
-  return JournalStats(total, tp, sl, miss, winrate, buang, startBal,
-      balanceNow,
-      best(byDay),
-      best(byWeek),
-      best(byMonth),
-      _ddSum(slAll, baseAll));
+  return JournalStats(
+    total,
+    tp,
+    sl,
+    miss,
+    winrate,
+    buang,
+    startBal,
+    balanceNow,
+    best(byDay),
+    best(byWeek),
+    best(byMonth),
+    _ddSum(slAll, baseAll),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -610,39 +655,47 @@ class _JournalPageState extends State<JournalPage> {
     } catch (_) {}
     final sr = sp.getInt('journal_start') ?? 1;
     _startRule = (sr >= 1 && sr <= kRuleBalances.length) ? sr : 1;
-    _ruleA ??= _entries.isEmpty ? null : _entries
-        .reduce((a, b) => a.at.isAfter(b.at) ? a : b)
-        .ruleB;
+    _ruleA ??= _entries.isEmpty
+        ? null
+        : _entries.reduce((a, b) => a.at.isAfter(b.at) ? a : b).ruleB;
     if (mounted) setState(() {});
   }
 
   Future<void> _persist() async {
     final sp = await SharedPreferences.getInstance();
     await sp.setString(
-        'journal_entries', jsonEncode(_entries.map((e) => e.toJson()).toList()));
+      'journal_entries',
+      jsonEncode(_entries.map((e) => e.toJson()).toList()),
+    );
     await sp.setInt('journal_start', _startRule);
   }
 
   void _toast(String msg, {bool err = false}) {
     final p = Palette.of(context);
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-      behavior: SnackBarBehavior.floating,
-      backgroundColor: err ? p.redSolid : p.mintSolid,
-      content: Text(msg,
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        backgroundColor: err ? p.redSolid : p.mintSolid,
+        content: Text(
+          msg,
           style: TextStyle(
-              fontFamily: kBodyFont,
-              fontSize: 13,
-              fontWeight: FontWeight.w500,
-              color: Colors.white)),
-    ));
+            fontFamily: kBodyFont,
+            fontSize: 13,
+            fontWeight: FontWeight.w500,
+            color: err ? p.onRed : p.onMint,
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _pickDate() async {
     final d = await showDatePicker(
-        context: context,
-        initialDate: _date,
-        firstDate: DateTime(2020),
-        lastDate: DateTime(2100));
+      context: context,
+      initialDate: _date,
+      firstDate: DateTime(2020),
+      lastDate: DateTime(2100),
+    );
     if (d != null) setState(() => _date = d);
   }
 
@@ -662,7 +715,13 @@ class _JournalPageState extends State<JournalPage> {
       return;
     }
     final e = JournalEntry(
-      at: DateTime(_date.year, _date.month, _date.day, _time.hour, _time.minute),
+      at: DateTime(
+        _date.year,
+        _date.month,
+        _date.day,
+        _time.hour,
+        _time.minute,
+      ),
       pair: _pair.text.trim().isEmpty ? '-' : _pair.text.trim().toUpperCase(),
       price: price,
       ruleA: _ruleA!,
@@ -683,14 +742,15 @@ class _JournalPageState extends State<JournalPage> {
     });
     _persist();
     _toast(
-        e.outcome == 2
-            ? 'Trade ke-miss tersimpan · tidak dihitung TP/SL.'
-            : e.outcome > 0
-                ? 'Trade TP tersimpan · +${idr(e.pnl)}'
-                : e.outcome < 0
-                    ? 'Trade SL tersimpan · buangan ${idr(e.buangan)}'
-                    : 'Trade BE tersimpan.',
-        err: e.outcome < 0);
+      e.outcome == 2
+          ? 'Trade ke-miss tersimpan · tidak dihitung TP/SL.'
+          : e.outcome > 0
+          ? 'Trade TP tersimpan · +${idr(e.pnl)}'
+          : e.outcome < 0
+          ? 'Trade SL tersimpan · buangan ${idr(e.buangan)}'
+          : 'Trade BE tersimpan.',
+      err: e.outcome < 0,
+    );
   }
 
   Future<void> _delete(JournalEntry e) async {
@@ -699,22 +759,25 @@ class _JournalPageState extends State<JournalPage> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: p.card,
-        shape:
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
         title: Text('Hapus trade?', style: txt(ctx, 16, w: FontWeight.w600)),
         content: Text(
-            '${e.pair}${e.bias.isEmpty ? '' : ' · ${e.bias}'} · '
-            '${_fmtDate(e.at)} ${_fmtTime(e.at)}\nRule ${e.ruleA} → ${e.ruleB}',
-            style: txt(ctx, 13, color: p.muted)),
+          '${e.pair}${e.bias.isEmpty ? '' : ' · ${e.bias}'} · '
+          '${_fmtDate(e.at)} ${_fmtTime(e.at)}\nRule ${e.ruleA} → ${e.ruleB}',
+          style: txt(ctx, 13, color: p.muted),
+        ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: Text('Batal', style: txt(ctx, 13, color: p.muted))),
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text('Batal', style: txt(ctx, 13, color: p.muted)),
+          ),
           TextButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: Text('Hapus',
-                  style: txt(ctx, 13,
-                      w: FontWeight.w600, color: p.red))),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(
+              'Hapus',
+              style: txt(ctx, 13, w: FontWeight.w600, color: p.red),
+            ),
+          ),
         ],
       ),
     );
@@ -733,58 +796,70 @@ class _JournalPageState extends State<JournalPage> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: p.card,
-        shape:
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-        title: Text('Ekspor Data Jurnal',
-            style: txt(ctx, 16, w: FontWeight.w600)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        title: Text(
+          'Ekspor Data Jurnal',
+          style: txt(ctx, 16, w: FontWeight.w600),
+        ),
         content: SizedBox(
           width: double.maxFinite,
           child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                    '${_entries.length} trade · mulai dari Rule $_startRule — '
-                    'pilih EXCEL untuk file .xlsx (bisa dibuka / diedit di '
-                    'Excel / Google Sheets), atau SALIN JSON untuk backup '
-                    'penuh & pindah perangkat.',
-                    style: txt(ctx, 12.5, color: p.muted, height: 1.4)),
-                const SizedBox(height: 10),
-                Container(
-                  constraints: const BoxConstraints(maxHeight: 220),
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: p.surface1,
-                    borderRadius: BorderRadius.circular(9),
-                    border: Border.all(width: 1, color: p.line),
-                  ),
-                  child: SingleChildScrollView(
-                    child: SelectableText(json,
-                        style: mono(ctx, 10.5, color: p.ink)),
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '${_entries.length} trade · mulai dari Rule $_startRule — '
+                'pilih EXCEL untuk file .xlsx (bisa dibuka / diedit di '
+                'Excel / Google Sheets), atau SALIN JSON untuk backup '
+                'penuh & pindah perangkat.',
+                style: txt(ctx, 12.5, color: p.muted, height: 1.4),
+              ),
+              const SizedBox(height: 10),
+              Container(
+                constraints: const BoxConstraints(maxHeight: 220),
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: p.surface1,
+                  borderRadius: BorderRadius.circular(9),
+                  border: Border.all(width: 1, color: p.line),
+                ),
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    json,
+                    style: mono(ctx, 10.5, color: p.ink),
                   ),
                 ),
-              ]),
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: Text('Tutup', style: txt(ctx, 13, color: p.muted))),
+            onPressed: () => Navigator.pop(ctx),
+            child: Text('Tutup', style: txt(ctx, 13, color: p.muted)),
+          ),
           TextButton(
-              onPressed: () {
-                Navigator.pop(ctx);
-                _exportExcel();
-              },
-              child: Text('Excel',
-                  style: txt(ctx, 13, color: p.gold, w: FontWeight.w600))),
+            onPressed: () {
+              Navigator.pop(ctx);
+              _exportExcel();
+            },
+            child: Text(
+              'Excel',
+              style: txt(ctx, 13, color: p.gold, w: FontWeight.w600),
+            ),
+          ),
           TextButton(
-              onPressed: () {
-                Clipboard.setData(ClipboardData(text: json));
-                Navigator.pop(ctx);
-                _toast('Data jurnal disalin ke clipboard.');
-              },
-              child: Text('Salin',
-                  style: txt(ctx, 13, color: p.mint, w: FontWeight.w600))),
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: json));
+              Navigator.pop(ctx);
+              _toast('Data jurnal disalin ke clipboard.');
+            },
+            child: Text(
+              'Salin',
+              style: txt(ctx, 13, color: p.mint, w: FontWeight.w600),
+            ),
+          ),
         ],
       ),
     );
@@ -802,75 +877,92 @@ class _JournalPageState extends State<JournalPage> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: p.card,
-        shape:
-            RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-        title: Text('Impor Data Jurnal',
-            style: txt(ctx, 16, w: FontWeight.w600)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        title: Text(
+          'Impor Data Jurnal',
+          style: txt(ctx, 16, w: FontWeight.w600),
+        ),
         content: SizedBox(
           width: double.maxFinite,
           child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                    'Pilih file Excel (.xlsx) hasil ekspor, atau tempel teks '
-                    'JSON. PERHATIAN: isi jurnal yang sekarang (daftar trade '
-                    '& mulai dari rule) akan DIGANTI dengan data yang diimpor.',
-                    style: txt(ctx, 12.5, color: p.muted, height: 1.4)),
-                const SizedBox(height: 10),
-                GhostButton('PILIH FILE EXCEL',
-                    key: const Key('jurnal_pick_xlsx'),
-                    icon: Icons.grid_on_rounded,
-                    expanded: true,
-                    onTap: () async {
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Pilih file Excel (.xlsx) hasil ekspor, atau tempel teks '
+                'JSON. PERHATIAN: isi jurnal yang sekarang (daftar trade '
+                '& mulai dari rule) akan DIGANTI dengan data yang diimpor.',
+                style: txt(ctx, 12.5, color: p.muted, height: 1.4),
+              ),
+              const SizedBox(height: 10),
+              GhostButton(
+                'PILIH FILE EXCEL',
+                key: const Key('jurnal_pick_xlsx'),
+                icon: Icons.grid_on_rounded,
+                expanded: true,
+                onTap: () async {
                   try {
                     final files = await FilePicker.pickFiles(
-                        type: FileType.custom,
-                        allowedExtensions: ['xlsx']);
+                      type: FileType.custom,
+                      allowedExtensions: ['xlsx'],
+                    );
                     final f = files.isEmpty ? null : files.single;
                     if (f == null || !ctx.mounted) return;
                     final bytes = await f.readAsBytes();
                     if (bytes.isEmpty) return;
                     if (ctx.mounted) Navigator.pop(ctx, bytes);
                   } catch (_) {
-                    _toast('Pemilih file tidak tersedia di perangkat ini.',
-                        err: true);
+                    _toast(
+                      'Pemilih file tidak tersedia di perangkat ini.',
+                      err: true,
+                    );
                   }
-                }),
-                const SizedBox(height: 10),
-                Center(
-                    child: Text('— atau tempel JSON —',
-                        style: txt(ctx, 11, color: p.dim))),
-                const SizedBox(height: 8),
-                TextField(
-                  key: const Key('jurnal_import_text'),
-                  controller: ctrl,
-                  maxLines: 5,
-                  style: mono(ctx, 11.5, color: p.ink),
-                  decoration: InputDecoration(
-                    hintText: '{"app":"transcendence","type":"journal",...}',
-                    hintStyle: txt(ctx, 11, color: p.dim),
-                    filled: true,
-                    fillColor: p.surface1,
-                    contentPadding: const EdgeInsets.all(10),
-                    enabledBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(9),
-                        borderSide: BorderSide(color: p.line)),
-                    focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(9),
-                        borderSide: BorderSide(color: p.gold)),
+                },
+              ),
+              const SizedBox(height: 10),
+              Center(
+                child: Text(
+                  '— atau tempel JSON —',
+                  style: txt(ctx, 11, color: p.dim),
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                key: const Key('jurnal_import_text'),
+                controller: ctrl,
+                maxLines: 5,
+                style: mono(ctx, 11.5, color: p.ink),
+                decoration: InputDecoration(
+                  hintText: '{"app":"transcendence","type":"journal",...}',
+                  hintStyle: txt(ctx, 11, color: p.dim),
+                  filled: true,
+                  fillColor: p.surface1,
+                  contentPadding: const EdgeInsets.all(10),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(9),
+                    borderSide: BorderSide(color: p.line),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(9),
+                    borderSide: BorderSide(color: p.gold),
                   ),
                 ),
-              ]),
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: Text('Batal', style: txt(ctx, 13, color: p.muted))),
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text('Batal', style: txt(ctx, 13, color: p.muted)),
+          ),
           TextButton(
-              onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
-              child: Text('Impor',
-                  style: txt(ctx, 13, color: p.mint, w: FontWeight.w600))),
+            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+            child: Text(
+              'Impor',
+              style: txt(ctx, 13, color: p.mint, w: FontWeight.w600),
+            ),
+          ),
         ],
       ),
     );
@@ -893,9 +985,11 @@ class _JournalPageState extends State<JournalPage> {
     } on FormatException catch (e) {
       _toast('Impor gagal: ${e.message}', err: true);
     } catch (_) {
-      _toast('Format tidak dikenali — pilih file Excel hasil ekspor '
-          'atau tempel JSON.',
-          err: true);
+      _toast(
+        'Format tidak dikenali — pilih file Excel hasil ekspor '
+        'atau tempel JSON.',
+        err: true,
+      );
     }
   }
 
@@ -906,17 +1000,20 @@ class _JournalPageState extends State<JournalPage> {
       final bytes = journalExportXlsx(_entries, _startRule);
       final dir = await getTemporaryDirectory();
       final t = DateTime.now();
-      final name = 'jurnal-transcendence-'
+      final name =
+          'jurnal-transcendence-'
           '${t.year}${_p2(t.month)}${_p2(t.day)}-'
           '${_p2(t.hour)}${_p2(t.minute)}.xlsx';
       final f = File('${dir.path}/$name');
       await f.writeAsBytes(bytes, flush: true);
-      await SharePlus.instance.share(ShareParams(
-        files: [XFile(f.path)],
-        fileNameOverrides: [name],
-        title: name,
-        subject: 'Backup jurnal Transcendence (Excel)',
-      ));
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(f.path)],
+          fileNameOverrides: [name],
+          title: name,
+          subject: 'Backup jurnal Transcendence (Excel)',
+        ),
+      );
     } catch (_) {
       _toast('Gagal membuat file Excel.', err: true);
     }
@@ -940,9 +1037,11 @@ class _JournalPageState extends State<JournalPage> {
         children: [
           SectionHead(Icons.history_edu, 'Trading Journal'),
           const SizedBox(height: 4),
-          Text('Catat tiap trade, tandai hasilnya TP/SL dan apakah keambil '
-              'atau miss — statistik & drawdown terhitung otomatis.',
-              style: txt(context, 12, color: p.muted)),
+          Text(
+            'Catat tiap trade, tandai hasilnya TP/SL dan apakah keambil '
+            'atau miss — statistik & drawdown terhitung otomatis.',
+            style: txt(context, 12, color: p.muted),
+          ),
           const SizedBox(height: 14),
 
           // ---- TOTAL BUANGAN (di atas, sesuai permintaan) ----
@@ -954,27 +1053,37 @@ class _JournalPageState extends State<JournalPage> {
           const SizedBox(height: 10),
 
           // ---- total trade / tp / sl / winrate ----
-          Row(children: [
-            _mini(p, 'TOTAL', '${s.total}', p.ink),
-            const SizedBox(width: 8),
-            _mini(p, 'TP', '${s.tp}', p.mint),
-            const SizedBox(width: 8),
-            _mini(p, 'SL', '${s.sl}', p.red),
-            const SizedBox(width: 8),
-            _mini(p, 'WINRATE',
-                '${s.winrate.toStringAsFixed(1).replaceFirst('.', ',')}%', p.gold),
-          ]),
+          Row(
+            children: [
+              _mini(p, 'TOTAL', '${s.total}', p.ink),
+              const SizedBox(width: 8),
+              _mini(p, 'TP', '${s.tp}', p.mint),
+              const SizedBox(width: 8),
+              _mini(p, 'SL', '${s.sl}', p.red),
+              const SizedBox(width: 8),
+              _mini(
+                p,
+                'WINRATE',
+                '${s.winrate.toStringAsFixed(1).replaceFirst('.', ',')}%',
+                p.gold,
+              ),
+            ],
+          ),
           const SizedBox(height: 6),
-          Row(children: [
-            // ringkasan eksekusi: keambil vs miss (permintaan user)
-            _mini(p, 'KEAMBIL', '${s.total - s.miss}', p.mint),
-            const SizedBox(width: 8),
-            _mini(p, 'MISS', '${s.miss}', p.dim),
-          ]),
+          Row(
+            children: [
+              // ringkasan eksekusi: keambil vs miss (permintaan user)
+              _mini(p, 'KEAMBIL', '${s.total - s.miss}', p.mint),
+              const SizedBox(width: 8),
+              _mini(p, 'MISS', '${s.miss}', p.dim),
+            ],
+          ),
           if (s.miss > 0) ...[
             const SizedBox(height: 6),
-            Text('${s.miss} trade di-miss · tidak dihitung TP/SL & balance',
-                style: txt(context, 11, color: p.dim)),
+            Text(
+              '${s.miss} trade di-miss · tidak dihitung TP/SL & balance',
+              style: txt(context, 11, color: p.dim),
+            ),
           ],
           const SizedBox(height: 10),
 
@@ -987,31 +1096,47 @@ class _JournalPageState extends State<JournalPage> {
           const SizedBox(height: 16),
 
           // ---- riwayat ----
-          SectionHead(Icons.receipt_long, 'Riwayat Trade',
-              trailing: BadgePill('${_entries.length} trade',
-                  color: p.warm, bg: p.cardHi)),
+          SectionHead(
+            Icons.receipt_long,
+            'Riwayat Trade',
+            trailing: BadgePill(
+              '${_entries.length} trade',
+              color: p.warm,
+              bg: p.cardHi,
+            ),
+          ),
           const SizedBox(height: 10),
-          Row(children: [
-            Expanded(
-              child: GhostButton('EKSPOR',
+          Row(
+            children: [
+              Expanded(
+                child: GhostButton(
+                  'EKSPOR',
                   icon: Icons.ios_share,
                   expanded: true,
-                  onTap: _openExport),
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: GhostButton('IMPOR',
-                  icon: Icons.save_alt, expanded: true, onTap: _openImport),
-            ),
-          ]),
+                  onTap: _openExport,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: GhostButton(
+                  'IMPOR',
+                  icon: Icons.save_alt,
+                  expanded: true,
+                  onTap: _openImport,
+                ),
+              ),
+            ],
+          ),
           const SizedBox(height: 10),
           if (_entries.isEmpty)
             ObsCard(
               color: p.surface1,
               children: [
-                Text('Belum ada trade. Catat trade pertamamu di form atas — '
-                    'tandai hasilnya TP/SL dan apakah keambil atau miss.',
-                    style: txt(context, 12.5, color: p.muted, height: 1.5)),
+                Text(
+                  'Belum ada trade. Catat trade pertamamu di form atas — '
+                  'tandai hasilnya TP/SL dan apakah keambil atau miss.',
+                  style: txt(context, 12.5, color: p.muted, height: 1.5),
+                ),
               ],
             )
           else
@@ -1033,96 +1158,121 @@ class _JournalPageState extends State<JournalPage> {
         border: Border.all(width: 1, color: p.redsoft),
       ),
       child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-        Row(children: [
-          Icon(Icons.output_rounded, size: 15, color: p.red),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text('TOTAL BUANGAN',
-                maxLines: 1, overflow: TextOverflow.ellipsis,
-                style: labelSm(context, color: p.muted)),
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.output_rounded, size: 15, color: p.red),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'TOTAL BUANGAN',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: labelSm(context, color: p.muted),
+                ),
+              ),
+            ],
           ),
-        ]),
-        const SizedBox(height: 6),
-        Text(idr(s.buangan),
-            style: mono(context, 22, w: FontWeight.w600, color: p.red)),
-        const SizedBox(height: 4),
-        Text('Akumulasi balance terbuang dari trade yang turun rules — '
+          const SizedBox(height: 6),
+          Text(
+            idr(s.buangan),
+            style: mono(context, 22, w: FontWeight.w600, color: p.red),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Akumulasi balance terbuang dari trade yang turun rules — '
             'di luar nominal SL.',
-            style: txt(context, 10.5, color: p.dim, height: 1.35)),
-      ]),
+            style: txt(context, 10.5, color: p.dim, height: 1.35),
+          ),
+        ],
+      ),
     );
   }
 
   Widget _balanceCard(Palette p, JournalStats s, int netPnl) {
     return ObsCard(
       children: [
-        Row(children: [
-          Expanded(
-            child: Column(
+        Row(
+          children: [
+            Expanded(
+              child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-              Text('BALANCE SEKARANG', style: labelSm(context, color: p.muted)),
-              const SizedBox(height: 5),
-              Text(idr(s.balanceNow),
-                  style: mono(context, 22, w: FontWeight.w600, color: p.gold)),
-            ]),
-          ),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-            decoration: BoxDecoration(
-              color: netPnl >= 0 ? p.goodsoft : p.redsoft,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(
-                '${netPnl >= 0 ? '+' : '−'}${idr(netPnl.abs()).substring(2)}',
-                style: mono(context, 12.5,
-                    w: FontWeight.w600,
-                    color: netPnl >= 0 ? p.mint : p.red)),
-          ),
-        ]),
-        const SizedBox(height: 12),
-        Row(children: [
-          Text('MULAI DARI RULE', style: labelSm(context, color: p.dim)),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-              decoration: BoxDecoration(
-                color: p.surface1,
-                borderRadius: BorderRadius.circular(9),
-                border: Border.all(width: 1, color: p.line),
+                  Text(
+                    'BALANCE SEKARANG',
+                    style: labelSm(context, color: p.muted),
+                  ),
+                  const SizedBox(height: 5),
+                  Text(
+                    idr(s.balanceNow),
+                    style: mono(context, 22, w: FontWeight.w600, color: p.gold),
+                  ),
+                ],
               ),
-              child: DropdownButtonHideUnderline(
-                child: DropdownButton<int>(
-                  value: _startRule,
-                  isExpanded: true,
-                  dropdownColor: p.card,
-                  borderRadius: BorderRadius.circular(10),
-                  icon: Icon(Icons.expand_more,
-                      size: 17, color: p.muted),
-                  style: mono(context, 12.5, w: FontWeight.w600),
-                  items: [
-                    for (int n = 1; n <= kRuleBalances.length; n++)
-                      DropdownMenuItem(
-                          value: n,
-                          child: FittedBox(
-                              fit: BoxFit.scaleDown,
-                              alignment: Alignment.centerLeft,
-                              // Nominal PERSIS — sama dgn dropdown rules.
-                              child: Text('Rule $n · ${idr(ruleBal(n))}'))),
-                  ],
-                  onChanged: (v) {
-                    if (v == null) return;
-                    setState(() => _startRule = v);
-                    _persist();
-                  },
+            ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+              decoration: BoxDecoration(
+                color: netPnl >= 0 ? p.goodsoft : p.redsoft,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                '${netPnl >= 0 ? '+' : '−'}${idr(netPnl.abs()).substring(2)}',
+                style: mono(
+                  context,
+                  12.5,
+                  w: FontWeight.w600,
+                  color: netPnl >= 0 ? p.mint : p.red,
                 ),
               ),
             ),
-          ),
-        ]),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Text('MULAI DARI RULE', style: labelSm(context, color: p.dim)),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                decoration: BoxDecoration(
+                  color: p.surface1,
+                  borderRadius: BorderRadius.circular(9),
+                  border: Border.all(width: 1, color: p.line),
+                ),
+                child: DropdownButtonHideUnderline(
+                  child: DropdownButton<int>(
+                    value: _startRule,
+                    isExpanded: true,
+                    dropdownColor: p.card,
+                    borderRadius: BorderRadius.circular(10),
+                    icon: Icon(Icons.expand_more, size: 17, color: p.muted),
+                    style: mono(context, 12.5, w: FontWeight.w600),
+                    items: [
+                      for (int n = 1; n <= kRuleBalances.length; n++)
+                        DropdownMenuItem(
+                          value: n,
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            alignment: Alignment.centerLeft,
+                            // Nominal PERSIS — sama dgn dropdown rules.
+                            child: Text('Rule $n · ${idr(ruleBal(n))}'),
+                          ),
+                        ),
+                    ],
+                    onChanged: (v) {
+                      if (v == null) return;
+                      setState(() => _startRule = v);
+                      _persist();
+                    },
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       ],
     );
   }
@@ -1136,56 +1286,79 @@ class _JournalPageState extends State<JournalPage> {
           borderRadius: BorderRadius.circular(12),
           border: Border.all(width: 1, color: p.lineSoft),
         ),
-        child: Column(children: [
-          Text(label,
-              maxLines: 1, overflow: TextOverflow.ellipsis,
-              style: labelSm(context, color: p.dim)),
-          const SizedBox(height: 4),
-          Text(val,
-              maxLines: 1, overflow: TextOverflow.ellipsis,
-              style: mono(context, 15, w: FontWeight.w600, color: c)),
-        ]),
+        child: Column(
+          children: [
+            Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: labelSm(context, color: p.dim),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              val,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: mono(context, 15, w: FontWeight.w600, color: c),
+            ),
+          ],
+        ),
       ),
     );
   }
 
   Widget _ddCard(Palette p, JournalStats s) {
     Widget cell(String label, Dd d, Color c) => Expanded(
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(label, style: labelSm(context, color: p.dim)),
-            const SizedBox(height: 4),
-            Text(shortIdr(d.rp.toDouble()),
-                style: mono(context, 14, w: FontWeight.w600, color: c)),
-            const SizedBox(height: 2),
-            Text('${d.pct.toStringAsFixed(1).replaceFirst('.', ',')}%',
-                style: mono(context, 10.5, color: p.muted)),
-          ]),
-        );
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(label, style: labelSm(context, color: p.dim)),
+          const SizedBox(height: 4),
+          Text(
+            shortIdr(d.rp.toDouble()),
+            style: mono(context, 14, w: FontWeight.w600, color: c),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            '${d.pct.toStringAsFixed(1).replaceFirst('.', ',')}%',
+            style: mono(context, 10.5, color: p.muted),
+          ),
+        ],
+      ),
+    );
     return ObsCard(
       children: [
-        Row(children: [
-          Icon(Icons.waterfall_chart, size: 15, color: p.gold),
-          const SizedBox(width: 7),
-          Text('DRAWDOWN', style: labelSm(context, color: p.muted)),
-        ]),
+        Row(
+          children: [
+            Icon(Icons.waterfall_chart, size: 15, color: p.gold),
+            const SizedBox(width: 7),
+            Text('DRAWDOWN', style: labelSm(context, color: p.muted)),
+          ],
+        ),
         const SizedBox(height: 12),
-        Row(children: [
-          cell('HARIAN', s.daily, p.red),
-          const SizedBox(width: 12),
-          cell('MINGGUAN', s.weekly, p.red),
-        ]),
+        Row(
+          children: [
+            cell('HARIAN', s.daily, p.red),
+            const SizedBox(width: 12),
+            cell('MINGGUAN', s.weekly, p.red),
+          ],
+        ),
         const SizedBox(height: 12),
-        Row(children: [
-          cell('BULANAN', s.monthly, p.red),
-          const SizedBox(width: 12),
-          cell('TOTAL', s.all, p.red),
-        ]),
+        Row(
+          children: [
+            cell('BULANAN', s.monthly, p.red),
+            const SizedBox(width: 12),
+            cell('TOTAL', s.all, p.red),
+          ],
+        ),
         const SizedBox(height: 10),
-        Text('Nominal SL murni pada periode TERBURUK — hari / minggu / '
-            'bulan dengan penumpukan SL terbesar (% dari balance rules '
-            'saat trade). Trade SL berapa pun tanggalnya langsung terlihat '
-            'di sini. Buangan tidak ikut dihitung (lihat TOTAL BUANGAN).',
-            style: txt(context, 10.5, color: p.dim, height: 1.35)),
+        Text(
+          'Nominal SL murni pada periode TERBURUK — hari / minggu / '
+          'bulan dengan penumpukan SL terbesar (% dari balance rules '
+          'saat trade). Trade SL berapa pun tanggalnya langsung terlihat '
+          'di sini. Buangan tidak ikut dihitung (lihat TOTAL BUANGAN).',
+          style: txt(context, 10.5, color: p.dim, height: 1.35),
+        ),
       ],
     );
   }
@@ -1200,29 +1373,35 @@ class _JournalPageState extends State<JournalPage> {
             ruleB: _ruleB!,
             mark: _mark,
             taken: _taken,
-            bias: _bias)
+            bias: _bias,
+          )
         : null;
 
     return ObsCard(
       children: [
         SectionHead(Icons.edit_note, 'Catat Trade Baru'),
         const SizedBox(height: 12),
-        Row(children: [
-          Expanded(
-            child: GhostButton(_fmtDate(_date),
+        Row(
+          children: [
+            Expanded(
+              child: GhostButton(
+                _fmtDate(_date),
                 icon: Icons.calendar_today_outlined,
                 expanded: true,
-                onTap: _pickDate),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: GhostButton(
+                onTap: _pickDate,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: GhostButton(
                 _fmtTime(DateTime(0, 1, 1, _time.hour, _time.minute)),
                 icon: Icons.schedule_outlined,
                 expanded: true,
-                onTap: _pickTime),
-          ),
-        ]),
+                onTap: _pickTime,
+              ),
+            ),
+          ],
+        ),
         const SizedBox(height: 12),
         _pairField(p),
         const SizedBox(height: 12),
@@ -1235,40 +1414,55 @@ class _JournalPageState extends State<JournalPage> {
           hint: 'Contoh: 4021,5',
         ),
         const SizedBox(height: 12),
-        Row(children: [
-          Expanded(child: _ruleDropdown(p, true)),
-          const SizedBox(width: 8),
-          Icon(Icons.east, size: 16, color: p.muted),
-          const SizedBox(width: 8),
-          Expanded(child: _ruleDropdown(p, false)),
-        ]),
+        Row(
+          children: [
+            Expanded(child: _ruleDropdown(p, true)),
+            const SizedBox(width: 8),
+            Icon(Icons.east, size: 16, color: p.muted),
+            const SizedBox(width: 8),
+            Expanded(child: _ruleDropdown(p, false)),
+          ],
+        ),
         const SizedBox(height: 12),
         // ---- eksekusi (keambil/miss) + tanda hasil (TP/SL) ----
-        Row(children: [
-          Expanded(
-            child: _seg(p, 'EKSEKUSI', [('KEAMBIL', _taken), ('MISS', !_taken)],
+        Row(
+          children: [
+            Expanded(
+              child: _seg(
+                p,
+                'EKSEKUSI',
+                [('KEAMBIL', _taken), ('MISS', !_taken)],
                 _taken ? p.goldSolid : p.redSolid,
-                (v) => setState(() => _taken = v == 'KEAMBIL')),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: AbsorbPointer(
-              absorbing: !_taken,
-              child: Opacity(
-                opacity: _taken ? 1 : 0.4,
-                child: _seg(p, 'HASIL TRADE',
-                    [('TP', _mark == 'TP'), ('SL', _mark == 'SL')],
-                    _mark == 'TP' ? p.mintSolid : p.redSolid,
-                    (v) => setState(() => _mark = v)),
+                (v) => setState(() => _taken = v == 'KEAMBIL'),
               ),
             ),
-          ),
-        ]),
+            const SizedBox(width: 8),
+            Expanded(
+              child: AbsorbPointer(
+                absorbing: !_taken,
+                child: Opacity(
+                  opacity: _taken ? 1 : 0.4,
+                  child: _seg(
+                    p,
+                    'HASIL TRADE',
+                    [('TP', _mark == 'TP'), ('SL', _mark == 'SL')],
+                    _mark == 'TP' ? p.mintSolid : p.redSolid,
+                    (v) => setState(() => _mark = v),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
         const SizedBox(height: 12),
         // ---- bias arah trade: BUY / SELL ----
-        _seg(p, 'BIAS', [('BUY', _bias == 'BUY'), ('SELL', _bias == 'SELL')],
-            _bias == 'BUY' ? p.mintSolid : p.redSolid,
-            (v) => setState(() => _bias = v)),
+        _seg(
+          p,
+          'BIAS',
+          [('BUY', _bias == 'BUY'), ('SELL', _bias == 'SELL')],
+          _bias == 'BUY' ? p.mintSolid : p.redSolid,
+          (v) => setState(() => _bias = v),
+        ),
         if (preview != null) ...[
           const SizedBox(height: 12),
           Container(
@@ -1278,30 +1472,37 @@ class _JournalPageState extends State<JournalPage> {
               borderRadius: BorderRadius.circular(10),
               border: Border.all(width: 1, color: p.line),
             ),
-            child: Row(children: [
-              _outcomeBadge(p, preview.outcome),
-              const SizedBox(width: 6),
-              _biasBadge(p, preview.bias),
-              const Spacer(),
-              if (preview.outcome == 2)
-                Text('tidak dihitung',
-                    style: txt(context, 11.5, color: p.muted))
-              else
-                Text(
-                  preview.outcome > 0
-                      ? '+${idr(preview.pnl)}'
-                      : preview.outcome < 0
-                          ? '−${idr(preview.pnl.abs())}'
-                          : 'Rp0',
-                  style: mono(context, 13.5,
+            child: Row(
+              children: [
+                _outcomeBadge(p, preview.outcome),
+                const SizedBox(width: 6),
+                _biasBadge(p, preview.bias),
+                const Spacer(),
+                if (preview.outcome == 2)
+                  Text(
+                    'tidak dihitung',
+                    style: txt(context, 11.5, color: p.muted),
+                  )
+                else
+                  Text(
+                    preview.outcome > 0
+                        ? '+${idr(preview.pnl)}'
+                        : preview.outcome < 0
+                        ? '−${idr(preview.pnl.abs())}'
+                        : 'Rp0',
+                    style: mono(
+                      context,
+                      13.5,
                       w: FontWeight.w600,
                       color: preview.outcome > 0
                           ? p.mint
                           : preview.outcome < 0
-                              ? p.red
-                              : p.muted),
-                ),
-            ]),
+                          ? p.red
+                          : p.muted,
+                    ),
+                  ),
+              ],
+            ),
           ),
         ],
         const SizedBox(height: 12),
@@ -1311,81 +1512,89 @@ class _JournalPageState extends State<JournalPage> {
   }
 
   Widget _pairField(Palette p) {
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text('PAIR', style: labelSm(context)),
-      const SizedBox(height: 6),
-      Container(
-        decoration: BoxDecoration(
-          color: p.surface1,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(width: 1, color: p.line),
-        ),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        child: TextField(
-          controller: _pair,
-          textCapitalization: TextCapitalization.characters,
-          style: mono(context, 15, w: FontWeight.w600),
-          decoration: const InputDecoration(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('PAIR', style: labelSm(context)),
+        const SizedBox(height: 6),
+        Container(
+          decoration: BoxDecoration(
+            color: p.surface1,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(width: 1, color: p.line),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: TextField(
+            controller: _pair,
+            textCapitalization: TextCapitalization.characters,
+            style: mono(context, 15, w: FontWeight.w600),
+            decoration: const InputDecoration(
               isDense: true,
               filled: false,
               border: InputBorder.none,
-              contentPadding: EdgeInsets.zero),
-          cursorColor: p.goldSolid,
+              contentPadding: EdgeInsets.zero,
+            ),
+            cursorColor: p.goldSolid,
+          ),
         ),
-      ),
-    ]);
+      ],
+    );
   }
 
   Widget _ruleDropdown(Palette p, bool isA) {
     final label = isA ? 'RULES AWAL' : 'RULES AKHIR';
     final v = isA ? _ruleA : _ruleB;
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text(label, style: labelSm(context)),
-      const SizedBox(height: 6),
-      Container(
-        key: Key(isA ? 'jurnal_ruleA' : 'jurnal_ruleB'),
-        padding: const EdgeInsets.symmetric(horizontal: 10),
-        decoration: BoxDecoration(
-          color: p.surface1,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(width: 1, color: p.line),
-        ),
-        child: DropdownButtonHideUnderline(
-          child: DropdownButton<int>(
-            value: v,
-            isExpanded: true,
-            dropdownColor: p.card,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: labelSm(context)),
+        const SizedBox(height: 6),
+        Container(
+          key: Key(isA ? 'jurnal_ruleA' : 'jurnal_ruleB'),
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          decoration: BoxDecoration(
+            color: p.surface1,
             borderRadius: BorderRadius.circular(10),
-            icon: Icon(Icons.expand_more, size: 17, color: p.muted),
-            hint: Text('Rule…',
-                style: mono(context, 12.5, color: p.dim)),
-            style: mono(context, 12.5, w: FontWeight.w600),
-            items: [
-              for (int n = 1; n <= kRuleBalances.length; n++)
-                DropdownMenuItem(
+            border: Border.all(width: 1, color: p.line),
+          ),
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<int>(
+              value: v,
+              isExpanded: true,
+              dropdownColor: p.card,
+              borderRadius: BorderRadius.circular(10),
+              icon: Icon(Icons.expand_more, size: 17, color: p.muted),
+              hint: Text('Rule…', style: mono(context, 12.5, color: p.dim)),
+              style: mono(context, 12.5, w: FontWeight.w600),
+              items: [
+                for (int n = 1; n <= kRuleBalances.length; n++)
+                  DropdownMenuItem(
                     value: n,
                     child: FittedBox(
-                        fit: BoxFit.scaleDown,
-                        alignment: Alignment.centerLeft,
-                        // Nominal PERSIS (bukan format singkat Rp346rb yang
-                        // membulatkan 345.600 → terlihat kelebihan ~1k).
-                        child: Text('Rule $n · ${idr(ruleBal(n))}'))),
-            ],
-            onChanged: (val) {
-              setState(() {
-                if (isA) {
-                  _ruleA = val;
-                  if (_ruleB != null && _ruleB! < val!) _ruleB = val;
-                } else {
-                  _ruleB = val;
-                }
-                _syncMark();
-              });
-            },
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerLeft,
+                      // Nominal PERSIS (bukan format singkat Rp346rb yang
+                      // membulatkan 345.600 → terlihat kelebihan ~1k).
+                      child: Text('Rule $n · ${idr(ruleBal(n))}'),
+                    ),
+                  ),
+              ],
+              onChanged: (val) {
+                setState(() {
+                  if (isA) {
+                    _ruleA = val;
+                    if (_ruleB != null && _ruleB! < val!) _ruleB = val;
+                  } else {
+                    _ruleB = val;
+                  }
+                  _syncMark();
+                });
+              },
+            ),
           ),
         ),
-      ),
-    ]);
+      ],
+    );
   }
 
   /// Tanda hasil mengikuti arah rules secara otomatis — turun = SL,
@@ -1400,59 +1609,78 @@ class _JournalPageState extends State<JournalPage> {
     }
   }
 
-  Widget _seg(Palette p, String label, List<(String, bool)> opts, Color cAct,
-      void Function(String) onSel) {
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Text(label, style: labelSm(context, color: p.muted)),
-      const SizedBox(height: 6),
-      Container(
-        padding: const EdgeInsets.all(3),
-        decoration: BoxDecoration(
-          color: p.surface1,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(width: 1, color: p.line),
-        ),
-        child: Row(
-          children: [
-            for (final (name, active) in opts)
-              Expanded(
-                child: GestureDetector(
-                  onTap: () => onSel(name),
-                  behavior: HitTestBehavior.opaque,
-                  child: Container(
-                    alignment: Alignment.center,
-                    padding: const EdgeInsets.symmetric(vertical: 7),
-                    decoration: BoxDecoration(
-                      color: active ? cAct : Colors.transparent,
-                      borderRadius: BorderRadius.circular(8),
+  Widget _seg(
+    Palette p,
+    String label,
+    List<(String, bool)> opts,
+    Color cAct,
+    void Function(String) onSel,
+  ) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(label, style: labelSm(context, color: p.muted)),
+        const SizedBox(height: 6),
+        Container(
+          padding: const EdgeInsets.all(3),
+          decoration: BoxDecoration(
+            color: p.surface1,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(width: 1, color: p.line),
+          ),
+          child: Row(
+            children: [
+              for (final (name, active) in opts)
+                Expanded(
+                  child: GestureDetector(
+                    onTap: () => onSel(name),
+                    behavior: HitTestBehavior.opaque,
+                    child: Container(
+                      alignment: Alignment.center,
+                      padding: const EdgeInsets.symmetric(vertical: 7),
+                      decoration: BoxDecoration(
+                        color: active ? cAct : Colors.transparent,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: mono(
+                          context,
+                          11.5,
+                          w: FontWeight.w700,
+                          color: active ? onColor(context, cAct) : p.muted,
+                        ),
+                      ),
                     ),
-                    child: Text(name,
-                        maxLines: 1, overflow: TextOverflow.ellipsis,
-                        style: mono(context, 11.5, w: FontWeight.w700,
-                            color: active ? Colors.white : p.muted)),
                   ),
                 ),
-              ),
-          ],
+            ],
+          ),
         ),
-      ),
-    ]);
+      ],
+    );
   }
 
   Widget _outcomeBadge(Palette p, int outcome) {
     final (txt2, c, bg) = outcome == 2
         ? ('MISS', p.warm, p.cardHi)
         : outcome > 0
-            ? ('TP', p.mint, p.goodsoft)
-            : outcome < 0
-                ? ('SL', p.red, p.redsoft)
-                : ('BE', p.muted, p.cardHi);
+        ? ('TP', p.mint, p.goodsoft)
+        : outcome < 0
+        ? ('SL', p.red, p.redsoft)
+        : ('BE', p.muted, p.cardHi);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
       decoration: BoxDecoration(
-          color: bg, borderRadius: BorderRadius.circular(7)),
-      child: Text(txt2,
-          style: mono(context, 11.5, w: FontWeight.w700, color: c)),
+        color: bg,
+        borderRadius: BorderRadius.circular(7),
+      ),
+      child: Text(
+        txt2,
+        style: mono(context, 11.5, w: FontWeight.w700, color: c),
+      ),
     );
   }
 
@@ -1464,11 +1692,18 @@ class _JournalPageState extends State<JournalPage> {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
       decoration: BoxDecoration(
-          color: buy ? p.goodsoft : p.redsoft,
-          borderRadius: BorderRadius.circular(7)),
-      child: Text(bias,
-          style: mono(context, 11.5, w: FontWeight.w700,
-              color: buy ? p.mint : p.red)),
+        color: buy ? p.goodsoft : p.redsoft,
+        borderRadius: BorderRadius.circular(7),
+      ),
+      child: Text(
+        bias,
+        style: mono(
+          context,
+          11.5,
+          w: FontWeight.w700,
+          color: buy ? p.mint : p.red,
+        ),
+      ),
     );
   }
 
@@ -1484,74 +1719,102 @@ class _JournalPageState extends State<JournalPage> {
             borderRadius: BorderRadius.circular(12),
             border: Border.all(width: 1, color: p.lineSoft),
           ),
-          child: Row(children: [
-            Expanded(
-              child: Column(
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                Row(children: [
-                  Flexible(
-                    child: Text('${_fmtDate(e.at)}  ${_fmtTime(e.at)}',
-                        maxLines: 1, overflow: TextOverflow.ellipsis,
-                        style: mono(context, 11.5, color: p.muted)),
-                  ),
-                  const SizedBox(width: 8),
-                  Flexible(child: BadgePill(e.pair, color: p.gold, bg: p.cardHi)),
-                  if (e.bias.isNotEmpty) ...[
-                    const SizedBox(width: 6),
-                    Flexible(child: _biasBadge(p, e.bias)),
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            '${_fmtDate(e.at)}  ${_fmtTime(e.at)}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: mono(context, 11.5, color: p.muted),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: BadgePill(e.pair, color: p.gold, bg: p.cardHi),
+                        ),
+                        if (e.bias.isNotEmpty) ...[
+                          const SizedBox(width: 6),
+                          Flexible(child: _biasBadge(p, e.bias)),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 5),
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            'Rule ${e.ruleA}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: mono(context, 13, w: FontWeight.w600),
+                          ),
+                        ),
+                        Icon(Icons.east, size: 13, color: p.dim),
+                        Flexible(
+                          child: Text(
+                            'Rule ${e.ruleB}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: mono(context, 13, w: FontWeight.w600),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Flexible(
+                          child: Text(
+                            '\$${e.price.toStringAsFixed(2)}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: mono(context, 11.5, color: p.dim),
+                          ),
+                        ),
+                      ],
+                    ),
                   ],
-                ]),
-                const SizedBox(height: 5),
-                Row(children: [
-                  Flexible(
-                    child: Text('Rule ${e.ruleA}',
-                        maxLines: 1, overflow: TextOverflow.ellipsis,
-                        style: mono(context, 13, w: FontWeight.w600)),
-                  ),
-                  Icon(Icons.east, size: 13, color: p.dim),
-                  Flexible(
-                    child: Text('Rule ${e.ruleB}',
-                        maxLines: 1, overflow: TextOverflow.ellipsis,
-                        style: mono(context, 13, w: FontWeight.w600)),
-                  ),
-                  const SizedBox(width: 8),
-                  Flexible(
-                    child: Text('\$${e.price.toStringAsFixed(2)}',
-                        maxLines: 1, overflow: TextOverflow.ellipsis,
-                        style: mono(context, 11.5, color: p.dim)),
-                  ),
-                ]),
-              ]),
-            ),
-            const SizedBox(width: 8),
-            Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-              _outcomeBadge(p, e.outcome),
-              const SizedBox(height: 4),
-              Text(
-                e.outcome == 2
-                    ? 'miss'
-                    : e.outcome > 0
+                ),
+              ),
+              const SizedBox(width: 8),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  _outcomeBadge(p, e.outcome),
+                  const SizedBox(height: 4),
+                  Text(
+                    e.outcome == 2
+                        ? 'miss'
+                        : e.outcome > 0
                         ? '+${idr(e.pnl)}'
                         : e.outcome < 0
-                            ? '−${idr(e.pnl.abs())}'
-                            : 'Rp0',
-                style: mono(context, 12.5,
-                    w: FontWeight.w600,
-                    color: e.outcome == 2
-                        ? p.dim
-                        : e.outcome > 0
-                            ? p.mint
-                            : e.outcome < 0
-                                ? p.red
-                                : p.muted),
+                        ? '−${idr(e.pnl.abs())}'
+                        : 'Rp0',
+                    style: mono(
+                      context,
+                      12.5,
+                      w: FontWeight.w600,
+                      color: e.outcome == 2
+                          ? p.dim
+                          : e.outcome > 0
+                          ? p.mint
+                          : e.outcome < 0
+                          ? p.red
+                          : p.muted,
+                    ),
+                  ),
+                ],
               ),
-            ]),
-            IconButton(
+              IconButton(
                 visualDensity: VisualDensity.compact,
                 onPressed: () => _delete(e),
-                icon: Icon(Icons.delete_outline, size: 18, color: p.dim)),
-          ]),
+                icon: Icon(Icons.delete_outline, size: 18, color: p.dim),
+              ),
+            ],
+          ),
         ),
     ];
   }
