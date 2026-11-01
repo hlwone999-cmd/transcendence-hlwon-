@@ -3,6 +3,7 @@
 // menunggu Isolate.run selesai secara NYATA (runAsync). Hasil harus muncul:
 // verdict "Peluang profit …", statistik, dan dua chart (fan + histogram).
 import 'dart:ui' show Size;
+
 import 'package:flutter/widgets.dart' show FlutterError, FlutterErrorDetails;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -12,8 +13,9 @@ import 'package:transcendence/main.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  testWidgets('Monte Carlo otomatis berjalan & menampilkan hasil + chart',
-      (tester) async {
+  testWidgets('Monte Carlo otomatis berjalan & menampilkan hasil + chart', (
+    tester,
+  ) async {
     // kurs mode fixed supaya test tidak memanggil API live (tanpa jaringan).
     SharedPreferences.setMockInitialValues({'lotxau_kursmode': 'fixed'});
     tester.view.physicalSize = const Size(412, 915);
@@ -36,9 +38,12 @@ void main() {
     // pakai skipOffstage:false; JANGAN pumpAndSettle dulu karena timer MC
     // (250ms) bisa terpicu dan fallback isolate sinkron menyelesaikan MC.
     expect(
-        find.text('Lengkapi parameter di bawah untuk menjalankan simulasi.',
-            skipOffstage: false),
-        findsOneWidget);
+      find.text(
+        'Lengkapi parameter di bawah untuk menjalankan simulasi.',
+        skipOffstage: false,
+      ),
+      findsOneWidget,
+    );
 
     // UI baru: aktifkan tab "Simulasi" agar kartu terlihat & hit-testable.
     await tester.tap(find.text('Simulasi'));
@@ -55,9 +60,10 @@ void main() {
 
     // Verdict hasil harus muncul (bukan lagi placeholder)
     expect(
-        find.text('Lengkapi parameter di bawah untuk menjalankan simulasi.'),
-        findsNothing,
-        reason: 'MC dengan input default valid harus menghasilkan verdict');
+      find.text('Lengkapi parameter di bawah untuk menjalankan simulasi.'),
+      findsNothing,
+      reason: 'MC dengan input default valid harus menghasilkan verdict',
+    );
     expect(find.textContaining('Peluang Profit ('), findsOneWidget);
 
     // Statistik MC harus terisi (label tile gaya Obsidian Precision;

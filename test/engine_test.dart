@@ -67,7 +67,10 @@ void main() {
       expect(a.big, '10.00+');
       expect(a.bad, isTrue);
       expect(a.sub, contains('melebihi batas 10.00 lot'));
-      expect(a.sub, contains('SL minimal 5,5 pips')); // riskUsd/100 dibulatkan atas
+      expect(
+        a.sub,
+        contains('SL minimal 5,5 pips'),
+      ); // riskUsd/100 dibulatkan atas
     });
 
     test('belum cukup untuk 0.01 lot', () {
@@ -147,7 +150,17 @@ void main() {
   group('Monte Carlo — port runMC()', () {
     test('berjalan & statistik dalam batas wajar', () {
       final p = const McParams(
-          10000000, 0.02, 2, 25, 0.5, 3, 0.30, 100, 2000, true);
+        10000000,
+        0.02,
+        2,
+        25,
+        0.5,
+        3,
+        0.30,
+        100,
+        2000,
+        true,
+      );
       final r = runMc(p);
       expect(r.ends.length, 2000);
       expect(r.bands.length, 101);
@@ -162,7 +175,18 @@ void main() {
     });
 
     test('biaya dipotong: cR = cost/SL', () {
-      final p = const McParams(1000000, 0.02, 2, 25, 0.5, 3, 0.30, 10, 200, false);
+      final p = const McParams(
+        1000000,
+        0.02,
+        2,
+        25,
+        0.5,
+        3,
+        0.30,
+        10,
+        200,
+        false,
+      );
       final r = runMc(p);
       expect(r.cR, closeTo(0.12, 1e-12));
       expect(r.exp, closeTo(0.5 * (2 - 0.12) - 0.5 * (1 + 0.12), 1e-12));

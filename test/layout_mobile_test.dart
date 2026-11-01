@@ -3,6 +3,7 @@
 // Catatan: hanya pump sampai debounce tabel (120ms) — timer MC (250ms)
 // sengaja tidak dieksekusi karena Isolate.run tidak selesai di FakeAsync.
 import 'dart:ui' show Size;
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -42,16 +43,24 @@ void main() {
     }
 
     // konten kunci harus ada di tree (UI Obsidian Precision)
-    expect(find.text('Transcendence'), findsOneWidget,
-        reason: 'Top bar harus terlihat di layout mobile');
+    expect(
+      find.text('Transcendence'),
+      findsOneWidget,
+      reason: 'Top bar harus terlihat di layout mobile',
+    );
     expect(find.text('TRADING PLAN STAGE'), findsOneWidget);
     expect(find.text('RECOMMENDED LOT SIZE'), findsOneWidget);
     // Tab non-aktif di IndexedStack dianggap offstage oleh finder default —
     // pakai skipOffstage:false untuk memverifikasi seluruh tab ter-render.
-    expect(find.text('Matrix Setup & SL Pips', skipOffstage: false),
-        findsOneWidget,
-        reason: 'Tab Matrix ada di IndexedStack walaupun tidak aktif');
-    expect(structural, isEmpty,
-        reason: 'Layout tidak boleh melempar exception struktural');
+    expect(
+      find.text('Matrix Setup & SL Pips', skipOffstage: false),
+      findsOneWidget,
+      reason: 'Tab Matrix ada di IndexedStack walaupun tidak aktif',
+    );
+    expect(
+      structural,
+      isEmpty,
+      reason: 'Layout tidak boleh melempar exception struktural',
+    );
   });
 }
