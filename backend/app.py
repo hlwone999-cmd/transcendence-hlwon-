@@ -50,6 +50,10 @@ def create_app(config: Config | None = None,
 
 def _provider_factory(config: Config):
     def factory():
+        if config.mt5_provider == "json":
+            from mt5client.json_provider import JSONProvider
+            return JSONProvider(config)
+
         from mt5client.mt5linux_provider import MT5LinuxProvider
         return MT5LinuxProvider(config)
     return factory
