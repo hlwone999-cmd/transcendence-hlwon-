@@ -51,11 +51,16 @@ Auth: header `X-API-Token: <API_TOKEN>`. Wajib diisi di produksi.
 | GET | `/mt5/account` | Snapshot akun (login, server, broker, balance, equity, leverage) |
 | POST | `/mt5/sync` | Trigger sync. Body JSON opsional: `{"mode": "incremental"\|"initial"\|"full"\|"manual"}` |
 | GET | `/mt5/sync/status` | State sync + 20 log terakhir + info scheduler |
-| GET | `/journal/trades` | Daftar trade. Query: `page`, `page_size` (≤200), `from`, `to` (ISO), `symbol`, `status=open\|closed\|all`, `direction=buy\|sell`, `sort`, `order` |
+| GET | `/journal/trades` | Daftar trade. Query: `page`, `page_size` (≤200), `from`, `to` (ISO UTC), `to_exclusive=1`, `symbol`, `status=open\|closed\|all`, `direction=buy\|sell`, `sort`, `order` |
 | GET | `/journal/trades/{position_id}` | Detail trade + deals + orders mentah |
-| GET | `/journal/stats` | Statistik: winrate, gross/net, PF, expectancy, per simbol, harian/mingguan/bulanan |
-| GET | `/journal/equity-curve` | Kurva net kumulatif + ops balance + drawdown historis |
+| GET | `/journal/stats` | Statistik: winrate, gross/net, PF, expectancy, per simbol, harian/mingguan/bulanan. Query tanggal sama dgn trades |
+| GET | `/journal/equity-curve` | Kurva net kumulatif + ops balance + drawdown historis. Query tanggal sama |
+| GET | `/journal/reconciliation` | Rekonsiliasi raw deals vs trades interval identik (`from_deals`, `by_position`, `by_close`, `balance_ops`, `delta_close_vs_deals`) — lihat `docs/DATE-TIMEZONE-RECONCILIATION.md` |
 | GET | `/symbols` | Daftar simbol + definisi pip (untuk filter UI) |
+
+Semantik filter tanggal: `from` inkusif, `to` default inkusif,
+`to_exclusive=1` membuatnya eksklusif → interval `[from, to)`. Semua
+UTC. Detail lengkap: `docs/DATE-TIMEZONE-RECONCILIATION.md`.
 
 Error JSON konsisten: `{"error": {"code": 400, "message": "..."}}`.
 
@@ -72,5 +77,5 @@ Error JSON konsisten: `{"error": {"code": 400, "message": "..."}}`.
 
 ```bash
 pip install pytest
-python -m pytest        # 47 test — sinkron, rekonstruksi, analitik, API, read-only
+python -m pytest        # 63 test — sinkron, rekonstruksi, analitik, API, filter tanggal, rekonsiliasi, read-only
 ```

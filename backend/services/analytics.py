@@ -7,9 +7,18 @@ Aturan penting:
 - pip per simbol dari definisi aplikasi: override SYMBOL_CONFIG ->
   symbol_info -> 10*point. pip_distance = abs(exit-entry)/pip_size.
 - RR JUJUR: kalau SL awal tidak ada -> rr = None (tampil "N/A").
-  risk_money = |entry - sl_initial| / tick_size * tick_value * volume_out.
-  Tanpa tick_value -> risk dalam pip; rr tetap dihitung dari pips
-  reward/risk bila keduanya tersedia; selain itu None.
+
+SEMANTIK INTERVAL WAKTU (harmonis dengan api/routes.py):
+- Semua perbandingan memakai string ISO UTC yang tersimpan di DB
+  ("YYYY-MM-DDTHH:MM:SSZ") — pembandingan leksikografis valid.
+- `date_from` selalu INKLUSIF:  close_time_utc >= date_from.
+- `date_to` default INKLUSIF:  close_time_utc <= date_to.
+  Jika `to_exclusive=True`:    close_time_utc <  date_to  → interval
+  efektif [date_from, date_to) seperti kontrak API.
+- ATRIBUSI PERIODE: trade dihitung penuh di periode tanggal PENUTUP-nya
+  (close_time_utc). Trade yang membuka bulan lalu dan menutup bulan ini
+  masuk bulan ini — sama seperti atribusi "Positions" di MT5 yang
+  mengelompokkan per tanggal penutupan. Tidak ada pembagian pro-rata.
 """
 from __future__ import annotations
 
@@ -70,7 +79,8 @@ def _empty_group() -> dict:
 
 def compute_stats(conn, account_id: int, symbol_cfg: dict,
                   date_from: str | None = None, date_to: str | None = None,
-                  symbol: str | None = None) -> dict:
+                  symbol: str | None = None,
+                  to_exclusive: bool = False) -> dict:
     meta = load_symbol_meta(conn, account_id)
 
     q = ("SELECT * FROM trades WHERE account_id=? AND status='closed'")
@@ -79,7 +89,7 @@ def compute_stats(conn, account_id: int, symbol_cfg: dict,
         q += " AND close_time_utc >= ?"
         args.append(date_from)
     if date_to:
-        q += " AND close_time_utc <= ?"
+        q += " AND close_time_utc < ?" if to_exclusive else " AND close_time_utc <= ?"
         args.append(date_to)
     if symbol:
         q += " AND symbol = ?"
@@ -147,7 +157,8 @@ def compute_stats(conn, account_id: int, symbol_cfg: dict,
 
     return {
         "account_id": account_id,
-        "filters": {"from": date_from, "to": date_to, "symbol": symbol},
+        "filters": {"from": date_from, "to": date_to,
+                    "to_exclusive": bool(to_exclusive), "symbol": symbol},
         "total_closed": total,
         "wins": len(wins),
         "losses": len(losses),
@@ -172,11 +183,15 @@ def compute_stats(conn, account_id: int, symbol_cfg: dict,
 
 def equity_curve(conn, account_id: int, symbol_cfg: dict,
                  date_from: str | None = None, date_to: str | None = None,
-                 symbol: str | None = None) -> dict:
+                 symbol: str | None = None,
+                 to_exclusive: bool = False) -> dict:
     """Kurva berbasis transaksi (relatif rentang, bukan saldo absolut):
     - 'trade'     : trade closed, nilai = kumulatif net P/L
     - 'deposit'/'withdrawal' dsb.: ops balance dari raw deals
     Dari kurva ini dihitung drawdown historis (peak-to-trough).
+
+    PENTING: ini KURVA P/L TRADING kumulatif, BUKAN kurva equity akun
+    historis — snapshot equity harian tidak tersedia dari MT5 history.
     """
     meta = load_symbol_meta(conn, account_id)
 
@@ -188,7 +203,7 @@ def equity_curve(conn, account_id: int, symbol_cfg: dict,
         q += " AND close_time_utc >= ?"
         args.append(date_from)
     if date_to:
-        q += " AND close_time_utc <= ?"
+        q += " AND close_time_utc < ?" if to_exclusive else " AND close_time_utc <= ?"
         args.append(date_to)
     if symbol:
         q += " AND symbol = ?"
@@ -253,4 +268,133 @@ def equity_curve(conn, account_id: int, symbol_cfg: dict,
         "max_drawdown": round(max_dd, 2),
         "max_drawdown_pct": round(max_dd_pct, 2),
         "max_drawdown_at": max_dd_at,
+    }
+
+
+def reconciliation(conn, account_id: int,
+                   date_from: str | None = None, date_to: str | None = None,
+                   symbol: str | None = None,
+                   to_exclusive: bool = False) -> dict:
+    """Rekonsiliasi: raw MT5 deals vs trades hasil rekonstruksi.
+
+    Metode (sumber kebenaran = tabel mt5_deals):
+    1. Pilih SEMUA deals trading (deal_type 0/1) dalam interval yang sama
+       (inklusif dari, to tergantung to_exclusive — konsisten dengan
+       compute_stats). Deposit/withdrawal TIDAK masuk profit trading,
+       hanya dilaporkan terpisah.
+    2. from_deals  : jumlah profit/commission/swap/fee dari deals itu.
+    3. by_position : trades yang position_id-nya terlibat — menjelaskan
+       trade yang SEBAGIAN deals-nya di dalam interval (partial close
+       lintas batas): jumlah net_profit trade PENUH bisa > deals interval.
+    4. by_close    : trades CLOSED yang close_time-nya di interval —
+       basis yang sama dipakai compute_stats.
+    5. delta_close_vs_deals = by_close.net - from_deals.net; 0 berarti
+       konsisten; != 0 menandakan ada deal masuk/keluar interval yang
+       dimiliki trade yang close di luar interval (normal, dijelaskan di
+       docs/DATE-TIMEZONE-RECONCILIATION.md).
+
+    Endpoint ini ALAT DIAGNOSA — tidak mengubah data apa pun.
+    """
+    meta = load_symbol_meta(conn, account_id)
+
+    # --- 1) deals trading dalam interval ---------------------------------
+    cond = ["account_id=?", "deal_type IN (0,1)"]
+    dargs: list = [account_id]
+    if date_from:
+        cond.append("time_utc >= ?")
+        dargs.append(date_from)
+    if date_to:
+        cond.append("time_utc < ?" if to_exclusive else "time_utc <= ?")
+        dargs.append(date_to)
+    if symbol:
+        cond.append("symbol = ?")
+        dargs.append(symbol)
+    where = " AND ".join(cond)
+
+    deals = [dict(r) for r in conn.execute(
+        f"SELECT ticket, position_id, symbol, time_utc, profit, commission,"
+        f" swap, fee FROM mt5_deals WHERE {where}", dargs)]
+    in_deals = [d for d in deals if d["position_id"] is not None]
+
+    def _sum(rows, k):
+        return round(sum(r[k] or 0 for r in rows), 8)
+
+    from_deals = {
+        "deals": len(deals),
+        "profit": _sum(deals, "profit"),
+        "commission": _sum(deals, "commission"),
+        "swap": _sum(deals, "swap"),
+        "fee": _sum(deals, "fee"),
+    }
+    from_deals["net"] = round(from_deals["profit"] + from_deals["commission"]
+                              + from_deals["swap"] + from_deals["fee"], 8)
+
+    # ops balance (deposit/withdrawal) dalam interval yang sama —
+    # dilaporkan TERPISAH, tidak pernah masuk profit trading.
+    bcond = ["account_id=?", "deal_type=2"]
+    bargs: list = [account_id]
+    if date_from:
+        bcond.append("time_utc >= ?")
+        bargs.append(date_from)
+    if date_to:
+        bcond.append("time_utc < ?" if to_exclusive else "time_utc <= ?")
+        bargs.append(date_to)
+    bops = [dict(r) for r in conn.execute(
+        f"SELECT ticket, time_utc, profit, comment FROM mt5_deals"
+        f" WHERE {' AND '.join(bcond)}", bargs)]
+
+    # --- 2) trades yang terlibat (berdasar position_id dari deals) -------
+    pids = sorted({d["position_id"] for d in in_deals})
+    by_position = {"positions": len(pids), "net_profit": 0.0, "closed": 0}
+    if pids:
+        ph = ",".join("?" * len(pids))
+        rows = [dict(r) for r in conn.execute(
+            f"SELECT status, net_profit FROM trades WHERE account_id=?"
+            f" AND position_id IN ({ph})", [account_id] + pids)]
+        by_position["net_profit"] = round(
+            sum(r["net_profit"] or 0 for r in rows), 8)
+        by_position["closed"] = sum(1 for r in rows if r["status"] == "closed")
+
+    # --- 3) trades CLOSED dengan close_time di interval (basis stats) ----
+    tcond = ["account_id=?", "status='closed'"]
+    targs: list = [account_id]
+    if date_from:
+        tcond.append("close_time_utc >= ?")
+        targs.append(date_from)
+    if date_to:
+        tcond.append("close_time_utc < ?" if to_exclusive else "close_time_utc <= ?")
+        targs.append(date_to)
+    if symbol:
+        tcond.append("symbol = ?")
+        targs.append(symbol)
+    trows = [dict(r) for r in conn.execute(
+        f"SELECT position_id, profit, commission, swap, fee, net_profit"
+        f" FROM trades WHERE {' AND '.join(tcond)}", targs)]
+    by_close = {
+        "trades": len(trows),
+        "profit": _sum(trows, "profit"),
+        "commission": _sum(trows, "commission"),
+        "swap": _sum(trows, "swap"),
+        "fee": _sum(trows, "fee"),
+        "net_profit": _sum(trows, "net_profit"),
+    }
+
+    return {
+        "interval": {"from": date_from, "to": date_to,
+                     "to_exclusive": bool(to_exclusive), "symbol": symbol},
+        "from_deals": from_deals,
+        "by_position": by_position,
+        "by_close": by_close,
+        "balance_ops": {
+            "count": len(bops),
+            "total": round(sum(float(r["profit"] or 0) for r in bops), 8),
+            "items": bops[:50],
+        },
+        "delta_close_vs_deals": round(
+            by_close["net_profit"] - from_deals["net"], 8),
+        "note": ("delta = by_close.net - from_deals.net. Nilai 0 = konsisten. "
+                 "Selisih normal terjadi jika ada deal di dalam interval yang "
+                 "milik trade yang close di luar interval (partial close / "
+                 "trade lintas periode). Deposit & withdrawal tidak pernah "
+                 "dihitung profit trading."),
     }
