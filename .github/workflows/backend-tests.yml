@@ -1,0 +1,30 @@
+# Test backend Jurnal MT5 (pytest) — jalankan di setiap push/PR yang
+# menyentuh backend/, terpisah dari workflow Build APK.
+name: Backend Tests
+
+on:
+  push:
+    paths: [ 'backend/**', '.github/workflows/backend-tests.yml' ]
+  pull_request:
+    paths: [ 'backend/**', '.github/workflows/backend-tests.yml' ]
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install deps (tanpa mt5linux — test memakai mock)
+        run: pip install flask waitress python-dotenv pytest
+
+      - name: Run pytest
+        run: python -m pytest -v
