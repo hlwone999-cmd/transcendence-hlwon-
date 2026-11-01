@@ -2,7 +2,7 @@
 // Kalkulator Lot XAUUSD (IDR) dengan UI "Obsidian Precision".
 //
 // CATATAN UI: tampilan diganti total mengikuti desain stitch
-// (3 tab + bottom nav, dark obsidian, Geist + JetBrains Mono).
+// (5 tab + bottom nav, dark obsidian, Geist + JetBrains Mono).
 // SEMUA ALGORITMA & STATE LOGIC TIDAK DIUBAH — disalin apa adanya
 // dari versi sebelumnya (engine.dart, montecarlo.dart, alur recalc,
 // debounce, isolate Monte Carlo, kurs live, rules recovery, CSV).
@@ -23,6 +23,7 @@ import 'charts.dart';
 import 'engine.dart';
 import 'journal.dart';
 import 'montecarlo.dart';
+import 'mt5_page.dart';
 import 'sticky_table.dart';
 import 'tables_build.dart';
 import 'ui_kit.dart';
@@ -604,7 +605,8 @@ class _HomeScreenState extends State<HomeScreen> {
       _calcTab(p, mh), // 0 Kalkulator
       _matrixTab(p, mh), // 1 Matrix Risiko
       _simTab(p, mh), // 2 Simulasi
-      const JournalPage(), // 3 Jurnal (fitur baru)
+      const JournalPage(), // 3 Jurnal (manual)
+      const Mt5JournalPage(), // 4 Jurnal MT5 (otomatis via backend VPS)
     ];
 
     return Scaffold(
@@ -633,6 +635,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   _navItem(p, 1, Icons.grid_view_outlined, 'Matrix Risiko'),
                   _navItem(p, 2, Icons.trending_up, 'Simulasi'),
                   _navItem(p, 3, Icons.menu_book_outlined, 'Jurnal'),
+                  _navItem(p, 4, Icons.cloud_sync_outlined, 'MT5'),
                 ],
               ),
             ),
@@ -670,13 +673,14 @@ class _HomeScreenState extends State<HomeScreen> {
     if (i == Icons.calculate_outlined) return Icons.calculate;
     if (i == Icons.grid_view_outlined) return Icons.grid_view;
     if (i == Icons.menu_book_outlined) return Icons.menu_book;
+    if (i == Icons.cloud_sync_outlined) return Icons.cloud_sync;
     return i;
   }
 
   // ---- top bar ----
 
   Widget _topBar(Palette p) {
-    final tabNames = const ['Kalkulator', 'Matrix Risiko', 'Simulasi', 'Jurnal'];
+    final tabNames = const ['Kalkulator', 'Matrix Risiko', 'Simulasi', 'Jurnal', 'MT5'];
     return Container(
       height: 64,
       padding: const EdgeInsets.symmetric(horizontal: 16),
