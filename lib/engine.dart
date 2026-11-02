@@ -98,6 +98,10 @@ String one(num? x) {
 String lotTxt(double l) => l.toStringAsFixed(2);
 
 /// Padanan `short(v)` web untuk label sumbu chart: Rp…M / …jt / …rb.
+///
+/// CATATAN Phase 1.1: shortIdr HANYA untuk tab kalkulator IDR (legacy).
+/// Tab Jurnal MT5 memakai [fmtMoney] — mata uang dinamis mengikuti akun,
+/// tanpa pembulatan yang menghilangkan nilai.
 String shortIdr(double v) {
   final a = v.abs();
   if (a >= 1e9) {
@@ -108,6 +112,99 @@ String shortIdr(double v) {
   }
   if (a >= 1e3) return 'Rp${_group((v / 1e3).round().toString())}rb';
   return 'Rp${_group(v.round().toString())}';
+}
+
+// ---------------------------------------------------------------------------
+// Format uang & lot dinamis (Phase 1.1 — Temuan 1, 2, 3)
+// ---------------------------------------------------------------------------
+
+/// Simbol mata uang berdasarkan kode ISO 4217 dari akun MT5.
+/// TIDAK ADA hardcode IDR: kode yang tidak dikenal tampil sebagai
+/// prefiks kode itu sendiri (mis. "ZAR 12,50") — jelas dan tidak menyesatkan.
+const Map<String, String> kCurrencySymbols = {
+  'IDR': 'Rp',
+  'USD': r'$',
+  'EUR': '€',
+  'GBP': '£',
+  'JPY': '¥',
+  'CNY': 'CN¥',
+  'KRW': '₩',
+  'SGD': r'S$',
+  'AUD': r'A$',
+  'NZD': r'NZ$',
+  'CAD': r'C$',
+  'CHF': 'CHF ',
+  'HKD': r'HK$',
+  'MYR': 'RM',
+  'THB': '฿',
+  'PHP': '₱',
+  'VND': '₫',
+  'INR': '₹',
+  'BRL': r'R$',
+  'ZAR': 'R ',
+  'TRY': '₺',
+  'PLN': 'zł ',
+  'SEK': 'kr ',
+  'NOK': 'kr ',
+  'DKK': 'kr ',
+};
+
+/// Mata uang zero-decimal ISO 4217 (tanpa pecahan sen).
+const Set<String> kZeroDecimalCurrencies = {'JPY', 'KRW', 'VND'};
+
+String _numFixedId(double v, int decimals) {
+  final s = v.toStringAsFixed(decimals);
+  final parts = s.split('.');
+  final grouped = _group(parts[0]);
+  return decimals > 0 ? '$grouped,${parts[1]}' : grouped;
+}
+
+/// Nilai uang PENUH (tidak dipotong ke M/jt/rb, tidak dibulatkan ke ribuan)
+/// dengan pemisah id-ID (ribuan ".", desimal ",") dan simbol sesuai mata
+/// uang akun MT5 [cur].
+///
+/// [signed] menambah "+" untuk nilai non-negatif; negatif selalu memakai
+/// tanda minus tipografi "−" (U+2212) agar mudah dibedakan.
+/// Contoh: fmtMoney(22036.79, 'IDR', signed: true)  -> "+Rp22.036,79"
+///         fmtMoney(-1564837.89, 'IDR', signed: true) -> "−Rp1.564.837,89"
+///         fmtMoney(172.0, 'USD', signed: true)     -> "+\$172,00"
+///         fmtMoney(1234.0, 'JPY', signed: true)    -> "+¥1.234"
+///         fmtMoney(12.5, 'XYZ', signed: true)      -> "+XYZ 12,50"
+String fmtMoney(double? v, String cur, {bool signed = false}) {
+  if (v == null || !v.isFinite) return '–';
+  final c = cur.trim().toUpperCase();
+  if (c.isEmpty) return '–';
+  final decimals = kZeroDecimalCurrencies.contains(c) ? 0 : 2;
+  final neg = v < 0;
+  final body = _numFixedId(v.abs(), decimals);
+  final sign = neg ? '−' : (signed ? '+' : '');
+  final sym = kCurrencySymbols[c] ?? '$c ';
+  return '$sign$sym$body';
+}
+
+/// Volume dalam LOT — tidak pernah diformat sebagai uang.
+/// Presisi sampai 3 desimal (broker micro-step 0.001 tidak hilang),
+/// nol akhir dipangkas: 2.17 -> "2,17", 0.7 -> "0,7", 2.0 -> "2".
+/// TANPA pembulatan ke ribuan (dahulu 0,7 lot tampil "Rp1").
+String fmtLots(double? v) {
+  if (v == null || !v.isFinite) return '–';
+  var s = v.abs().toStringAsFixed(3);
+  if (s.contains('.')) {
+    s = s.replaceFirst(RegExp(r'0+$'), '');
+    if (s.endsWith('.')) s = s.substring(0, s.length - 1);
+  }
+  return v < 0 ? '-${s.replaceFirst('.', ',')}' : s.replaceFirst('.', ',');
+}
+
+/// 2 desimal gaya id-ID (koma) — untuk RR/persentase di tab MT5 agar
+/// konsisten dengan seluruh angka (dahulu campur titik dan koma).
+String two(num? x) {
+  if (x == null || !x.isFinite) return '–';
+  final s = x.toDouble().toStringAsFixed(2);
+  final parts = s.split('.');
+  final negative = parts[0].startsWith('-');
+  final digits = negative ? parts[0].substring(1) : parts[0];
+  return '${negative ? '-' : ''}${_group(digits)},${parts[1]}';
 }
 
 // ---------------------------------------------------------------------------

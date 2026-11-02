@@ -182,11 +182,13 @@ TextStyle txt(
 }
 
 /// Label kecil huruf besar (label-sm uppercase tracking-wider).
+/// Phase 1.1 Temuan 7: dinaikkan dari 10.5px → 11.5px (tracking 1.4 → 1.2)
+/// — 10.5px dengan tracking lebar nyaris tak terbaca di layar ponsel.
 TextStyle labelSm(BuildContext c, {Color? color}) => TextStyle(
   fontFamily: kBodyFont,
-  fontSize: 10.5,
+  fontSize: 11.5,
   fontWeight: FontWeight.w500,
-  letterSpacing: 1.4,
+  letterSpacing: 1.2,
   height: 1.3,
   color: color ?? Palette.of(c).muted,
 );
