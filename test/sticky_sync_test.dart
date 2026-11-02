@@ -18,8 +18,9 @@ void main() {
     };
   }
 
-  testWidgets('geser horizontal badan tabel ikut menggeser header',
-      (tester) async {
+  testWidgets('geser horizontal badan tabel ikut menggeser header', (
+    tester,
+  ) async {
     SharedPreferences.setMockInitialValues({'lotxau_kursmode': 'fixed'});
     tester.view.physicalSize = const Size(412, 915);
     tester.view.devicePixelRatio = 1.0;
@@ -44,7 +45,9 @@ void main() {
     // dengan input default: balance 10jt, risk 2%, kurs 17.934).
     final headerFinder = find.text('SL (PIPS)');
     final bodyCellFinder = find.descendant(
-        of: tableFinder, matching: find.text('111,5'));
+      of: tableFinder,
+      matching: find.text('111,5'),
+    );
     expect(headerFinder, findsOneWidget);
     expect(bodyCellFinder, findsWidgets);
 
@@ -62,16 +65,26 @@ void main() {
     final headerDelta = headerX0 - headerX1;
     final bodyDelta = bodyX0 - bodyX1;
 
-    expect(bodyDelta, greaterThan(50),
-        reason: 'Badan tabel harus bergeser setelah drag horizontal');
-    expect(headerDelta, greaterThan(50),
-        reason: 'Header harus ikut bergeser (bug: dulu tidak ikut)');
-    expect((headerDelta - bodyDelta).abs(), lessThan(1.5),
-        reason: 'Header & body harus bergeser selaras (sinkron sempurna)');
+    expect(
+      bodyDelta,
+      greaterThan(50),
+      reason: 'Badan tabel harus bergeser setelah drag horizontal',
+    );
+    expect(
+      headerDelta,
+      greaterThan(50),
+      reason: 'Header harus ikut bergeser (bug: dulu tidak ikut)',
+    );
+    expect(
+      (headerDelta - bodyDelta).abs(),
+      lessThan(1.5),
+      reason: 'Header & body harus bergeser selaras (sinkron sempurna)',
+    );
   });
 
-  testWidgets('geser horizontal HEADER juga menggeser badan tabel',
-      (tester) async {
+  testWidgets('geser horizontal HEADER juga menggeser badan tabel', (
+    tester,
+  ) async {
     SharedPreferences.setMockInitialValues({'lotxau_kursmode': 'fixed'});
     tester.view.physicalSize = const Size(412, 915);
     tester.view.devicePixelRatio = 1.0;
@@ -93,7 +106,9 @@ void main() {
 
     final headerFinder = find.text('SL (PIPS)');
     final bodyCellFinder = find.descendant(
-        of: tableFinder, matching: find.text('111,5'));
+      of: tableFinder,
+      matching: find.text('111,5'),
+    );
 
     final headerX0 = tester.getTopLeft(headerFinder).dx;
     final bodyX0 = tester.getTopLeft(bodyCellFinder.first).dx;
@@ -108,9 +123,15 @@ void main() {
 
     final headerDelta = headerX0 - headerX1;
     final bodyDelta = bodyX0 - bodyX1;
-    expect(bodyDelta, greaterThan(50),
-        reason: 'Badan harus mengikuti header saat header digeser');
-    expect((headerDelta - bodyDelta).abs(), lessThan(1.5),
-        reason: 'Kedua arah harus tetap sinkron');
+    expect(
+      bodyDelta,
+      greaterThan(50),
+      reason: 'Badan harus mengikuti header saat header digeser',
+    );
+    expect(
+      (headerDelta - bodyDelta).abs(),
+      lessThan(1.5),
+      reason: 'Kedua arah harus tetap sinkron',
+    );
   });
 }

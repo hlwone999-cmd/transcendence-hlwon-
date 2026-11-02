@@ -27,15 +27,15 @@ class Mt5Status {
   });
 
   factory Mt5Status.fromJson(Map<String, dynamic> j) => Mt5Status(
-        provider: (j['provider'] ?? '-') as String,
-        enabled: j['enabled'] == true,
-        connected: j['connected'] == true,
-        reason: j['reason'] as String?,
-        lastSync: j['last_sync'] as Map<String, dynamic>?,
-        lastRun: j['last_run'] as Map<String, dynamic>?,
-        storedTrades: _d2(j['stored']?['trades']).toInt(),
-        storedDeals: _d2(j['stored']?['deals']).toInt(),
-      );
+    provider: (j['provider'] ?? '-') as String,
+    enabled: j['enabled'] == true,
+    connected: j['connected'] == true,
+    reason: j['reason'] as String?,
+    lastSync: j['last_sync'] as Map<String, dynamic>?,
+    lastRun: j['last_run'] as Map<String, dynamic>?,
+    storedTrades: _d2(j['stored']?['trades']).toInt(),
+    storedDeals: _d2(j['stored']?['deals']).toInt(),
+  );
 }
 
 class Mt5Account {
@@ -62,16 +62,16 @@ class Mt5Account {
   });
 
   factory Mt5Account.fromJson(Map<String, dynamic> j) => Mt5Account(
-        login: _d2(j['login']).toInt(),
-        server: (j['server'] ?? '-') as String,
-        company: j['company'] as String?,
-        currency: (j['currency'] ?? 'USD') as String,
-        leverage: j['leverage'] == null ? null : _d2(j['leverage']).toInt(),
-        balance: _opt(j['balance']),
-        equity: _opt(j['equity']),
-        marginFree: _opt(j['margin_free']),
-        lastSyncAt: j['last_sync_at'] as String?,
-      );
+    login: _d2(j['login']).toInt(),
+    server: (j['server'] ?? '-') as String,
+    company: j['company'] as String?,
+    currency: (j['currency'] ?? 'USD') as String,
+    leverage: j['leverage'] == null ? null : _d2(j['leverage']).toInt(),
+    balance: _opt(j['balance']),
+    equity: _opt(j['equity']),
+    marginFree: _opt(j['margin_free']),
+    lastSyncAt: j['last_sync_at'] as String?,
+  );
 }
 
 class Mt5Trade {
@@ -135,33 +135,33 @@ class Mt5Trade {
   bool get isWin => netProfit > 0;
 
   factory Mt5Trade.fromJson(Map<String, dynamic> j) => Mt5Trade(
-        positionId: _d2(j['position_id']).toInt(),
-        symbol: (j['symbol'] ?? '?') as String,
-        direction: j['direction'] as String?,
-        status: (j['status'] ?? 'closed') as String,
-        volumeIn: _d2(j['volume_in']),
-        volumeOut: _d2(j['volume_out']),
-        entryPrice: _opt(j['entry_price']),
-        exitPrice: _opt(j['exit_price']),
-        openTime: j['open_time_utc'] as String?,
-        closeTime: j['close_time_utc'] as String?,
-        profit: _d2(j['profit']),
-        commission: _d2(j['commission']),
-        swap: _d2(j['swap']),
-        fee: _d2(j['fee']),
-        netProfit: _d2(j['net_profit']),
-        slInitial: _opt(j['sl_initial']),
-        tpInitial: _opt(j['tp_initial']),
-        slCurrent: _opt(j['sl_current']),
-        tpCurrent: _opt(j['tp_current']),
-        priceCurrent: _opt(j['price_current']),
-        exitReason: j['exit_reason'] as String?,
-        magic: j['magic'] == null ? null : _d2(j['magic']).toInt(),
-        comment: (j['comment'] ?? '') as String,
-        pips: _opt(j['pips']),
-        pipDistance: _opt(j['pip_distance']),
-        rr: _opt(j['rr']),
-      );
+    positionId: _d2(j['position_id']).toInt(),
+    symbol: (j['symbol'] ?? '?') as String,
+    direction: j['direction'] as String?,
+    status: (j['status'] ?? 'closed') as String,
+    volumeIn: _d2(j['volume_in']),
+    volumeOut: _d2(j['volume_out']),
+    entryPrice: _opt(j['entry_price']),
+    exitPrice: _opt(j['exit_price']),
+    openTime: j['open_time_utc'] as String?,
+    closeTime: j['close_time_utc'] as String?,
+    profit: _d2(j['profit']),
+    commission: _d2(j['commission']),
+    swap: _d2(j['swap']),
+    fee: _d2(j['fee']),
+    netProfit: _d2(j['net_profit']),
+    slInitial: _opt(j['sl_initial']),
+    tpInitial: _opt(j['tp_initial']),
+    slCurrent: _opt(j['sl_current']),
+    tpCurrent: _opt(j['tp_current']),
+    priceCurrent: _opt(j['price_current']),
+    exitReason: j['exit_reason'] as String?,
+    magic: j['magic'] == null ? null : _d2(j['magic']).toInt(),
+    comment: (j['comment'] ?? '') as String,
+    pips: _opt(j['pips']),
+    pipDistance: _opt(j['pip_distance']),
+    rr: _opt(j['rr']),
+  );
 }
 
 class Mt5Stats {
@@ -198,26 +198,33 @@ class Mt5Stats {
   });
 
   factory Mt5Stats.fromJson(Map<String, dynamic> j) => Mt5Stats(
-        totalClosed: _d2(j['total_closed']).toInt(),
-        wins: _d2(j['wins']).toInt(),
-        losses: _d2(j['losses']).toInt(),
-        breakeven: _d2(j['breakeven']).toInt(),
-        winRate: _opt(j['win_rate']),
-        grossProfit: _d2(j['gross_profit']),
-        grossLoss: _d2(j['gross_loss']),
-        netProfit: _d2(j['net_profit']),
-        profitFactor: _opt(j['profit_factor']),
-        averageWin: _opt(j['average_win']),
-        averageLoss: _opt(j['average_loss']),
-        expectancy: _opt(j['expectancy']),
-        totalVolume: _d2(j['total_volume']),
-        openTrades: _d2(j['open_trades']).toInt(),
-      );
+    totalClosed: _d2(j['total_closed']).toInt(),
+    wins: _d2(j['wins']).toInt(),
+    losses: _d2(j['losses']).toInt(),
+    breakeven: _d2(j['breakeven']).toInt(),
+    winRate: _opt(j['win_rate']),
+    grossProfit: _d2(j['gross_profit']),
+    grossLoss: _d2(j['gross_loss']),
+    netProfit: _d2(j['net_profit']),
+    profitFactor: _opt(j['profit_factor']),
+    averageWin: _opt(j['average_win']),
+    averageLoss: _opt(j['average_loss']),
+    expectancy: _opt(j['expectancy']),
+    totalVolume: _d2(j['total_volume']),
+    openTrades: _d2(j['open_trades']).toInt(),
+  );
 
   static const empty = Mt5Stats(
-      totalClosed: 0, wins: 0, losses: 0, breakeven: 0,
-      grossProfit: 0, grossLoss: 0, netProfit: 0,
-      totalVolume: 0, openTrades: 0);
+    totalClosed: 0,
+    wins: 0,
+    losses: 0,
+    breakeven: 0,
+    grossProfit: 0,
+    grossLoss: 0,
+    netProfit: 0,
+    totalVolume: 0,
+    openTrades: 0,
+  );
 }
 
 class Mt5CurvePoint {
@@ -236,12 +243,12 @@ class Mt5CurvePoint {
   });
 
   factory Mt5CurvePoint.fromJson(Map<String, dynamic> j) => Mt5CurvePoint(
-        t: j['t'] as String?,
-        type: (j['type'] ?? 'trade') as String,
-        label: (j['label'] ?? '') as String,
-        netCum: _d2(j['net_cum']),
-        balanceOpsCum: _d2(j['balance_ops_cum']),
-      );
+    t: j['t'] as String?,
+    type: (j['type'] ?? 'trade') as String,
+    label: (j['label'] ?? '') as String,
+    netCum: _d2(j['net_cum']),
+    balanceOpsCum: _d2(j['balance_ops_cum']),
+  );
 }
 
 class Mt5Equity {
@@ -262,18 +269,23 @@ class Mt5Equity {
   });
 
   factory Mt5Equity.fromJson(Map<String, dynamic> j) => Mt5Equity(
-        points: (j['points'] as List<dynamic>? ?? [])
-            .map((e) => Mt5CurvePoint.fromJson(e as Map<String, dynamic>))
-            .toList(),
-        finalNetCum: _d2(j['final_net_cum']),
-        balanceOpsCum: _d2(j['balance_ops_cum']),
-        maxDrawdown: _d2(j['max_drawdown']),
-        maxDrawdownPct: _d2(j['max_drawdown_pct']),
-        maxDrawdownAt: j['max_drawdown_at'] as String?,
-      );
+    points: (j['points'] as List<dynamic>? ?? [])
+        .map((e) => Mt5CurvePoint.fromJson(e as Map<String, dynamic>))
+        .toList(),
+    finalNetCum: _d2(j['final_net_cum']),
+    balanceOpsCum: _d2(j['balance_ops_cum']),
+    maxDrawdown: _d2(j['max_drawdown']),
+    maxDrawdownPct: _d2(j['max_drawdown_pct']),
+    maxDrawdownAt: j['max_drawdown_at'] as String?,
+  );
 
-  static const empty = Mt5Equity(points: [], finalNetCum: 0,
-      balanceOpsCum: 0, maxDrawdown: 0, maxDrawdownPct: 0);
+  static const empty = Mt5Equity(
+    points: [],
+    finalNetCum: 0,
+    balanceOpsCum: 0,
+    maxDrawdown: 0,
+    maxDrawdownPct: 0,
+  );
 }
 
 class Mt5TradeList {
@@ -294,14 +306,14 @@ class Mt5TradeList {
   bool get hasMore => page < pages;
 
   factory Mt5TradeList.fromJson(Map<String, dynamic> j) => Mt5TradeList(
-        items: (j['items'] as List<dynamic>? ?? [])
-            .map((e) => Mt5Trade.fromJson(e as Map<String, dynamic>))
-            .toList(),
-        page: _d2(j['page']).toInt(),
-        pageSize: _d2(j['page_size']).toInt(),
-        total: _d2(j['total']).toInt(),
-        pages: _d2(j['pages']).toInt(),
-      );
+    items: (j['items'] as List<dynamic>? ?? [])
+        .map((e) => Mt5Trade.fromJson(e as Map<String, dynamic>))
+        .toList(),
+    page: _d2(j['page']).toInt(),
+    pageSize: _d2(j['page_size']).toInt(),
+    total: _d2(j['total']).toInt(),
+    pages: _d2(j['pages']).toInt(),
+  );
 }
 
 class Mt5TradeDetail {
@@ -316,14 +328,14 @@ class Mt5TradeDetail {
   });
 
   factory Mt5TradeDetail.fromJson(Map<String, dynamic> j) => Mt5TradeDetail(
-        trade: Mt5Trade.fromJson(j['trade'] as Map<String, dynamic>),
-        deals: (j['deals'] as List<dynamic>? ?? [])
-            .map((e) => e as Map<String, dynamic>)
-            .toList(),
-        orders: (j['orders'] as List<dynamic>? ?? [])
-            .map((e) => e as Map<String, dynamic>)
-            .toList(),
-      );
+    trade: Mt5Trade.fromJson(j['trade'] as Map<String, dynamic>),
+    deals: (j['deals'] as List<dynamic>? ?? [])
+        .map((e) => e as Map<String, dynamic>)
+        .toList(),
+    orders: (j['orders'] as List<dynamic>? ?? [])
+        .map((e) => e as Map<String, dynamic>)
+        .toList(),
+  );
 }
 
 double _d2(dynamic v) {

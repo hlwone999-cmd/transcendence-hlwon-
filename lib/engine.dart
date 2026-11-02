@@ -6,8 +6,10 @@
 const double kMaxLot = 10;
 
 /// Daftar lot tabel: 0.01 … 10.00, kelipatan 0.01 (1000 baris, sama seperti web).
-final List<double> kLots =
-    List<double>.generate(1000, (int i) => (i + 1) / 100);
+final List<double> kLots = List<double>.generate(
+  1000,
+  (int i) => (i + 1) / 100,
+);
 
 /// Persentase kolom matriks (sama seperti konstanta PCTS di web).
 const List<int> kPcts = [1, 2, 3, 5, 10, 15, 20, 25, 50, 100];
@@ -15,11 +17,41 @@ const List<int> kPcts = [1, 2, 3, 5, 10, 15, 20, 25, 50, 100];
 /// Balance rules n = round(200000 x 1.2^(n-1)) — terverifikasi persis sama
 /// dengan PDF tabel (sama seperti konstanta RULE_BALANCES di web).
 const List<int> kRuleBalances = [
-  200000, 240000, 288000, 345600, 414720, 497664, 597197, 716636, 859963,
-  1031956, 1238347, 1486017, 1783220, 2139864, 2567837, 3081404, 3697685,
-  4437222, 5324667, 6389600, 7667520, 9201024, 11041229, 13249475, 15899369,
-  19079243, 22895092, 27474110, 32968932, 39562719, 47475263, 56970315,
-  68364378, 82037254, 98444705,
+  200000,
+  240000,
+  288000,
+  345600,
+  414720,
+  497664,
+  597197,
+  716636,
+  859963,
+  1031956,
+  1238347,
+  1486017,
+  1783220,
+  2139864,
+  2567837,
+  3081404,
+  3697685,
+  4437222,
+  5324667,
+  6389600,
+  7667520,
+  9201024,
+  11041229,
+  13249475,
+  15899369,
+  19079243,
+  22895092,
+  27474110,
+  32968932,
+  39562719,
+  47475263,
+  56970315,
+  68364378,
+  82037254,
+  98444705,
 ];
 
 // ---------------------------------------------------------------------------
@@ -68,8 +100,12 @@ String lotTxt(double l) => l.toStringAsFixed(2);
 /// Padanan `short(v)` web untuk label sumbu chart: Rp…M / …jt / …rb.
 String shortIdr(double v) {
   final a = v.abs();
-  if (a >= 1e9) return 'Rp${(v / 1e9).toStringAsFixed(1).replaceFirst('.', ',')}M';
-  if (a >= 1e6) return 'Rp${(v / 1e6).toStringAsFixed(1).replaceFirst('.', ',')}jt';
+  if (a >= 1e9) {
+    return 'Rp${(v / 1e9).toStringAsFixed(1).replaceFirst('.', ',')}M';
+  }
+  if (a >= 1e6) {
+    return 'Rp${(v / 1e6).toStringAsFixed(1).replaceFirst('.', ',')}jt';
+  }
   if (a >= 1e3) return 'Rp${_group((v / 1e3).round().toString())}rb';
   return 'Rp${_group(v.round().toString())}';
 }
@@ -148,8 +184,16 @@ class RuleData {
   final int next;
   final int diff;
   final double x;
-  const RuleData(this.n, this.b, this.after, this.sl, this.prev, this.next,
-      this.diff, this.x);
+  const RuleData(
+    this.n,
+    this.b,
+    this.after,
+    this.sl,
+    this.prev,
+    this.next,
+    this.diff,
+    this.x,
+  );
 }
 
 RuleData ruleData(int n) {
@@ -182,16 +226,33 @@ class CalcResult {
   final double riskIdr, riskUsd, tgtIdr, tgtUsd;
   final List<RowData> rows;
   final int pick; // index baris terpilih, -1 bila tidak ada
-  const CalcResult(this.ok, this.riskIdr, this.riskUsd, this.tgtIdr,
-      this.tgtUsd, this.rows, this.pick);
+  const CalcResult(
+    this.ok,
+    this.riskIdr,
+    this.riskUsd,
+    this.tgtIdr,
+    this.tgtUsd,
+    this.rows,
+    this.pick,
+  );
 }
 
 CalcResult _invalidCalc() => const CalcResult(false, 0, 0, 0, 0, [], -1);
 
 /// Padanan `calc()` web. Input null berarti NaN/invalid dari parseAmt.
 CalcResult computeCalc(
-    double? bal, double? kurs, double? rp, double? ratio, double? plan) {
-  final ok = [bal, kurs, rp, ratio].every((v) => v != null && v.isFinite && v > 0);
+  double? bal,
+  double? kurs,
+  double? rp,
+  double? ratio,
+  double? plan,
+) {
+  final ok = [
+    bal,
+    kurs,
+    rp,
+    ratio,
+  ].every((v) => v != null && v.isFinite && v > 0);
   if (!ok) return _invalidCalc();
   final riskIdr = bal! * rp! / 100;
   final riskUsd = riskIdr / kurs!;
@@ -201,8 +262,15 @@ CalcResult computeCalc(
   for (final lot in kLots) {
     final sl = round1dec(riskUsd / (lot * 10));
     final tp = round1dec(sl * ratio);
-    filled.add(RowData(lot, sl, tp, (sl * lot * 10 * kurs).round(),
-        (tp * lot * 10 * kurs).round()));
+    filled.add(
+      RowData(
+        lot,
+        sl,
+        tp,
+        (sl * lot * 10 * kurs).round(),
+        (tp * lot * 10 * kurs).round(),
+      ),
+    );
   }
   // pick: largest lot whose SL pips still >= planned SL
   int pick = -1;
@@ -223,16 +291,38 @@ class AutoOut {
   final String big;
   final bool bad; // teks besar merah (peringatan)
   final String sub, risk, tp, tgt, pip;
-  const AutoOut(this.empty, this.big, this.bad, this.sub, this.risk, this.tp,
-      this.tgt, this.pip);
+  const AutoOut(
+    this.empty,
+    this.big,
+    this.bad,
+    this.sub,
+    this.risk,
+    this.tp,
+    this.tgt,
+    this.pip,
+  );
 }
 
 /// Padanan `renderAuto()` web termasuk cabang peringatan lot > 10.00.
-AutoOut computeAuto(double? plan, double bal, double kurs, double rp,
-    double ratio, double riskUsd) {
+AutoOut computeAuto(
+  double? plan,
+  double bal,
+  double kurs,
+  double rp,
+  double ratio,
+  double riskUsd,
+) {
   if (plan == null || !plan.isFinite || plan <= 0) {
-    return const AutoOut(true, '–', false,
-        'Isi maksimal SL (pips) untuk menghitung lot otomatis.', '–', '–', '–', '–');
+    return const AutoOut(
+      true,
+      '–',
+      false,
+      'Isi maksimal SL (pips) untuk menghitung lot otomatis.',
+      '–',
+      '–',
+      '–',
+      '–',
+    );
   }
   final exact = riskUsd / (plan * 10);
   final lot = (exact * 100 + 1e-9).floorToDouble() / 100;
@@ -240,35 +330,46 @@ AutoOut computeAuto(double? plan, double bal, double kurs, double rp,
   if (lot < 0.01) {
     final needPct = minRiskIdr / bal * 100;
     final needBal = minRiskIdr / (rp / 100);
-    final sub = 'Belum cukup untuk 0.01 lot. SL ${one(plan)} pips di 0.01 lot = '
+    final sub =
+        'Belum cukup untuk 0.01 lot. SL ${one(plan)} pips di 0.01 lot = '
         '${idr(minRiskIdr)}, sedangkan risiko ${one(rp)}% hanya ${idr(bal * rp / 100)}. '
         '${needPct <= 100 ? 'Butuh risk minimal ${needPct.toStringAsFixed(2)}%, atau balance minimal ${idr(needBal)} di risk ${one(rp)}%, atau SL maksimal ${one((riskUsd / 0.1 * 10).floorToDouble() / 10)} pips.' : 'Balance ${idr(bal)} bahkan tidak menutup 0.01 lot untuk SL ini — cek lagi nominal balance.'}';
-    return AutoOut(false, '0.00', false, sub, idr(minRiskIdr), one(plan * ratio),
-        idr(minRiskIdr * ratio), idr(0.1 * kurs));
+    return AutoOut(
+      false,
+      '0.00',
+      false,
+      sub,
+      idr(minRiskIdr),
+      one(plan * ratio),
+      idr(minRiskIdr * ratio),
+      idr(0.1 * kurs),
+    );
   }
   if (lot > kMaxLot) {
     final minSl = ((riskUsd / (kMaxLot * 10) * 10 - 1e-9).ceilToDouble()) / 10;
     return AutoOut(
-        false,
-        '${lotTxt(kMaxLot)}+',
-        true,
-        'Butuh ${exact.toStringAsFixed(2)} lot — melebihi batas ${lotTxt(kMaxLot)} lot. '
-            'Kecilkan risk % atau perbesar SL minimal ${one(minSl)} pips di ${lotTxt(kMaxLot)} lot.',
-        '–',
-        '${one(plan * ratio)} pips',
-        '–',
-        '–');
+      false,
+      '${lotTxt(kMaxLot)}+',
+      true,
+      'Butuh ${exact.toStringAsFixed(2)} lot — melebihi batas ${lotTxt(kMaxLot)} lot. '
+          'Kecilkan risk % atau perbesar SL minimal ${one(minSl)} pips di ${lotTxt(kMaxLot)} lot.',
+      '–',
+      '${one(plan * ratio)} pips',
+      '–',
+      '–',
+    );
   }
   final act = plan * lot * 10 * kurs;
   return AutoOut(
-      false,
-      lot.toStringAsFixed(2),
-      false,
-      'SL ${one(plan)} pips · lot presisi ${exact.toStringAsFixed(3)} dibulatkan ke bawah',
-      '${idr(act)} (${(act / bal * 100).toStringAsFixed(2)}%)',
-      '${one(plan * ratio)} pips',
-      idr(act * ratio),
-      idr(lot * 10 * kurs));
+    false,
+    lot.toStringAsFixed(2),
+    false,
+    'SL ${one(plan)} pips · lot presisi ${exact.toStringAsFixed(3)} dibulatkan ke bawah',
+    '${idr(act)} (${(act / bal * 100).toStringAsFixed(2)}%)',
+    '${one(plan * ratio)} pips',
+    idr(act * ratio),
+    idr(lot * 10 * kurs),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -285,7 +386,11 @@ class MatrixResult {
 
 /// Padanan `renderMatrix()` web — mendukung rp desimal seperti web.
 MatrixResult? computeMatrix(
-    double? bal, double? kurs, double? rp, double? plan) {
+  double? bal,
+  double? kurs,
+  double? rp,
+  double? plan,
+) {
   if (bal == null ||
       kurs == null ||
       rp == null ||
@@ -299,12 +404,13 @@ MatrixResult? computeMatrix(
   final hasPlan = plan != null && plan.isFinite && plan > 0;
   final n = kLots.length;
   final pips = List.generate(
-      n,
-      (i) => List<double>.generate(pcts.length, (j) {
-            final pc = pcts[j];
-            return round1dec(bal * pc / 100 / kurs / (kLots[i] * 10));
-          }),
-      growable: false);
+    n,
+    (i) => List<double>.generate(pcts.length, (j) {
+      final pc = pcts[j];
+      return round1dec(bal * pc / 100 / kurs / (kLots[i] * 10));
+    }),
+    growable: false,
+  );
   final fitIdx = List<int>.generate(pcts.length, (j) {
     if (!hasPlan) return -1;
     int f = -1;

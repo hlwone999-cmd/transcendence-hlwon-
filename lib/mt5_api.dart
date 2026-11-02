@@ -42,21 +42,22 @@ class Mt5Api {
   final http.Client _http;
 
   Mt5Api({required String baseUrl, required this.token, http.Client? client})
-      : baseUrl = baseUrl.trim().replaceAll(RegExp(r'/+$'), ''),
-        _http = client ?? http.Client();
+    : baseUrl = baseUrl.trim().replaceAll(RegExp(r'/+$'), ''),
+      _http = client ?? http.Client();
 
   bool get isConfigured => baseUrl.isNotEmpty && token.isNotEmpty;
 
   Uri _uri(String path, [Map<String, String>? query]) {
-    final base = baseUrl.startsWith('http')
-        ? baseUrl
-        : 'https://$baseUrl'; // default HTTPS — API di VPS harus di belakang TLS
-    return Uri.parse('$base/api/v1$path')
-        .replace(queryParameters: query == null || query.isEmpty ? null : query);
+    final base = baseUrl.startsWith('http') ? baseUrl : 'https://$baseUrl'; // default HTTPS — API di VPS harus di belakang TLS
+    return Uri.parse(
+      '$base/api/v1$path',
+    ).replace(queryParameters: query == null || query.isEmpty ? null : query);
   }
 
-  Map<String, String> get _headers =>
-      {'X-API-Token': token, 'Content-Type': 'application/json'};
+  Map<String, String> get _headers => {
+    'X-API-Token': token,
+    'Content-Type': 'application/json',
+  };
 
   Future<dynamic> _send(Future<http.Response> Function() fn) async {
     http.Response r;
@@ -69,15 +70,16 @@ class Mt5Api {
       throw Mt5ApiError(Mt5ApiErrorKind.auth, '');
     }
     if (r.statusCode >= 500) {
-      throw Mt5ApiError(Mt5ApiErrorKind.server,
-          'Server error ${r.statusCode}');
+      throw Mt5ApiError(Mt5ApiErrorKind.server, 'Server error ${r.statusCode}');
     }
     dynamic j;
     try {
       j = jsonDecode(utf8.decode(r.bodyBytes));
     } catch (_) {
-      throw Mt5ApiError(Mt5ApiErrorKind.badResponse,
-          'Balasan bukan JSON (status ${r.statusCode})');
+      throw Mt5ApiError(
+        Mt5ApiErrorKind.badResponse,
+        'Balasan bukan JSON (status ${r.statusCode})',
+      );
     }
     if (r.statusCode >= 400) {
       String msg = 'HTTP ${r.statusCode}';
@@ -93,8 +95,9 @@ class Mt5Api {
       _send(() => _http.get(_uri(path, q), headers: _headers));
 
   Future<dynamic> _post(String path, {Object? body}) => _send(
-      () => _http.post(_uri(path),
-          headers: _headers, body: jsonEncode(body ?? {})));
+    () =>
+        _http.post(_uri(path), headers: _headers, body: jsonEncode(body ?? {})),
+  );
 
   // ------------------------------------------------------------ endpoint
   Future<Mt5Status> status() async =>
@@ -116,6 +119,7 @@ class Mt5Api {
     int pageSize = 50,
     String? from,
     String? to,
+    bool toExclusive = false,
     String? symbol,
     String status = 'all',
   }) async {
@@ -125,38 +129,80 @@ class Mt5Api {
       'status': status,
     };
     if (from != null && from.isNotEmpty) q['from'] = from;
-    if (to != null && to.isNotEmpty) q['to'] = to;
+    if (to != null && to.isNotEmpty) {
+      q['to'] = to;
+      if (toExclusive) q['to_exclusive'] = '1';
+    }
     if (symbol != null && symbol.isNotEmpty && symbol != 'SEMUA') {
       q['symbol'] = symbol;
     }
     return Mt5TradeList.fromJson(
-        await _get('/journal/trades', q) as Map<String, dynamic>);
+      await _get('/journal/trades', q) as Map<String, dynamic>,
+    );
   }
 
   Future<Mt5TradeDetail> tradeDetail(int positionId) async =>
       Mt5TradeDetail.fromJson(
-          await _get('/journal/trades/$positionId') as Map<String, dynamic>);
+        await _get('/journal/trades/$positionId') as Map<String, dynamic>,
+      );
 
-  Future<Mt5Stats> stats({String? from, String? to, String? symbol}) async {
+  Future<Mt5Stats> stats({
+    String? from,
+    String? to,
+    bool toExclusive = false,
+    String? symbol,
+  }) async {
     final q = <String, String>{};
     if (from != null && from.isNotEmpty) q['from'] = from;
-    if (to != null && to.isNotEmpty) q['to'] = to;
+    if (to != null && to.isNotEmpty) {
+      q['to'] = to;
+      if (toExclusive) q['to_exclusive'] = '1';
+    }
     if (symbol != null && symbol.isNotEmpty && symbol != 'SEMUA') {
       q['symbol'] = symbol;
     }
     return Mt5Stats.fromJson(
-        await _get('/journal/stats', q) as Map<String, dynamic>);
+      await _get('/journal/stats', q) as Map<String, dynamic>,
+    );
   }
 
-  Future<Mt5Equity> equityCurve({String? from, String? to, String? symbol}) async {
+  Future<Mt5Equity> equityCurve({
+    String? from,
+    String? to,
+    bool toExclusive = false,
+    String? symbol,
+  }) async {
     final q = <String, String>{};
     if (from != null && from.isNotEmpty) q['from'] = from;
-    if (to != null && to.isNotEmpty) q['to'] = to;
+    if (to != null && to.isNotEmpty) {
+      q['to'] = to;
+      if (toExclusive) q['to_exclusive'] = '1';
+    }
     if (symbol != null && symbol.isNotEmpty && symbol != 'SEMUA') {
       q['symbol'] = symbol;
     }
     return Mt5Equity.fromJson(
-        await _get('/journal/equity-curve', q) as Map<String, dynamic>);
+      await _get('/journal/equity-curve', q) as Map<String, dynamic>,
+    );
+  }
+
+  /// Rekonsiliasi raw deals vs trades pada interval identik (Phase 1B).
+  Future<Map<String, dynamic>> reconciliation({
+    String? from,
+    String? to,
+    bool toExclusive = false,
+    String? symbol,
+  }) async {
+    final q = <String, String>{};
+    if (from != null && from.isNotEmpty) q['from'] = from;
+    if (to != null && to.isNotEmpty) {
+      q['to'] = to;
+      if (toExclusive) q['to_exclusive'] = '1';
+    }
+    if (symbol != null && symbol.isNotEmpty && symbol != 'SEMUA') {
+      q['symbol'] = symbol;
+    }
+    return (await _get('/journal/reconciliation', q)) as Map<String, dynamic>;
   }
 
   Future<List<String>> symbols() async {

@@ -8,19 +8,43 @@ class McParams {
   final double bal, rp, rr, sl, wr, cost, dd;
   final int nTrades, nSim;
   final bool comp;
-  const McParams(this.bal, this.rp, this.rr, this.sl, this.wr, this.cost,
-      this.dd, this.nTrades, this.nSim, this.comp);
+  const McParams(
+    this.bal,
+    this.rp,
+    this.rr,
+    this.sl,
+    this.wr,
+    this.cost,
+    this.dd,
+    this.nTrades,
+    this.nSim,
+    this.comp,
+  );
 }
 
 class McResult {
   final int n, s, hitDD, blown;
   final double bal, dd, cR, exp, beWr, pProfit;
+
   /// bands[t] = [p05, p25, p50, p75, p95] pada trade ke-t (0..N)
   final List<List<double>> bands;
   final List<double> ends, mdd, streak; // sudah terurut
-  const McResult(this.n, this.s, this.hitDD, this.blown, this.bal, this.dd,
-      this.cR, this.exp, this.beWr, this.pProfit, this.bands, this.ends,
-      this.mdd, this.streak);
+  const McResult(
+    this.n,
+    this.s,
+    this.hitDD,
+    this.blown,
+    this.bal,
+    this.dd,
+    this.cR,
+    this.exp,
+    this.beWr,
+    this.pProfit,
+    this.bands,
+    this.ends,
+    this.mdd,
+    this.streak,
+  );
 }
 
 /// Padanan `pctl(a,p)` web (a sudah terurut).
@@ -37,7 +61,9 @@ McResult runMc(McParams p, {math.Random? rnd}) {
   final r = rnd ?? math.Random();
   final bal = p.bal, rp = p.rp, rr = p.rr, sl = p.sl, wr = p.wr;
   final N = p.nTrades, S = p.nSim;
-  final cR = (sl.isFinite && sl > 0) ? p.cost / sl : 0.0; // biaya dalam satuan R
+  final cR = (sl.isFinite && sl > 0)
+      ? p.cost / sl
+      : 0.0; // biaya dalam satuan R
   final win = rr - cR, loss = 1 + cR; // hasil per trade dalam R
   final exp = wr * win - (1 - wr) * loss;
   final beWr = loss / (win + loss);
@@ -86,6 +112,20 @@ McResult runMc(McParams p, {math.Random? rnd}) {
   for (final v in e) {
     if (v > bal) profitCount++;
   }
-  return McResult(N, S, hitDD, blown, bal, p.dd, cR, exp, beWr,
-      profitCount / S, bands, e, m, st);
+  return McResult(
+    N,
+    S,
+    hitDD,
+    blown,
+    bal,
+    p.dd,
+    cR,
+    exp,
+    beWr,
+    profitCount / S,
+    bands,
+    e,
+    m,
+    st,
+  );
 }

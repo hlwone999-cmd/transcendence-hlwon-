@@ -6,6 +6,17 @@ di log; WAJIB diisi di produksi).
 
 Semua endpoint gagal-aman: kalau MT5/terminal tidak tersedia, tetap
 balas JSON status disconnected — tidak pernah crash.
+
+SEMANTIK FILTER TANGGAL (konsisten di semua endpoint — lihat juga
+services/analytics.py dan docs/DATE-TIMEZONE-RECONCILIATION.md):
+- `from` : INKLUSIF. Format `YYYY-MM-DD` (00:00:00 UTC) atau ISO penuh.
+- `to`   : default INKLUSIF; `YYYY-MM-DD` diartikan akhir hari itu
+  (23:59:59 UTC).
+- `to_exclusive` : `1/true/yes/on` → `to` jadi EKSKLUSIF, sehingga
+  interval efektif = [from, to). Klien (APK) memakai mode ini agar
+  trade tepat tengah malam tidak dobel/terbuang antar periode.
+- Semua perbandingan memakai UTC sebagai zona kanonik; konversi zona
+  tampilan (mis. Asia/Jakarta) dilakukan di klien sebelum mengirim.
 """
 from __future__ import annotations
 
@@ -78,13 +89,26 @@ def _parse_enum(name: str, value: str, allowed: tuple) -> str:
 
 
 def _json_filters(end_of_day_to: bool = True):
+    """Parse `from`/`to`/`symbol`/`to_exclusive` dari query string.
+
+    Return (from, to, symbol, to_exclusive). from inkusif; to inkusif
+    (kecuali to_exclusive). Validasi: from tidak boleh > to.
+    """
     args = request.args
     f_from = _parse_date("from", args.get("from", "2000-01-01")) if "from" in args else None
     f_to = None
     if "to" in args:
         f_to = _parse_date("to", args["to"], end_of_day=end_of_day_to)
+    if f_from and f_to and f_from > f_to:
+        abort(400, description="Parameter 'from' tidak boleh setelah 'to'")
     symbol = (args.get("symbol") or "").strip()[:32] or None
-    return f_from, f_to, symbol
+    to_exclusive = _bool_arg("to_exclusive")
+    return f_from, f_to, symbol, to_exclusive
+
+
+def _bool_arg(name: str) -> bool:
+    v = (request.args.get(name) or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
 
 
 def _account_id(conn) -> int:
@@ -203,7 +227,7 @@ def mt5_sync_status():
 def journal_trades():
     conn = get_db()
     account_id = _account_id(conn)
-    f_from, f_to, symbol = _json_filters()
+    f_from, f_to, symbol, to_excl = _json_filters()
     status = request.args.get("status", "all")
     _parse_enum("status", status, ("all", "open", "closed"))
     direction = request.args.get("direction", "all")
@@ -230,7 +254,9 @@ def journal_trades():
         where += " AND COALESCE(close_time_utc, open_time_utc) >= ?"
         args.append(f_from)
     if f_to:
-        where += " AND COALESCE(close_time_utc, open_time_utc) <= ?"
+        where += (" AND COALESCE(close_time_utc, open_time_utc) < ?"
+                  if to_excl else
+                  " AND COALESCE(close_time_utc, open_time_utc) <= ?")
         args.append(f_to)
     order_col = {"close_time": "COALESCE(close_time_utc, open_time_utc)",
                  "open_time": "open_time_utc",
@@ -251,6 +277,8 @@ def journal_trades():
         "items": items,
         "page": page, "page_size": page_size, "total": total,
         "pages": (total + page_size - 1) // page_size if total else 0,
+        "filters": {"from": f_from, "to": f_to,
+                    "to_exclusive": to_excl, "symbol": symbol},
     })
 
 
@@ -280,9 +308,9 @@ def journal_trade_detail(position_id: int):
 def journal_stats():
     conn = get_db()
     account_id = _account_id(conn)
-    f_from, f_to, symbol = _json_filters()
+    f_from, f_to, symbol, to_excl = _json_filters()
     stats = analytics.compute_stats(conn, account_id, cfg().symbol_config,
-                                    f_from, f_to, symbol)
+                                    f_from, f_to, symbol, to_exclusive=to_excl)
     return jsonify(stats)
 
 
@@ -291,10 +319,27 @@ def journal_stats():
 def journal_equity_curve():
     conn = get_db()
     account_id = _account_id(conn)
-    f_from, f_to, symbol = _json_filters()
+    f_from, f_to, symbol, to_excl = _json_filters()
     curve = analytics.equity_curve(conn, account_id, cfg().symbol_config,
-                                   f_from, f_to, symbol)
+                                   f_from, f_to, symbol, to_exclusive=to_excl)
     return jsonify(curve)
+
+
+@api_bp.get("/journal/reconciliation")
+@require_token
+def journal_reconciliation():
+    """Rekonsiliasi raw deals vs trades pada interval yang identik.
+
+    Query: from, to, to_exclusive, symbol — semantik sama dengan
+    /journal/stats. Berguna untuk membandingkan total dengan MT5
+    History -> Positions / History -> Deals.
+    """
+    conn = get_db()
+    account_id = _account_id(conn)
+    f_from, f_to, symbol, to_excl = _json_filters()
+    rec = analytics.reconciliation(conn, account_id,
+                                   f_from, f_to, symbol, to_exclusive=to_excl)
+    return jsonify(rec)
 
 
 @api_bp.get("/symbols")

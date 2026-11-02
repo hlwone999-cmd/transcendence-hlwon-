@@ -122,7 +122,9 @@ class _StickyTableState extends State<StickyTable> {
     final vp = _vRest.position;
     if (!vp.hasContentDimensions || !vp.hasPixels) return;
     final target =
-        (pick * widget.rowHeight + widget.rowHeight / 2 - vp.viewportDimension / 2)
+        (pick * widget.rowHeight +
+                widget.rowHeight / 2 -
+                vp.viewportDimension / 2)
             .clamp(0.0, vp.maxScrollExtent);
     _jumpV(_vRest, target);
     _jumpV(_vFirst, target);
@@ -159,113 +161,130 @@ class _StickyTableState extends State<StickyTable> {
     final w0 = cols.first.width;
     final n = widget.rowCount;
 
-    return LayoutBuilder(builder: (context, box) {
-      final avail = box.maxWidth;
-      final sumRest = cols.sublist(1).fold<double>(0, (a, c) => a + c.width);
-      final restW = sumRest < avail - w0 ? avail - w0 : sumRest;
-      final scale = sumRest > 0 ? restW / sumRest : 1.0;
-      final effW = <double>[
-        for (final c in cols.sublist(1)) c.width * scale
-      ];
+    return LayoutBuilder(
+      builder: (context, box) {
+        final avail = box.maxWidth;
+        final sumRest = cols.sublist(1).fold<double>(0, (a, c) => a + c.width);
+        final restW = sumRest < avail - w0 ? avail - w0 : sumRest;
+        final scale = sumRest > 0 ? restW / sumRest : 1.0;
+        final effW = <double>[for (final c in cols.sublist(1)) c.width * scale];
 
-      final contentH = n * widget.rowHeight;
-      final bodyH = contentH < widget.maxHeight - widget.headerHeight
-          ? contentH
-          : widget.maxHeight - widget.headerHeight;
+        final contentH = n * widget.rowHeight;
+        final bodyH = contentH < widget.maxHeight - widget.headerHeight
+            ? contentH
+            : widget.maxHeight - widget.headerHeight;
 
-      // ---- header ----
-      final headerRest = SizedBox(
-        width: restW,
-        height: widget.headerHeight,
-        child: Row(
-          children: [
-            for (int j = 1; j < cols.length; j++)
-              _cellBox(cols[j].header, effW[j - 1], widget.headerHeight, null),
-          ],
-        ),
-      );
-
-      final table = RepaintBoundary(
-        child: Container(
-          decoration: BoxDecoration(
-            color: Theme.of(context).cardColor,
-            borderRadius: BorderRadius.circular(12),
-          ),
-          clipBehavior: Clip.antiAlias,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+        // ---- header ----
+        final headerRest = SizedBox(
+          width: restW,
+          height: widget.headerHeight,
+          child: Row(
             children: [
-              Row(children: [
-                _cellBox(cols[0].header, w0, widget.headerHeight, null),
-                Expanded(
-                  child: SingleChildScrollView(
-                    controller: _hHead,
-                    scrollDirection: Axis.horizontal,
-                    physics: const ClampingScrollPhysics(),
-                    child: headerRest,
-                  ),
+              for (int j = 1; j < cols.length; j++)
+                _cellBox(
+                  cols[j].header,
+                  effW[j - 1],
+                  widget.headerHeight,
+                  null,
                 ),
-              ]),
-              SizedBox(
-                height: bodyH,
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+            ],
+          ),
+        );
+
+        final table = RepaintBoundary(
+          child: Container(
+            decoration: BoxDecoration(
+              color: Theme.of(context).cardColor,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
                   children: [
-                    // kolom pertama menempel di kiri (lazy)
-                    SizedBox(
-                      width: w0,
-                      child: ListView.builder(
-                        controller: _vFirst,
-                        itemExtent: widget.rowHeight,
-                        itemCount: n,
-                        padding: EdgeInsets.zero,
-                        physics: const ClampingScrollPhysics(),
-                        itemBuilder: (context, i) => _cellBox(
-                            widget.cellBuilder(context, i, 0), w0,
-                            widget.rowHeight, null),
-                      ),
-                    ),
-                    // kolom sisanya (lazy), geser horizontal sinkron dgn header
+                    _cellBox(cols[0].header, w0, widget.headerHeight, null),
                     Expanded(
                       child: SingleChildScrollView(
-                        controller: _hBody,
+                        controller: _hHead,
                         scrollDirection: Axis.horizontal,
                         physics: const ClampingScrollPhysics(),
-                        child: SizedBox(
-                          width: restW,
-                          child: ListView.builder(
-                            controller: _vRest,
-                            itemExtent: widget.rowHeight,
-                            itemCount: n,
-                            padding: EdgeInsets.zero,
-                            physics: const ClampingScrollPhysics(),
-                            itemBuilder: (context, i) => _cellBox(
-                                Row(children: [
-                                  for (int j = 1; j < cols.length; j++)
-                                    _cellBox(widget.cellBuilder(context, i, j),
-                                        effW[j - 1], widget.rowHeight, null),
-                                ]),
-                                restW,
-                                widget.rowHeight,
-                                null),
-                          ),
-                        ),
+                        child: headerRest,
                       ),
                     ),
                   ],
                 ),
-              ),
-            ],
+                SizedBox(
+                  height: bodyH,
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // kolom pertama menempel di kiri (lazy)
+                      SizedBox(
+                        width: w0,
+                        child: ListView.builder(
+                          controller: _vFirst,
+                          itemExtent: widget.rowHeight,
+                          itemCount: n,
+                          padding: EdgeInsets.zero,
+                          physics: const ClampingScrollPhysics(),
+                          itemBuilder: (context, i) => _cellBox(
+                            widget.cellBuilder(context, i, 0),
+                            w0,
+                            widget.rowHeight,
+                            null,
+                          ),
+                        ),
+                      ),
+                      // kolom sisanya (lazy), geser horizontal sinkron dgn header
+                      Expanded(
+                        child: SingleChildScrollView(
+                          controller: _hBody,
+                          scrollDirection: Axis.horizontal,
+                          physics: const ClampingScrollPhysics(),
+                          child: SizedBox(
+                            width: restW,
+                            child: ListView.builder(
+                              controller: _vRest,
+                              itemExtent: widget.rowHeight,
+                              itemCount: n,
+                              padding: EdgeInsets.zero,
+                              physics: const ClampingScrollPhysics(),
+                              itemBuilder: (context, i) => _cellBox(
+                                Row(
+                                  children: [
+                                    for (int j = 1; j < cols.length; j++)
+                                      _cellBox(
+                                        widget.cellBuilder(context, i, j),
+                                        effW[j - 1],
+                                        widget.rowHeight,
+                                        null,
+                                      ),
+                                  ],
+                                ),
+                                restW,
+                                widget.rowHeight,
+                                null,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
-        ),
-      );
+        );
 
-      if (widget.pickRow != _lastPick) {
-        _lastPick = widget.pickRow;
-        WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToPick());
-      }
+        if (widget.pickRow != _lastPick) {
+          _lastPick = widget.pickRow;
+          WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToPick());
+        }
 
-      return table;
-    });
+        return table;
+      },
+    );
   }
 }

@@ -10,8 +10,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:transcendence/sticky_table.dart';
 
 void main() {
-  Future<void> pumpTable(WidgetTester tester,
-      {EdgeInsets padding = const EdgeInsets.only(top: 42)}) async {
+  Future<void> pumpTable(
+    WidgetTester tester, {
+    EdgeInsets padding = const EdgeInsets.only(top: 42),
+  }) async {
     await tester.pumpWidget(
       MediaQuery(
         data: MediaQueryData(padding: padding),
@@ -25,7 +27,8 @@ void main() {
             ],
             rowCount: 100,
             pickRow: -1,
-            maxHeight: 500, // total 500px < permukaan test 600px (anti-overflow)
+            maxHeight:
+                500, // total 500px < permukaan test 600px (anti-overflow)
             borderColor: Colors.grey,
             cellBuilder: (ctx, r, c) => Text('r$r c$c'),
           ),
@@ -35,8 +38,7 @@ void main() {
     await tester.pump();
   }
 
-  testWidgets(
-      'tidak ada slot kosong antara header tabel dan baris pertama '
+  testWidgets('tidak ada slot kosong antara header tabel dan baris pertama '
       '(MediaQuery.padding TIDAK disuntik ke ListView)', (tester) async {
     // Simulasi status bar 42px — sebelum fix, gap antara header & baris
     // pertama = 42px dan ikut kegeser saat tabel di-drag.
@@ -50,14 +52,18 @@ void main() {
     // header), artinya jarak TEKS header → TEKS baris-0 ≈ 40px.
     final headerTop = tester.getRect(find.text('H0')).top;
     final offset = firstRowTop - headerTop;
-    expect(offset, moreOrLessEquals(40, epsilon: 1.0),
-        reason:
-            'teks baris-0 harus mulai tepat 40px (tinggi header) di bawah '
-            'teks header; ditemukan $offset (injeksi MediaQuery.padding)');
+    expect(
+      offset,
+      moreOrLessEquals(40, epsilon: 1.0),
+      reason:
+          'teks baris-0 harus mulai tepat 40px (tinggi header) di bawah '
+          'teks header; ditemukan $offset (injeksi MediaQuery.padding)',
+    );
   });
 
-  testWidgets('baris pertama & seluruh tabel mulai tepat di bawah header',
-      (tester) async {
+  testWidgets('baris pertama & seluruh tabel mulai tepat di bawah header', (
+    tester,
+  ) async {
     await pumpTable(tester);
 
     // Tinggi header default = 40 → TEKS baris 0 harus mulai di y = 40.

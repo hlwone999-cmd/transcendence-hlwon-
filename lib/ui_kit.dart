@@ -6,7 +6,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 // ---------------------------------------------------------------------------
-// Palet Obsidian Precision (strict dark mode)
+// Palet Obsidian Precision — dua varian: dark (asli) + light.
+// Palette.of(context) memilih varian sesuai brightness tema aktif, sehingga
+// SEMUA komponen otomatis mengikuti tema global (gelap/terang/sistem).
 // ---------------------------------------------------------------------------
 
 class Palette {
@@ -34,10 +36,12 @@ class Palette {
   final Color goldsoft; // tint emas (bg baris pick / pill)
   final Color mint; // teks mint #4EDEA3
   final Color mintSolid; // #10B981
+  final Color onMint; // teks di atas mintSolid
   final Color good; // alias mint
   final Color goodsoft; // tint mint
   final Color red; // teks salmon lembut #FF938C
   final Color redSolid; // crimson #EF4444
+  final Color onRed; // teks di atas redSolid
   final Color redsoft; // tint merah
 
   // Band chart
@@ -64,10 +68,12 @@ class Palette {
     required this.goldsoft,
     required this.mint,
     required this.mintSolid,
+    required this.onMint,
     required this.good,
     required this.goodsoft,
     required this.red,
     required this.redSolid,
+    required this.onRed,
     required this.redsoft,
     required this.band1,
     required this.band2,
@@ -97,16 +103,53 @@ class Palette {
     goldsoft: Color(0x26F59E0B),
     mint: Color(0xFF4EDEA3),
     mintSolid: Color(0xFF10B981),
+    onMint: Color(0xFF00311F),
     good: Color(0xFF4EDEA3),
     goodsoft: Color(0x2910B981),
     red: Color(0xFFFF938C),
     redSolid: Color(0xFFEF4444),
+    onRed: Color(0xFFFFDAD6),
     redsoft: Color(0x1FEF4444),
     band1: Color(0x2E10B981),
     band2: Color(0x5210B981),
   );
 
-  static Palette of(BuildContext c) => dark;
+  /// Varian terang — identitas yang sama (emas/mint/merah), latar putih.
+  /// Warna teks dipilih agar kontras WCAG AA di atas card putih.
+  static const light = Palette(
+    canvas: Color(0xFFF6F7FB),
+    surface1: Color(0xFFFFFFFF),
+    card: Color(0xFFFFFFFF),
+    cardHi: Color(0xFFF1F4FA),
+    cardHighest: Color(0xFFE7ECF5),
+    track: Color(0xFFEEF1F7),
+    line: Color(0xFFD9E0EC),
+    lineSoft: Color(0xFFE3E9F2),
+    rim: Color(0xFFC4CEE0),
+    ink: Color(0xFF0F172A),
+    muted: Color(0xFF475569),
+    dim: Color(0xFF64748B),
+    warm: Color(0xFFA16207),
+    gold: Color(0xFFB45309),
+    goldSolid: Color(0xFFF59E0B),
+    onGold: Color(0xFF2A1700),
+    goldsoft: Color(0x1AF59E0B),
+    mint: Color(0xFF047857),
+    mintSolid: Color(0xFF10B981),
+    onMint: Color(0xFF00311F),
+    good: Color(0xFF047857),
+    goodsoft: Color(0x1A047857),
+    red: Color(0xFFB91C1C),
+    redSolid: Color(0xFFDC2626),
+    onRed: Color(0xFFFFFFFF),
+    redsoft: Color(0x14DC2626),
+    band1: Color(0x2E10B981),
+    band2: Color(0x5210B981),
+  );
+
+  /// Ambil palet sesuai brightness tema MaterialApp aktif.
+  static Palette of(BuildContext c) =>
+      Theme.of(c).brightness == Brightness.dark ? dark : light;
 }
 
 // ---------------------------------------------------------------------------
@@ -119,40 +162,59 @@ const String kMonoFont = 'JetBrains Mono';
 
 const tabular = [FontFeature.tabularFigures()];
 
-TextStyle txt(BuildContext c, double size,
-    {FontWeight w = FontWeight.w400, Color? color, double? height, double? ls}) {
+TextStyle txt(
+  BuildContext c,
+  double size, {
+  FontWeight w = FontWeight.w400,
+  Color? color,
+  double? height,
+  double? ls,
+}) {
   final p = Palette.of(c);
   return TextStyle(
-      fontFamily: kBodyFont,
-      fontSize: size,
-      fontWeight: w,
-      height: height ?? 1.35,
-      letterSpacing: ls,
-      color: color ?? p.ink);
+    fontFamily: kBodyFont,
+    fontSize: size,
+    fontWeight: w,
+    height: height ?? 1.35,
+    letterSpacing: ls,
+    color: color ?? p.ink,
+  );
 }
 
 /// Label kecil huruf besar (label-sm uppercase tracking-wider).
 TextStyle labelSm(BuildContext c, {Color? color}) => TextStyle(
-    fontFamily: kBodyFont,
-    fontSize: 10.5,
-    fontWeight: FontWeight.w500,
-    letterSpacing: 1.4,
-    height: 1.3,
-    color: color ?? Palette.of(c).muted);
+  fontFamily: kBodyFont,
+  fontSize: 10.5,
+  fontWeight: FontWeight.w500,
+  letterSpacing: 1.4,
+  height: 1.3,
+  color: color ?? Palette.of(c).muted,
+);
 
 /// Angka mono (label-md mono).
-TextStyle mono(BuildContext c, double size,
-    {FontWeight w = FontWeight.w500, Color? color, double? ls}) {
+TextStyle mono(
+  BuildContext c,
+  double size, {
+  FontWeight w = FontWeight.w500,
+  Color? color,
+  double? ls,
+}) {
   final p = Palette.of(c);
   return TextStyle(
-      fontFamily: kMonoFont,
-      fontSize: size,
-      fontWeight: w,
-      letterSpacing: ls ?? 0.4,
-      height: 1.3,
-      color: color ?? p.ink,
-      fontFeatures: tabular);
+    fontFamily: kMonoFont,
+    fontSize: size,
+    fontWeight: w,
+    letterSpacing: ls ?? 0.4,
+    height: 1.3,
+    color: color ?? p.ink,
+    fontFeatures: tabular,
+  );
 }
+
+/// Warna teks yang tetap terbaca di atas latar warna aksen [bg]
+/// (mis. teks di atas tombol/pill solid emas, mint, atau merah).
+Color onColor(BuildContext c, Color bg) =>
+    bg.computeLuminance() > 0.4 ? Palette.of(c).onGold : Colors.white;
 
 double clampSize(double v, double lo, double hi) =>
     v < lo ? lo : (v > hi ? hi : v);
@@ -198,11 +260,12 @@ class CornerGlow extends StatelessWidget {
   final Color color;
   final double size;
   final Alignment alignment;
-  const CornerGlow(
-      {super.key,
-      required this.color,
-      this.size = 128,
-      this.alignment = const Alignment(1.15, -1.15)});
+  const CornerGlow({
+    super.key,
+    required this.color,
+    this.size = 128,
+    this.alignment = const Alignment(1.15, -1.15),
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -230,7 +293,13 @@ class BadgePill extends StatelessWidget {
   final Color color; // warna teks
   final Color? bg;
   final IconData? icon;
-  const BadgePill(this.text, {super.key, required this.color, this.bg, this.icon});
+  const BadgePill(
+    this.text, {
+    super.key,
+    required this.color,
+    this.bg,
+    this.icon,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -241,22 +310,29 @@ class BadgePill extends StatelessWidget {
         color: bg ?? p.cardHi,
         borderRadius: BorderRadius.circular(6),
       ),
-      child: Row(mainAxisSize: MainAxisSize.min, children: [
-        if (icon != null) ...[
-          Icon(icon, size: 12, color: color),
-          const SizedBox(width: 4),
-        ],
-        Flexible(
-          child: Text(text,
-              maxLines: 1, overflow: TextOverflow.ellipsis,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: 12, color: color),
+            const SizedBox(width: 4),
+          ],
+          Flexible(
+            child: Text(
+              text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                  fontFamily: kBodyFont,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.8,
-                  color: color)),
-        ),
-      ]),
+                fontFamily: kBodyFont,
+                fontSize: 10,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.8,
+                color: color,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -267,8 +343,13 @@ class GoldButton extends StatelessWidget {
   final IconData? icon;
   final VoidCallback? onTap;
   final double height;
-  const GoldButton(this.text,
-      {super.key, this.icon, this.onTap, this.height = 48});
+  const GoldButton(
+    this.text, {
+    super.key,
+    this.icon,
+    this.onTap,
+    this.height = 48,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -281,22 +362,29 @@ class GoldButton extends StatelessWidget {
         borderRadius: BorderRadius.circular(10),
         child: SizedBox(
           height: height,
-          child: Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-            if (icon != null) ...[
-              Icon(icon, size: 18, color: p.onGold),
-              const SizedBox(width: 8),
-            ],
-            Flexible(
-              child: Text(text,
-                  maxLines: 1, overflow: TextOverflow.ellipsis,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              if (icon != null) ...[
+                Icon(icon, size: 18, color: p.onGold),
+                const SizedBox(width: 8),
+              ],
+              Flexible(
+                child: Text(
+                  text,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                      fontFamily: kMonoFont,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 0.3,
-                      color: p.onGold)),
-            ),
-          ]),
+                    fontFamily: kMonoFont,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.3,
+                    color: p.onGold,
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -310,8 +398,14 @@ class GhostButton extends StatelessWidget {
   final VoidCallback? onTap;
   final Color? textColor;
   final bool expanded;
-  const GhostButton(this.text,
-      {super.key, this.icon, this.onTap, this.textColor, this.expanded = false});
+  const GhostButton(
+    this.text, {
+    super.key,
+    this.icon,
+    this.onTap,
+    this.textColor,
+    this.expanded = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -328,24 +422,31 @@ class GhostButton extends StatelessWidget {
             borderRadius: BorderRadius.circular(8),
             border: Border.all(width: 1, color: p.line),
           ),
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            if (icon != null) ...[
-              Icon(icon, size: 15, color: textColor ?? p.gold),
-              const SizedBox(width: 6),
-            ],
-            // Flexible: teks panjang (tanggal panjang, label dinamis) tidak
-            // boleh bikin Row overflow di layar sempit.
-            Flexible(
-              child: Text(text,
-                  maxLines: 1, overflow: TextOverflow.ellipsis,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (icon != null) ...[
+                Icon(icon, size: 15, color: textColor ?? p.gold),
+                const SizedBox(width: 6),
+              ],
+              // Flexible: teks panjang (tanggal panjang, label dinamis) tidak
+              // boleh bikin Row overflow di layar sempit.
+              Flexible(
+                child: Text(
+                  text,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                      fontFamily: kMonoFont,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                      letterSpacing: 0.4,
-                      color: textColor ?? p.ink)),
-            ),
-          ]),
+                    fontFamily: kMonoFont,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                    letterSpacing: 0.4,
+                    color: textColor ?? p.ink,
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -358,32 +459,44 @@ class PresetChip extends StatelessWidget {
   final String text;
   final bool active;
   final VoidCallback onTap;
-  const PresetChip(this.text,
-      {super.key, required this.active, required this.onTap});
+
+  /// true (default) = chip memakai Expanded (mengisi lebar baris Flex).
+  /// false = ukuran intrinsik — wajib dipakai di dalam scroll horizontal.
+  final bool expanded;
+  const PresetChip(
+    this.text, {
+    super.key,
+    required this.active,
+    required this.onTap,
+    this.expanded = true,
+  });
 
   @override
   Widget build(BuildContext context) {
     final p = Palette.of(context);
-    return Expanded(
-      child: Material(
-        color: active ? p.goldSolid : p.cardHi,
+    final chip = Material(
+      color: active ? p.goldSolid : p.cardHi,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        onTap: onTap,
         borderRadius: BorderRadius.circular(8),
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(8),
-          child: Container(
-            padding: const EdgeInsets.symmetric(vertical: 9),
-            alignment: Alignment.center,
-            child: Text(text,
-                style: TextStyle(
-                    fontFamily: kMonoFont,
-                    fontSize: 12,
-                    fontWeight: active ? FontWeight.w600 : FontWeight.w500,
-                    color: active ? p.onGold : p.ink)),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+          alignment: Alignment.center,
+          child: Text(
+            text,
+            style: TextStyle(
+              fontFamily: kMonoFont,
+              fontSize: 12,
+              fontWeight: active ? FontWeight.w600 : FontWeight.w500,
+              color: active ? p.onGold : p.ink,
+            ),
           ),
         ),
       ),
     );
+    if (!expanded) return chip;
+    return Expanded(child: chip);
   }
 }
 
@@ -406,26 +519,29 @@ class ToggleRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = Palette.of(context);
-    return Row(children: [
-      Expanded(
-        child: Column(
+    return Row(
+      children: [
+        Expanded(
+          child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-          Text(title, style: txt(context, 14, w: FontWeight.w500)),
-          const SizedBox(height: 2),
-          Text(subtitle, style: txt(context, 12, color: p.muted)),
-        ]),
-      ),
-      const SizedBox(width: 12),
-      Switch.adaptive(
-        value: value,
-        onChanged: enabled ? onChanged : null,
-        activeThumbColor: p.goldSolid,
-        activeTrackColor: p.goldsoft,
-        inactiveThumbColor: p.muted,
-        inactiveTrackColor: p.cardHighest,
-      ),
-    ]);
+              Text(title, style: txt(context, 14, w: FontWeight.w500)),
+              const SizedBox(height: 2),
+              Text(subtitle, style: txt(context, 12, color: p.muted)),
+            ],
+          ),
+        ),
+        const SizedBox(width: 12),
+        Switch.adaptive(
+          value: value,
+          onChanged: enabled ? onChanged : null,
+          activeThumbColor: p.goldSolid,
+          activeTrackColor: p.goldsoft,
+          inactiveThumbColor: p.muted,
+          inactiveTrackColor: p.cardHighest,
+        ),
+      ],
+    );
   }
 }
 
@@ -459,10 +575,13 @@ class LabeledField extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-          Text(label, style: labelSm(context)),
-          ?labelTrailing,
-        ]),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(label, style: labelSm(context)),
+            ?labelTrailing,
+          ],
+        ),
         const SizedBox(height: 6),
         Container(
           decoration: BoxDecoration(
@@ -470,44 +589,55 @@ class LabeledField extends StatelessWidget {
             borderRadius: BorderRadius.circular(10),
             border: Border.all(width: 1, color: p.line),
           ),
-          padding: EdgeInsets.symmetric(
-              horizontal: 12, vertical: big ? 10 : 8),
-          child: Row(children: [
-            if (prefix != null) ...[
-              Text(prefix!,
-                  style: mono(context, big ? 18 : 13,
-                      w: FontWeight.w500, color: p.muted)),
-              const SizedBox(width: 8),
-            ],
-            Expanded(
-              child: TextField(
-                controller: controller,
-                onChanged: onChanged,
-                keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
-                inputFormatters: [
-                  FilteringTextInputFormatter.allow(
-                      RegExp(r'[0-9.,jtrbkmiuaJTRBKMIUA\s]'))
-                ],
-                style: big
-                    ? mono(context, 26, w: FontWeight.w600, ls: -0.3)
-                    : mono(context, 15, w: FontWeight.w600),
-                decoration: const InputDecoration(
+          padding: EdgeInsets.symmetric(horizontal: 12, vertical: big ? 10 : 8),
+          child: Row(
+            children: [
+              if (prefix != null) ...[
+                Text(
+                  prefix!,
+                  style: mono(
+                    context,
+                    big ? 18 : 13,
+                    w: FontWeight.w500,
+                    color: p.muted,
+                  ),
+                ),
+                const SizedBox(width: 8),
+              ],
+              Expanded(
+                child: TextField(
+                  controller: controller,
+                  onChanged: onChanged,
+                  keyboardType: const TextInputType.numberWithOptions(
+                    decimal: true,
+                  ),
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(
+                      RegExp(r'[0-9.,jtrbkmiuaJTRBKMIUA\s]'),
+                    ),
+                  ],
+                  style: big
+                      ? mono(context, 26, w: FontWeight.w600, ls: -0.3)
+                      : mono(context, 15, w: FontWeight.w600),
+                  decoration: const InputDecoration(
                     isDense: true,
                     filled: false,
                     border: InputBorder.none,
-                    contentPadding: EdgeInsets.zero),
-                cursorColor: p.goldSolid,
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                  cursorColor: p.goldSolid,
+                ),
               ),
-            ),
-            ?suffix,
-          ]),
+              ?suffix,
+            ],
+          ),
         ),
         if (hint != null) ...[
           const SizedBox(height: 6),
-          Text(hint!,
-              style: txt(context, 12,
-                  color: hintColor ?? p.muted, height: 1.45)),
+          Text(
+            hint!,
+            style: txt(context, 12, color: hintColor ?? p.muted, height: 1.45),
+          ),
         ],
       ],
     );
@@ -524,15 +654,16 @@ class SectionHead extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = Palette.of(context);
-    return Row(children: [
-      Icon(icon, size: 17, color: p.gold),
-      const SizedBox(width: 8),
-      Expanded(
-        child: Text(text,
-            style: txt(context, 15, w: FontWeight.w600)),
-      ),
-      ?trailing,
-    ]);
+    return Row(
+      children: [
+        Icon(icon, size: 17, color: p.gold),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(text, style: txt(context, 15, w: FontWeight.w600)),
+        ),
+        ?trailing,
+      ],
+    );
   }
 }
 
@@ -548,9 +679,10 @@ class PulseDot extends StatelessWidget {
       width: size,
       height: size,
       decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: color,
-          boxShadow: [BoxShadow(color: color.withAlpha(90), blurRadius: 6)]),
+        shape: BoxShape.circle,
+        color: color,
+        boxShadow: [BoxShadow(color: color.withAlpha(90), blurRadius: 6)],
+      ),
     );
   }
 }

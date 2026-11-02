@@ -117,12 +117,27 @@ const fixtureStats = {
 
 const fixtureEquity = {
   'points': [
-    {'t': '2026-10-01T08:00:00Z', 'type': 'deposit', 'label': 'Deposit',
-     'net_cum': 0.0, 'balance_ops_cum': 1000.0},
-    {'t': '2026-10-01T08:40:00Z', 'type': 'trade', 'label': 'XAUUSD #101',
-     'net_cum': 195.0, 'balance_ops_cum': 1000.0},
-    {'t': '2026-10-01T09:30:00Z', 'type': 'trade', 'label': 'EURUSD #110',
-     'net_cum': 172.0, 'balance_ops_cum': 1000.0},
+    {
+      't': '2026-10-01T08:00:00Z',
+      'type': 'deposit',
+      'label': 'Deposit',
+      'net_cum': 0.0,
+      'balance_ops_cum': 1000.0,
+    },
+    {
+      't': '2026-10-01T08:40:00Z',
+      'type': 'trade',
+      'label': 'XAUUSD #101',
+      'net_cum': 195.0,
+      'balance_ops_cum': 1000.0,
+    },
+    {
+      't': '2026-10-01T09:30:00Z',
+      'type': 'trade',
+      'label': 'EURUSD #110',
+      'net_cum': 172.0,
+      'balance_ops_cum': 1000.0,
+    },
   ],
   'final_net_cum': 172.0,
   'balance_ops_cum': 1000.0,
@@ -132,16 +147,16 @@ const fixtureEquity = {
 };
 
 http.Response _json(Object j, [int code = 200]) => http.Response(
-      jsonEncode(j), code,
-      headers: {'content-type': 'application/json'},
-    );
+  jsonEncode(j),
+  code,
+  headers: {'content-type': 'application/json'},
+);
 
 Mt5Api _mockApi(Future<http.Response> Function(Uri, http.Request) handler) {
   return Mt5Api(
     baseUrl: 'https://srv.test',
     token: 'TESTTOKEN',
-    client: MockClient((r) async =>
-        handler(r.url, r)),
+    client: MockClient((r) async => handler(r.url, r)),
   );
 }
 
@@ -250,8 +265,12 @@ void main() {
         captured = u;
         return _json(fixtureTrades);
       });
-      final tl = await api.trades(page: 2, pageSize: 10, symbol: 'XAUUSD',
-          from: '2026-09-01');
+      final tl = await api.trades(
+        page: 2,
+        pageSize: 10,
+        symbol: 'XAUUSD',
+        from: '2026-09-01',
+      );
       expect(captured!.queryParameters['page'], '2');
       expect(captured!.queryParameters['symbol'], 'XAUUSD');
       expect(captured!.queryParameters['from'], '2026-09-01');
@@ -266,21 +285,25 @@ void main() {
   });
 
   group('Mt5JournalPage (widget)', () {
-    testWidgets('belum dikonfigurasi -> tampil ATUR SERVER, tanpa crash',
-        (tester) async {
+    testWidgets('belum dikonfigurasi -> tampil ATUR SERVER, tanpa crash', (
+      tester,
+    ) async {
       SharedPreferences.setMockInitialValues({});
-      await tester.pumpWidget(const MaterialApp(
-        home: Scaffold(body: Mt5JournalPage()),
-      ));
+      await tester.pumpWidget(
+        const MaterialApp(home: Scaffold(body: Mt5JournalPage())),
+      );
       await tester.pumpAndSettle();
       expect(find.text('BELUM TERHUBUNG'), findsOneWidget);
       expect(find.text('ATUR SERVER'), findsOneWidget);
     });
 
-    testWidgets('terhubung -> akun, statistik, dan daftar trade tampil',
-        (tester) async {
-      SharedPreferences.setMockInitialValues(
-          {'mt5_base_url': 'https://srv.test', 'mt5_api_token': 'TESTTOKEN'});
+    testWidgets('terhubung -> akun, statistik, dan daftar trade tampil', (
+      tester,
+    ) async {
+      SharedPreferences.setMockInitialValues({
+        'mt5_base_url': 'https://srv.test',
+        'mt5_api_token': 'TESTTOKEN',
+      });
       final api = _mockApi((u, r) async {
         final p = u.path;
         if (p.endsWith('/mt5/status')) return _json(fixtureStatus);
@@ -289,15 +312,21 @@ void main() {
         if (p.endsWith('/journal/equity-curve')) return _json(fixtureEquity);
         if (p.contains('/journal/trades')) return _json(fixtureTrades);
         if (p.endsWith('/symbols')) {
-          return _json({'items': [
-            {'symbol': 'XAUUSD', 'point': 0.01, 'digits': 2, 'pip_size': 0.1}
-          ]});
+          return _json({
+            'items': [
+              {'symbol': 'XAUUSD', 'point': 0.01, 'digits': 2, 'pip_size': 0.1},
+            ],
+          });
         }
-        return _json({'error': {'message': 'tak dikenal: $p'}}, 404);
+        return _json({
+          'error': {'message': 'tak dikenal: $p'},
+        }, 404);
       });
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(body: Mt5JournalPage(api: api)),
-      ));
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: Mt5JournalPage(api: api)),
+        ),
+      );
       await tester.pumpAndSettle();
 
       expect(find.text('Jurnal MT5 Otomatis'), findsOneWidget);
@@ -305,7 +334,7 @@ void main() {
       expect(find.text('#12345678'), findsOneWidget);
       expect(find.text('Exness-MT5Real'), findsOneWidget);
       expect(find.text('STATISTIK'), findsOneWidget);
-      expect(find.text('EQUITY CURVE (NET)'), findsOneWidget);
+      expect(find.text('KURVA P/L TRADING (NET)'), findsOneWidget);
       // trade list tampil: simbol + arah + RR badge
       expect(find.text('XAUUSD'), findsWidgets);
       expect(find.text('BUY'), findsOneWidget);
@@ -316,12 +345,16 @@ void main() {
     });
 
     testWidgets('server 401 -> pesan ramah, bukan crash', (tester) async {
-      SharedPreferences.setMockInitialValues(
-          {'mt5_base_url': 'https://srv.test', 'mt5_api_token': 'SALAH'});
+      SharedPreferences.setMockInitialValues({
+        'mt5_base_url': 'https://srv.test',
+        'mt5_api_token': 'SALAH',
+      });
       final api = _mockApi((u, r) async => _json({'error': {}}, 401));
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(body: Mt5JournalPage(api: api)),
-      ));
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: Mt5JournalPage(api: api)),
+        ),
+      );
       await tester.pumpAndSettle();
       expect(find.text('GAGAL TERHUBUNG'), findsOneWidget);
       expect(find.textContaining('Token API ditolak'), findsOneWidget);
