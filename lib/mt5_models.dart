@@ -256,7 +256,12 @@ class Mt5Equity {
   final double finalNetCum;
   final double balanceOpsCum;
   final double maxDrawdown;
-  final double maxDrawdownPct;
+
+  /// Persen drawdown dari kurva P/L trading tertutup.
+  /// NULL = tidak ada penyebut valid (puncak P/L kumulatif <= 0 — akun
+  /// belum pernah untung pada rentang tsb) — UI wajib tampil N/A,
+  /// BUKAN 0% yang menyesatkan (Phase 1.1 Temuan 6).
+  final double? maxDrawdownPct;
   final String? maxDrawdownAt;
 
   const Mt5Equity({
@@ -275,7 +280,7 @@ class Mt5Equity {
     finalNetCum: _d2(j['final_net_cum']),
     balanceOpsCum: _d2(j['balance_ops_cum']),
     maxDrawdown: _d2(j['max_drawdown']),
-    maxDrawdownPct: _d2(j['max_drawdown_pct']),
+    maxDrawdownPct: _opt(j['max_drawdown_pct']),
     maxDrawdownAt: j['max_drawdown_at'] as String?,
   );
 
@@ -284,7 +289,7 @@ class Mt5Equity {
     finalNetCum: 0,
     balanceOpsCum: 0,
     maxDrawdown: 0,
-    maxDrawdownPct: 0,
+    maxDrawdownPct: null,
   );
 }
 

@@ -340,7 +340,7 @@ void main() {
       expect(find.text('BUY'), findsOneWidget);
       expect(find.text('SELL'), findsOneWidget);
       expect(find.text('OPEN'), findsOneWidget);
-      expect(find.text('RR 1.50'), findsOneWidget);
+      expect(find.text('RR 1,50'), findsOneWidget);
       expect(find.text('MUAT LAGI'), findsNothing); // 1 halaman saja
     });
 

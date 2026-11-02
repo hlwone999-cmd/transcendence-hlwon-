@@ -159,12 +159,19 @@ eksplisit** (§1–§2), zona waktu eksplisit (§3), dan alat rekonsiliasi
 
 - Histori equity/balance per saat (snapshot) tidak tersedia → tidak
   ada kurva equity akun historis; drawdown dihitung dari kurva P/L
-  trading closed.
+  trading closed. Persennya (`max_drawdown_pct`) berpenyebut puncak
+  P/L kumulatif — BUKAN saldo akun; bila puncak <= 0 (akun belum
+  pernah untung pada rentang tsb) API mengembalikan `null` dan UI
+  menampilkan **N/A**, bukan 0% yang menyesatkan (Phase 1.1). UI
+  memberi label eksplisit "CLOSED P/L" pada sel MAX DD dan pill DD.
 - Zona broker belum dikonfirmasi; hingga dikonfirmasi, "BLN INI" di
   Transcendence (UTC/WIB) **tidak harus sama** dengan "Oktober" di
   terminal.
 - `to_exclusive` adalah parameter API baru; klien lama (versi APK
-  sebelumnya) tetap bekerja dengan semantik inklusif lama.
+  sebelumnya) tetap bekerja dengan semantik inklusif lama. Sejak
+  Phase 1.1, cabang balance-ops pada `equity_curve` juga menghormati
+  `to_exclusive` (sebelumnya selalu `<=`) — kini konsisten dengan
+  cabang trades dan rekonsiliasi pada batas interval yang sama.
 - Money disimpan REAL (float SQLite) dengan pembulatan 8 desimal;
   migrasi ke representasi desimal eksak masuk rencana Phase 4
   (PostgreSQL).

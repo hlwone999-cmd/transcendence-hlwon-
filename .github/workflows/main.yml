@@ -1,9 +1,11 @@
 # Build APK Transcendence — Kalkulator Lot XAUUSD (IDR)
-# Menjalankan analyze + test, lalu build APK release dan unggah sebagai artifact.
+# Analyze + test + build APK release.
 name: Build APK
 
 on:
   push:
+    branches: [main]
+  pull_request:
     branches: [main]
   workflow_dispatch:
 
@@ -33,7 +35,7 @@ jobs:
       - name: Test
         run: flutter test
 
-      - name: Build APK (release, arm64-only + obfuscate — ukuran ~50% lebih kecil)
+      - name: Build APK (release, arm64-only + obfuscate)
         run: >-
           flutter build apk --release
           --target-platform android-arm64

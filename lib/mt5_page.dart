@@ -8,7 +8,7 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'engine.dart' show shortIdr;
+import 'engine.dart' show fmtLots, fmtMoney, one, two;
 import 'mt5_api.dart';
 import 'mt5_filters.dart';
 import 'mt5_models.dart';
@@ -25,7 +25,7 @@ class Mt5JournalPage extends StatefulWidget {
   State<Mt5JournalPage> createState() => _Mt5JournalPageState();
 }
 
-enum _Phase { boot, unconfigured, loading, ready, error }
+enum _Phase { boot, unconfigured, loading, ready, invalidRange, error }
 
 class _Mt5JournalPageState extends State<Mt5JournalPage> {
   _Phase _phase = _Phase.boot;
@@ -52,6 +52,16 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
   DateTime? _customFrom, _customTo; // dinding-waktu di zona _tz
   String _symbolSel = 'SEMUA';
 
+  // Phase 1.1 anti-race (Temuan 5): setiap refreshAll menaikkan _epoch.
+  // Respons/append dari epoch lama yang selesai belakangan DIBUANG, jadi
+  // yang tampil selalu milik filter yang diminta terakhir.
+  int _epoch = 0;
+
+  // Snapshot rentang milik fetch terakhir (label interval + halaman-2
+  // _loadMore memakai ini, BUKAN menghitung ulang rangeFor yang berubah
+  // seiring waktu — sumber race halaman-2 dari rentang lama).
+  Mt5DateRange? _activeRange;
+
   @override
   void initState() {
     super.initState();
@@ -70,7 +80,7 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
       setState(() => _phase = _Phase.unconfigured);
       return;
     }
-    await _refreshAll();
+    await refreshAll();
   }
 
   /// Rentang aktif dari preset + zona waktu. Null hanya jika preset
@@ -86,21 +96,29 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
   String _cur() => _account?.currency ?? 'USD';
 
   // ------------------------------------------------------------ pemuatan
-  Future<void> _refreshAll() async {
+  Future<void> refreshAll() async {
     final api = _api;
     if (api == null || !api.isConfigured) return;
+    final epoch = ++_epoch;
+    final range = _range();
+    if (range == null) {
+      // FIX Temuan 5: rentang custom invalid TIDAK BOLEH membiarkan data
+      // rentang sebelumnya tampil apa adanya — tampilkan panduan.
+      _activeRange = null;
+      if (!mounted) return;
+      setState(() {
+        _phase = _Phase.invalidRange;
+        _error = null;
+      });
+      return;
+    }
+    _activeRange = range; // snapshot untuk _loadMore & label interval
+    if (!mounted) return;
     setState(() {
       _phase = _Phase.loading;
       _error = null;
     });
     try {
-      final range = _range();
-      if (range == null) {
-        if (!mounted) return;
-        setState(() => _phase = _Phase.ready);
-        _toast('Rentang tanggal belum lengkap/valid.', err: true);
-        return;
-      }
       final sym = _symbolSel == 'SEMUA' ? null : _symbolSel;
       final qs = (from: range.fromUtc, to: range.toUtc, sym: sym);
       final rs = await Future.wait([
@@ -130,7 +148,9 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
         syms = [];
       }
       final tl = rs[4] as Mt5TradeList;
-      if (!mounted) return;
+      // FIX race condition: bila ada refreshAll lebih baru, buang hasil
+      // ini — respons yang selesai terakhir BUKAN milik filter terakhir.
+      if (!mounted || epoch != _epoch) return;
       setState(() {
         _status = rs[0] as Mt5Status;
         _account = rs[1] as Mt5Account;
@@ -148,13 +168,13 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
         _phase = _Phase.ready;
       });
     } on Mt5ApiError catch (e) {
-      if (!mounted) return;
+      if (!mounted || epoch != _epoch) return;
       setState(() {
         _phase = _Phase.error;
         _error = e.friendly;
       });
     } catch (_) {
-      if (!mounted) return;
+      if (!mounted || epoch != _epoch) return;
       setState(() {
         _phase = _Phase.error;
         _error = 'Gagal memuat data jurnal.';
@@ -165,8 +185,12 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
   Future<void> _loadMore() async {
     final api = _api;
     if (api == null || _loadingMore || _page >= _pages) return;
-    final range = _range();
+    // FIX race: pakai SNAPSHOT rentang fetch terakhir — bukan _range()
+    // yang dihitung ulang saat tombol ditekan (dahulu halaman-2 dari
+    // rentang lama bisa menyusul setelah refresh rentang baru).
+    final range = _activeRange;
     if (range == null) return;
+    final epoch = _epoch;
     setState(() => _loadingMore = true);
     try {
       final tl = await api.trades(
@@ -176,14 +200,15 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
         toExclusive: true,
         symbol: _symbolSel == 'SEMUA' ? null : _symbolSel,
       );
-      if (!mounted) return;
+      // Bila refresh baru dimulai di tengah jalan, append ini basi — buang.
+      if (!mounted || epoch != _epoch) return;
       setState(() {
         _trades = [..._trades, ...tl.items];
         _page = tl.page;
         _pages = tl.pages;
       });
     } on Mt5ApiError catch (e) {
-      _toast(e.friendly, err: true);
+      if (mounted && epoch == _epoch) _toast(e.friendly, err: true);
     } finally {
       if (mounted) setState(() => _loadingMore = false);
     }
@@ -206,7 +231,7 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
       } else {
         _toast('Sinkron gagal: ${s['error'] ?? st}', err: true);
       }
-      await _refreshAll();
+      await refreshAll();
     } on Mt5ApiError catch (e) {
       _toast(e.friendly, err: true);
     } finally {
@@ -301,7 +326,7 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
       _token = tokC.text.trim();
       _api = widget.api ?? Mt5Api(baseUrl: _baseUrl, token: _token);
     });
-    await _refreshAll();
+    await refreshAll();
   }
 
   Widget _textField(
@@ -355,10 +380,16 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
         return _unconfigured(p);
       case _Phase.error:
         return _errorView(p);
+      case _Phase.invalidRange:
+        return RefreshIndicator(
+          color: p.goldSolid,
+          onRefresh: refreshAll,
+          child: _invalidRangeView(p),
+        );
       case _Phase.ready:
         return RefreshIndicator(
           color: p.goldSolid,
-          onRefresh: _refreshAll,
+          onRefresh: refreshAll,
           child: SingleChildScrollView(
             physics: const AlwaysScrollableScrollPhysics(),
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
@@ -418,6 +449,52 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
           ),
         );
     }
+  }
+
+  /// FIX Temuan 5: rentang custom belum lengkap/invalid -> TAMPILKAN
+  /// PANDUAN, bukan statistik lama (dahulu early return ke _Phase.ready
+  /// dan data rentang sebelumnya dirender tanpa penanda — keluhan
+  /// "statistik lama muncul sebagai hasil filter baru").
+  Widget _invalidRangeView(Palette p) {
+    return SingleChildScrollView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SectionHead(Icons.cloud_sync_outlined, 'Jurnal MT5 Otomatis'),
+          const SizedBox(height: 14),
+          _filterRow(p),
+          const SizedBox(height: 14),
+          ObsCard(
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.info_outline, size: 17, color: p.warm),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'RENTANG TANGGAL BELUM LENGKAP',
+                      style: labelSm(context, color: p.muted),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text(
+                'Pilih tanggal MULAI dan AKHIR untuk rentang custom. '
+                'Tanggal akhir dihitung penuh sampai tengah malam '
+                '(interval [mulai, akhir + 1 hari) di zona $_tz).\n\n'
+                'Statistik sengaja tidak ditampilkan agar tidak tertukar '
+                'dengan hasil rentang sebelumnya. Pilih preset lain di atas '
+                'untuk kembali memuat data.',
+                style: txt(context, 13, color: p.muted, height: 1.5),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 
   Widget _unconfigured(Palette p) {
@@ -496,7 +573,7 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
                       'COBA LAGI',
                       icon: Icons.refresh,
                       expanded: true,
-                      onTap: _refreshAll,
+                      onTap: refreshAll,
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -636,9 +713,20 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
                 children: [
                   Text('BALANCE', style: labelSm(context, color: p.dim)),
                   const SizedBox(height: 3),
-                  Text(
-                    '${shortIdr(a?.balance ?? 0)} ${_cur()}',
-                    style: mono(context, 15, w: FontWeight.w600, color: p.ink),
+                  // FIX Temuan 2: nilai penuh, simbol dinamis per akun
+                  // (dahulu "Rp346rb USD" — Rp hardcode + suffix kode).
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      fmtMoney(a?.balance ?? 0, _cur()),
+                      style: mono(
+                        context,
+                        15,
+                        w: FontWeight.w600,
+                        color: p.ink,
+                      ),
+                    ),
                   ),
                 ],
               ),
@@ -649,9 +737,18 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
                 children: [
                   Text('EQUITY', style: labelSm(context, color: p.dim)),
                   const SizedBox(height: 3),
-                  Text(
-                    '${shortIdr(a?.equity ?? 0)} ${_cur()}',
-                    style: mono(context, 15, w: FontWeight.w600, color: p.mint),
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      fmtMoney(a?.equity ?? 0, _cur()),
+                      style: mono(
+                        context,
+                        15,
+                        w: FontWeight.w600,
+                        color: p.mint,
+                      ),
+                    ),
                   ),
                 ],
               ),
@@ -662,9 +759,18 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
                 children: [
                   Text('LEVERAGE', style: labelSm(context, color: p.dim)),
                   const SizedBox(height: 3),
-                  Text(
-                    '1:${a?.leverage ?? '-'}',
-                    style: mono(context, 15, w: FontWeight.w600, color: p.warm),
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      '1:${a?.leverage ?? '-'}',
+                      style: mono(
+                        context,
+                        15,
+                        w: FontWeight.w600,
+                        color: p.warm,
+                      ),
+                    ),
                   ),
                 ],
               ),
@@ -676,8 +782,12 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
   }
 
   Widget _filterRow(Palette p) {
-    final range = _range();
     final tzShort = _tz.id == 'UTC' ? 'UTC' : 'WIB';
+    // FIX Temuan 4 + race: label interval = milik FETCH TERAKHIR
+    // (_activeRange). Dahulu rangeFor() dipanggil ulang saat build dan
+    // memakai DateTime.now(), sehingga teks bisa bergeser dari interval
+    // yang benar-benar dipakai data yang tampil.
+    final range = _phase == _Phase.ready ? _activeRange : _range();
     final intervalText = range == null
         ? 'Rentang belum dipilih'
         : range.fromUtc == null
@@ -717,15 +827,19 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
         ),
         const SizedBox(height: 8),
         Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Icon(Icons.date_range, size: 12, color: p.dim),
             const SizedBox(width: 5),
             Expanded(
               child: Text(
+                // FIX Temuan 4: label boleh membungkus 2 baris — dahulu
+                // maxLines:1 + ellipsis memotong ±65 karakter di layar 412dp.
                 intervalText,
-                maxLines: 1,
+                maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: mono(context, 11, color: p.warm),
+                softWrap: true,
+                style: mono(context, 11.5, color: p.warm),
               ),
             ),
           ],
@@ -734,7 +848,8 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
         Row(
           children: [
             BadgePill(
-              'winrate ${_stats.winRate?.toStringAsFixed(1) ?? '-'}%',
+              // desimal koma konsisten (dahulu titik di sini, koma di grid)
+              'winrate ${_stats.winRate != null ? one(_stats.winRate!) : '-'}%',
               color: p.gold,
               bg: p.goldsoft,
             ),
@@ -744,10 +859,23 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
     );
   }
 
+  /// Terapkan rentang custom dari pemilih tanggal (atau test).
+  /// visibleForTesting: jalur satu-satunya men-set preset custom sehingga
+  /// kasus "custom belum lengkap/invalid" bisa direproduksi di widget test.
+  @visibleForTesting
+  Future<void> applyCustomRange(DateTime? start, DateTime? end) async {
+    setState(() {
+      _customFrom = start;
+      _customTo = end;
+      _preset = DatePreset.custom;
+    });
+    await refreshAll();
+  }
+
   Future<void> _pickPreset(DatePreset preset) async {
     if (preset != DatePreset.custom) {
       setState(() => _preset = preset);
-      await _refreshAll();
+      await refreshAll();
       return;
     }
     final nowLocal = _tz.utcToLocal(DateTime.now().toUtc());
@@ -767,12 +895,7 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
       helpText: 'Tanggal AKHIR (zona $_tz)',
     );
     if (end == null || !mounted) return;
-    setState(() {
-      _customFrom = start;
-      _customTo = end;
-      _preset = DatePreset.custom;
-    });
-    await _refreshAll();
+    await applyCustomRange(start, end);
   }
 
   Future<void> _pickTz() async {
@@ -821,7 +944,7 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
     );
     if (sel == null || sel.id == _tz.id) return;
     setState(() => _tz = sel);
-    await _refreshAll();
+    await refreshAll();
   }
 
   Future<void> _pickSymbol() async {
@@ -855,7 +978,7 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
     );
     if (sel == null || sel == _symbolSel) return;
     setState(() => _symbolSel = sel);
-    await _refreshAll();
+    await refreshAll();
   }
 
   Widget _cell(String label, String val, Color c) {
@@ -866,11 +989,16 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
         children: [
           Text(label, style: labelSm(context, color: p.dim)),
           const SizedBox(height: 4),
-          Text(
-            val,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: mono(context, 14, w: FontWeight.w600, color: c),
+          // FIX Temuan 1: nilai tampil PENUH — skala turun bila ruang kurang
+          // (FittedBox), TANPA ellipsis yang memotong digit (dahulu
+          // maxLines:1 + ellipsis membuat +Rp22.036,79 terpotong di sel).
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(
+              val,
+              style: mono(context, 14, w: FontWeight.w600, color: c),
+            ),
           ),
         ],
       ),
@@ -880,100 +1008,112 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
   Widget _statsGrid(Palette p) {
     final s = _stats;
     final cur = _cur();
-    String money(double v) => '${v >= 0 ? '+' : '−'}${shortIdr(v.abs())} $cur';
-    return ObsCard(
-      children: [
-        Row(
-          children: [
-            Icon(Icons.query_stats, size: 15, color: p.gold),
-            const SizedBox(width: 7),
-            Text('STATISTIK', style: labelSm(context, color: p.muted)),
-            const Spacer(),
-            BadgePill(
-              '${s.totalClosed} closed · ${s.openTrades} open',
-              color: p.muted,
-              bg: p.cardHi,
+    // FIX Temuan 6: nominal + persen DD berdampingan, basis dinyatakan
+    // eksplisit (CLOSED P/L). Persen N/A bila backend mengirim null
+    // (puncak P/L kumulatif <= 0 — penyebut tidak valid) — BUKAN 0%.
+    final ddPct = _equity.maxDrawdownPct;
+    final maxDdText = s.totalClosed == 0
+        ? '-'
+        : '${fmtMoney(-_equity.maxDrawdown, cur)}'
+              ' (${ddPct != null ? '${one(ddPct)}%' : 'N/A'})';
+    final cells = <Widget>[
+      _cell('WINRATE', s.winRate != null ? '${one(s.winRate!)}%' : '-', p.gold),
+      _cell(
+        'NET P/L',
+        fmtMoney(s.netProfit, cur, signed: true),
+        s.netProfit >= 0 ? p.mint : p.red,
+      ),
+      _cell(
+        'PROFIT FACTOR',
+        s.profitFactor != null ? two(s.profitFactor) : 'N/A',
+        s.profitFactor != null ? p.mint : p.dim,
+      ),
+      _cell('MENANG / KALAH', '${s.wins} / ${s.losses}', p.ink),
+      _cell(
+        'AVG WIN',
+        s.averageWin != null ? fmtMoney(s.averageWin!, cur, signed: true) : '-',
+        p.mint,
+      ),
+      _cell(
+        'AVG LOSS',
+        s.averageLoss != null ? fmtMoney(-s.averageLoss!, cur) : '-',
+        p.red,
+      ),
+      _cell(
+        'EXPECTANCY',
+        s.expectancy != null ? fmtMoney(s.expectancy!, cur, signed: true) : '-',
+        p.ink,
+      ),
+      _cell('VOLUME', '${fmtLots(s.totalVolume)} lot', p.warm),
+      _cell('MAX DD · CLOSED P/L', maxDdText, p.red),
+    ];
+    return LayoutBuilder(
+      builder: (context, cons) => ObsCard(
+        children: [
+          Row(
+            children: [
+              Icon(Icons.query_stats, size: 15, color: p.gold),
+              const SizedBox(width: 7),
+              Text('STATISTIK', style: labelSm(context, color: p.muted)),
+              const Spacer(),
+              BadgePill(
+                '${s.totalClosed} closed · ${s.openTrades} open',
+                color: p.muted,
+                bg: p.cardHi,
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          // FIX Temuan 1 (responsif): 3 sel per baris hanya bila layar
+          // cukup lebar; layar sempit memakai 2 kolom sehingga angka
+          // panjang (−Rp1.564.837,89) punya ruang, bukan terpotong.
+          for (var i = 0; i < cells.length; i += cons.maxWidth >= 480 ? 3 : 2)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: Row(
+                children: [
+                  for (
+                    var j = i;
+                    j < i + (cons.maxWidth >= 480 ? 3 : 2) && j < cells.length;
+                    j++
+                  ) ...[if (j > i) const SizedBox(width: 12), cells[j]],
+                ],
+              ),
             ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        Row(
-          children: [
-            _cell(
-              'WINRATE',
-              '${s.winRate?.toStringAsFixed(1).replaceFirst('.', ',') ?? '-'}%',
-              p.gold,
-            ),
-            const SizedBox(width: 12),
-            _cell(
-              'NET P/L',
-              money(s.netProfit),
-              s.netProfit >= 0 ? p.mint : p.red,
-            ),
-            const SizedBox(width: 12),
-            _cell(
-              'PROFIT FACTOR',
-              s.profitFactor?.toStringAsFixed(2) ?? 'N/A',
-              s.profitFactor != null ? p.mint : p.dim,
-            ),
-          ],
-        ),
-        const SizedBox(height: 10),
-        Row(
-          children: [
-            _cell('MENANG / KALAH', '${s.wins} / ${s.losses}', p.ink),
-            const SizedBox(width: 12),
-            _cell(
-              'AVG WIN',
-              s.averageWin != null ? '+${shortIdr(s.averageWin!)}' : '-',
-              p.mint,
-            ),
-            const SizedBox(width: 12),
-            _cell(
-              'AVG LOSS',
-              s.averageLoss != null ? '−${shortIdr(s.averageLoss!)}' : '-',
-              p.red,
-            ),
-          ],
-        ),
-        const SizedBox(height: 10),
-        Row(
-          children: [
-            _cell(
-              'EXPECTANCY',
-              s.expectancy != null ? money(s.expectancy!) : '-',
-              p.ink,
-            ),
-            const SizedBox(width: 12),
-            _cell('VOLUME', shortIdr(s.totalVolume), p.warm),
-            const SizedBox(width: 12),
-            _cell(
-              'MAX DD',
-              s.totalClosed == 0 ? '-' : '−${shortIdr(_equity.maxDrawdown)}',
-              p.red,
-            ),
-          ],
-        ),
-      ],
+          // FIX Temuan 3: definisi volume eksplisit — mencegah salah paham
+          // double counting (entry vs exit vs round-turn).
+          Text(
+            'Volume = total lot keluar (sisi close).',
+            style: txt(context, 10.5, color: p.dim),
+          ),
+        ],
+      ),
     );
   }
 
   Widget _equityCard(Palette p) {
     final pts = _equity.points;
+    final ddPct = _equity.maxDrawdownPct;
     return ObsCard(
       children: [
         Row(
           children: [
             Icon(Icons.show_chart, size: 15, color: p.gold),
             const SizedBox(width: 7),
-            Text(
-              'KURVA P/L TRADING (NET)',
-              style: labelSm(context, color: p.muted),
+            Expanded(
+              child: Text(
+                'KURVA P/L TRADING (NET)',
+                style: labelSm(context, color: p.muted),
+              ),
             ),
-            const Spacer(),
             BadgePill(
-              'DD ${_equity.maxDrawdownPct.toStringAsFixed(1)}%',
-              color: _equity.maxDrawdownPct > 0 ? p.red : p.dim,
+              // FIX Temuan 6: pill menyatakan basis (CLOSED-P/L) dan
+              // tampil N/A saat persen tidak punya penyebut valid —
+              // dahulu "DD 0,0%" padahal akun belum pernah untung.
+              ddPct != null
+                  ? 'DD CLOSED-P/L ${one(ddPct)}%'
+                  : 'DD CLOSED-P/L N/A',
+              color: (ddPct ?? 0) > 0 ? p.red : p.dim,
               bg: p.redsoft,
             ),
           ],
@@ -995,27 +1135,61 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
         Text(
           'Kumulatif P/L trading — BUKAN kurva equity akun historis '
           '(snapshot equity tidak tersedia dari riwayat MT5).',
-          style: txt(context, 10, color: p.dim),
+          style: txt(context, 10.5, color: p.dim),
         ),
         const SizedBox(height: 4),
         Row(
           children: [
-            Text('Net kumulatif: ', style: txt(context, 11, color: p.dim)),
-            Text(
-              '${_equity.finalNetCum >= 0 ? '+' : '−'}'
-              '${shortIdr(_equity.finalNetCum.abs())} ${_cur()}',
-              style: mono(
-                context,
-                12,
-                w: FontWeight.w600,
-                color: _equity.finalNetCum >= 0 ? p.mint : p.red,
+            // FIX Temuan 1: footer kurva dulu tanpa Flexible — RenderFlex
+            // overflow saat angka panjang. Seluruh grup label+nilai kini
+            // FittedBox: nilai PENUH, mengecil seragam bila ruang kurang.
+            Flexible(
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Net kumulatif: ',
+                      style: txt(context, 11, color: p.dim),
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      fmtMoney(_equity.finalNetCum, _cur(), signed: true),
+                      style: mono(
+                        context,
+                        12,
+                        w: FontWeight.w600,
+                        color: _equity.finalNetCum >= 0 ? p.mint : p.red,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
             const SizedBox(width: 12),
-            Text('Deposit/WD: ', style: txt(context, 11, color: p.dim)),
-            Text(
-              '${shortIdr(_equity.balanceOpsCum)} ${_cur()}',
-              style: mono(context, 12, w: FontWeight.w600, color: p.warm),
+            Flexible(
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerLeft,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text('Deposit/WD: ', style: txt(context, 11, color: p.dim)),
+                    const SizedBox(width: 4),
+                    Text(
+                      fmtMoney(_equity.balanceOpsCum, _cur()),
+                      style: mono(
+                        context,
+                        12,
+                        w: FontWeight.w600,
+                        color: p.warm,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
           ],
         ),
@@ -1044,82 +1218,105 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
             ),
             child: Row(
               children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        BadgePill(
-                          (t.direction ?? '?').toUpperCase(),
-                          color: dirC,
-                          bg: dirC == p.mint ? p.goodsoft : p.redsoft,
-                        ),
-                        const SizedBox(width: 6),
-                        Text(
-                          t.symbol,
-                          style: mono(context, 13, w: FontWeight.w600),
-                        ),
-                        if (t.isOpen) ...[
-                          const SizedBox(width: 6),
-                          BadgePill('OPEN', color: p.gold, bg: p.goldsoft),
-                        ],
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      '${_fmtIso(t.closeTime ?? t.openTime)} · '
-                      '${shortIdr(t.volumeOut)}/'
-                      '${shortIdr(t.volumeIn)} lot'
-                      '${t.pips != null ? ' · ${t.pips! >= 0 ? '+' : '−'}'
-                                '${t.pips!.abs().toStringAsFixed(1)} pip' : ''}',
-                      style: txt(context, 11, color: p.muted),
-                    ),
-                    if (t.exitReason != null || t.rr != null) ...[
-                      const SizedBox(height: 4),
+                // FIX Temuan 1: kolom kiri dibatasi Expanded agar metadata
+                // membungkus — nilai uang di kanan tetap utuh & utama.
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
                       Row(
                         children: [
-                          if (t.exitReason != null)
-                            BadgePill(
-                              t.exitReason!.toUpperCase(),
-                              color: t.exitReason == 'tp' ? p.mint : p.red,
-                              bg: t.exitReason == 'tp' ? p.goodsoft : p.redsoft,
+                          BadgePill(
+                            (t.direction ?? '?').toUpperCase(),
+                            color: dirC,
+                            bg: dirC == p.mint ? p.goodsoft : p.redsoft,
+                          ),
+                          const SizedBox(width: 6),
+                          Flexible(
+                            child: Text(
+                              t.symbol,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: mono(context, 13, w: FontWeight.w600),
                             ),
-                          if (t.exitReason != null && t.rr != null)
+                          ),
+                          if (t.isOpen) ...[
                             const SizedBox(width: 6),
-                          if (t.rr != null)
-                            BadgePill(
-                              'RR ${t.rr!.toStringAsFixed(2)}',
-                              color: p.warm,
-                              bg: p.cardHi,
-                            ),
+                            BadgePill('OPEN', color: p.gold, bg: p.goldsoft),
+                          ],
                         ],
                       ),
-                    ],
-                  ],
-                ),
-                const Spacer(),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Text(
-                      '${t.netProfit >= 0 ? '+' : '−'}'
-                      '${shortIdr(t.netProfit.abs())} ${_cur()}',
-                      style: mono(context, 14, w: FontWeight.w600, color: pnlC),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      t.status == 'open'
-                          ? 'berjalan'
-                          : (win ? 'menang' : 'rugi'),
-                      style: txt(
-                        context,
-                        10.5,
-                        color: t.status == 'open' ? p.gold : p.dim,
+                      const SizedBox(height: 4),
+                      Text(
+                        '${_fmtIso(t.closeTime ?? t.openTime)} · '
+                        // FIX Temuan 3: lot — dahulu shortIdr → "Rp0" utk 0,02
+                        '${fmtLots(t.volumeOut)}/${fmtLots(t.volumeIn)} lot'
+                        '${t.pips != null ? ' · ${t.pips! >= 0 ? '+' : '−'}'
+                                  '${one(t.pips!.abs())} pip' : ''}',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: txt(context, 11, color: p.muted),
                       ),
-                    ),
-                    const SizedBox(height: 4),
-                    Icon(Icons.chevron_right, size: 16, color: p.dim),
-                  ],
+                      if (t.exitReason != null || t.rr != null) ...[
+                        const SizedBox(height: 4),
+                        Row(
+                          children: [
+                            if (t.exitReason != null)
+                              BadgePill(
+                                t.exitReason!.toUpperCase(),
+                                color: t.exitReason == 'tp' ? p.mint : p.red,
+                                bg: t.exitReason == 'tp'
+                                    ? p.goodsoft
+                                    : p.redsoft,
+                              ),
+                            if (t.exitReason != null && t.rr != null)
+                              const SizedBox(width: 6),
+                            if (t.rr != null)
+                              BadgePill(
+                                'RR ${two(t.rr!)}',
+                                color: p.warm,
+                                bg: p.cardHi,
+                              ),
+                          ],
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                // Nilai P/L utama: tidak pernah terpotong — menyusut bila
+                // perlu (FittedBox) dalam batas lebar tetap.
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 170),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text(
+                          fmtMoney(t.netProfit, _cur(), signed: true),
+                          style: mono(
+                            context,
+                            14,
+                            w: FontWeight.w600,
+                            color: pnlC,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        t.status == 'open'
+                            ? 'berjalan'
+                            : (win ? 'menang' : 'rugi'),
+                        style: txt(
+                          context,
+                          10.5,
+                          color: t.status == 'open' ? p.gold : p.dim,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Icon(Icons.chevron_right, size: 16, color: p.dim),
+                    ],
+                  ),
                 ),
               ],
             ),
@@ -1189,7 +1386,8 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
                 ctx,
                 p,
                 'Volume in / out',
-                '${shortIdr(d.trade.volumeIn)} / ${shortIdr(d.trade.volumeOut)} lot',
+                // FIX Temuan 3: lot, bukan rupiah
+                '${fmtLots(d.trade.volumeIn)} / ${fmtLots(d.trade.volumeOut)} lot',
               ),
               _kv(ctx, p, 'Entry (VWAP)', _px(d.trade.entryPrice)),
               _kv(
@@ -1206,20 +1404,24 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
                 'Pips',
                 d.trade.pips != null
                     ? '${d.trade.pips! >= 0 ? '+' : '−'}'
-                          '${d.trade.pips!.abs().toStringAsFixed(1)} '
-                          '(jarak ${d.trade.pipDistance ?? '-'})'
+                          '${one(d.trade.pips!.abs())} '
+                          '(jarak ${d.trade.pipDistance != null ? one(d.trade.pipDistance!) : '-'})'
                     : '-',
               ),
-              _kv(ctx, p, 'Profit', '${shortIdr(d.trade.profit)} ${_cur()}'),
-              _kv(ctx, p, 'Komisi', shortIdr(d.trade.commission)),
-              _kv(ctx, p, 'Swap', shortIdr(d.trade.swap)),
-              _kv(ctx, p, 'Fee', shortIdr(d.trade.fee)),
+              _kv(
+                ctx,
+                p,
+                'Profit',
+                fmtMoney(d.trade.profit, _cur(), signed: true),
+              ),
+              _kv(ctx, p, 'Komisi', fmtMoney(d.trade.commission, _cur())),
+              _kv(ctx, p, 'Swap', fmtMoney(d.trade.swap, _cur())),
+              _kv(ctx, p, 'Fee', fmtMoney(d.trade.fee, _cur())),
               _kv(
                 ctx,
                 p,
                 'NET P/L',
-                '${d.trade.netProfit >= 0 ? '+' : '−'}'
-                    '${shortIdr(d.trade.netProfit.abs())} ${_cur()}',
+                fmtMoney(d.trade.netProfit, _cur(), signed: true),
                 color: d.trade.netProfit >= 0 ? p.mint : p.red,
               ),
               // RR JUJUR: tanpa SL awal tampil N/A — tidak mengarang angka.
@@ -1227,9 +1429,7 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
                 ctx,
                 p,
                 'Risk:Reward',
-                d.trade.rr != null
-                    ? '1 : ${d.trade.rr!.toStringAsFixed(2)}'
-                    : 'N/A',
+                d.trade.rr != null ? '1 : ${two(d.trade.rr!)}' : 'N/A',
               ),
               _kv(ctx, p, 'SL awal', _px(d.trade.slInitial)),
               _kv(ctx, p, 'TP awal', _px(d.trade.tpInitial)),

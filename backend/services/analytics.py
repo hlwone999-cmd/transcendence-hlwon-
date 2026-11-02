@@ -192,6 +192,9 @@ def equity_curve(conn, account_id: int, symbol_cfg: dict,
 
     PENTING: ini KURVA P/L TRADING kumulatif, BUKAN kurva equity akun
     historis — snapshot equity harian tidak tersedia dari MT5 history.
+    max_drawdown_pct juga dihitung terhadap puncak P/L kumulatif (bukan
+    saldo); bila puncak <= 0 nilainya None (UI: "N/A") — jangan pernah
+    menyebutnya drawdown equity akun.
     """
     meta = load_symbol_meta(conn, account_id)
 
@@ -221,7 +224,11 @@ def equity_curve(conn, account_id: int, symbol_cfg: dict,
         qb += " AND time_utc >= ?"
         bargs.append(date_from)
     if date_to:
-        qb += " AND time_utc <= ?"
+        # Phase 1.1 fix (bug audit): SAMAKAN dengan cabang trades di atas
+        # dan cabang balance-ops pada reconciliation — to_exclusive WAJIB
+        # dihormati, kalau tidak operasi balance tepat di batas `to`
+        # dobel terhitung terhadap kontrak interval [from, to).
+        qb += " AND time_utc < ?" if to_exclusive else " AND time_utc <= ?"
         bargs.append(date_to)
     for r in conn.execute(qb, bargs):
         p = float(r["profit"] or 0)
@@ -238,7 +245,7 @@ def equity_curve(conn, account_id: int, symbol_cfg: dict,
     bal = 0.0
     peak = 0.0
     max_dd = 0.0
-    max_dd_pct = 0.0
+    max_dd_pct: float | None = None  # None = TIDAK ADA penyebut valid
     max_dd_at = None
     out_points = []
     for pt in points:
@@ -258,15 +265,25 @@ def equity_curve(conn, account_id: int, symbol_cfg: dict,
             dd = peak - cum
             if dd > max_dd + 1e-12:
                 max_dd = dd
-                max_dd_pct = (dd / peak * 100.0) if peak > 1e-12 else 0.0
+                # Phase 1.1 fix (Temuan 6): persen TANPA penyebut valid
+                # (puncak P/L kumulatif <= 0, mis. akun belum pernah untung
+                # pada rentang ini) mengembalikan None -> UI tampil "N/A".
+                # Dahulu 0.0 — menyesatkan (nominal DD ada, persen 0%).
+                max_dd_pct = (dd / peak * 100.0) if peak > 1e-12 else None
                 max_dd_at = pt["t"]
+
+    # Kurva untung terus (tidak ada drawdown) tetapi puncak VALID (> 0):
+    # 0% adalah jawaban sah — penyebut ada. Hanya puncak <= 0 yang N/A.
+    if max_dd_pct is None and max_dd == 0.0 and peak > 1e-12:
+        max_dd_pct = 0.0
 
     return {
         "points": out_points,
         "final_net_cum": round(cum, 2),
         "balance_ops_cum": round(bal, 2),
         "max_drawdown": round(max_dd, 2),
-        "max_drawdown_pct": round(max_dd_pct, 2),
+        "max_drawdown_pct": (round(max_dd_pct, 2)
+                             if max_dd_pct is not None else None),
         "max_drawdown_at": max_dd_at,
     }
 
