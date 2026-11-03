@@ -1,0 +1,83 @@
+# Deployment backend — HANYA dengan approval manual (brief §10).
+# Urutan wajib: backup DB -> migrasi -> health check -> rollback bila gagal.
+# Tidak ada kredensial di repo: semua via GitHub Environment secrets.
+# TIDAK pernah dijalankan otomatis dari branch fitur.
+name: Backend Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Ketik DEPLOY untuk konfirmasi'
+        required: true
+        default: ''
+
+environment:
+  name: production          # environment dengan required reviewer di GitHub
+  url: https://jurnal.domain.com
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Konfirmasi manual
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "DEPLOY" ]; then
+            echo "Ketik DEPLOY pada input confirm untuk melanjutkan."; exit 1;
+          fi
+
+  deploy:
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Backup database sebelum migration (pg_dump)
+        run: |
+          ssh deploy@${{ secrets.VPS_HOST }} "
+            sudo -u postgres pg_dump transcendence | gzip > \
+              /var/backups/transcendence/pre-deploy-\$(date +%Y%m%d-%H%M%S).sql.gz
+            ls -1t /var/backups/transcendence/pre-deploy-*.sql.gz | head -3"
+
+      - name: Deploy kode + migrasi PostgreSQL
+        run: |
+          ssh deploy@${{ secrets.VPS_HOST }} "
+            set -e
+            cd /opt/transcendence
+            git fetch origin && git checkout ${{ github.ref_name }} || git checkout main
+            cd backend
+            source /opt/transcendence/venv/bin/activate
+            python -c \"import db, config; c=config.load_config(); conn=db.get_db(c); print('migrasi:', db.migrate(conn))\"
+            sudo systemctl restart transcendence-backend"
+
+      - name: Health check setelah deployment
+        run: |
+          for i in 1 2 3 4 5; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+              http://127.0.0.1:8000/api/v1/health || true)
+            [ "$code" = "200" ] && echo "health OK" && exit 0
+            echo "percobaan $i: HTTP $code"; sleep 5
+          done
+          echo "health check GAGAL — memicu rollback"
+          exit 1
+
+      - name: Rollback bila deployment gagal
+        if: failure()
+        run: |
+          ssh deploy@${{ secrets.VPS_HOST }} "
+            set -e
+            cd /opt/transcendence
+            git reset --hard origin/main
+            LATEST=\$(ls -1t /var/backups/transcendence/pre-deploy-*.sql.gz | head -1)
+            sudo -u postgres dropdb --if-exists transcendence_restore
+            sudo -u postgres createdb transcendence_restore
+            gunzip -c \"\$LATEST\" | sudo -u postgres psql transcendence_restore
+            sudo systemctl restart transcendence-backend
+            echo 'ROLLBACK selesai dari backup:' \$LATEST"
