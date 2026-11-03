@@ -165,6 +165,8 @@ def partial_cross_dataset():
 
 
 # ------------------------------------------------------------------ tests
+from tests.conftest import bind_account, register_and_login  # noqa: E402
+
 OCT_FROM = "2026-10-01T00:00:00Z"
 OCT_TO_EXCL = "2026-11-01T00:00:00Z"   # [1 Okt, 1 Nov) UTC
 OCT_WIB_FROM = "2026-09-30T17:00:00Z"  # 1 Okt 00:00 WIB
@@ -175,33 +177,27 @@ SEP_TO_EXCL = "2026-10-01T00:00:00Z"
 
 @pytest.fixture()
 def oct_client(make_client, cfg):
-    _CURRENT_DATASET["ds"] = october_dataset()
     c = make_client(dataset=october_dataset())
-    _sync_dataset(cfg)
+    _ensure_session(c)
     return c
 
 
-def _sync_dataset(cfg):
-    """Isi DB test dengan dataset via SyncService (mock, mode full)."""
-    import db as dbmod
-    from mt5client.mock import MockMT5Client
-    from services.sync import SyncService
-    dbmod.close_db()
-    svc = SyncService(cfg, lambda: MockMT5Client())
-    svc._factory = lambda: MockMT5Client(_CURRENT_DATASET["ds"])
-    summary = svc.sync(mode="full")
-    assert summary["status"] == "ok", summary
-    dbmod.close_db()
-
-
-_CURRENT_DATASET = {"ds": None}
-
-
-AUTH = {"X-API-Token": "TESTTOKEN"}  # dari conftest.cfg
+def _ensure_session(client):
+    """(helper test) register+login+bind+sync full sekali per client —
+    memakai endpoint nyata model multi-customer."""
+    if getattr(client, "_auth_headers", None) is None:
+        hdrs = register_and_login(client)
+        bind_account(client, hdrs)
+        r = client.post("/api/v1/mt5/sync", json={"mode": "full"},
+                        headers=hdrs)
+        assert r.status_code == 200 and r.get_json()["status"] == "ok", \
+            r.get_json()
+        client._auth_headers = hdrs
+    return client._auth_headers
 
 
 def _get(client, path, params=None):
-    r = client.get(path, query_string=params, headers=AUTH)
+    r = client.get(path, query_string=params, headers=_ensure_session(client))
     assert r.status_code == 200, r.get_data(as_text=True)
     return r
 
@@ -329,7 +325,7 @@ class TestKonsistensiEndpoint:
         r = oct_client.get("/api/v1/journal/stats",
                            query_string={"from": "2026-10-10",
                                          "to": "2026-10-01"},
-                           headers=AUTH)
+                           headers=_ensure_session(oct_client))
         assert r.status_code == 400
 
 
@@ -345,9 +341,8 @@ class TestRekonsiliasi:
         assert rec["balance_ops"]["total"] == 3000.0
 
     def test_partial_close_lintas_interval(self, make_client, cfg):
-        _CURRENT_DATASET["ds"] = partial_cross_dataset()
         c = make_client(dataset=partial_cross_dataset())
-        _sync_dataset(cfg)
+        _ensure_session(c)
         rec = _recon(c, **{"from": OCT_FROM, "to": OCT_TO_EXCL,
                            "to_exclusive": "1"})
         # deals dalam interval: +30,000 (partial out 20 Okt) & komisi -4
