@@ -65,3 +65,27 @@ JSON bebas kredensial. Retensi: ikut kebijakan backup DB.
 Semua endpoint gagal-aman; pesan error standar tanpa stack trace;
 `logging.getLogger("rpyc")` ditekan ke WARNING agar argumen internal
 tidak pernah muncul di log.
+
+## 8. Row-Level Security PostgreSQL (defense-in-depth — audit #2)
+
+Policy RLS pada tabel ber-customer (`mt5_deals`, `mt5_orders`,
+`mt5_trades`, `mt5_symbols`, `mt5_sync_state`, `mt5_credentials`)
+membaca `current_setting('app.customer_id', true)`.
+
+- **Context per transaksi**: backend memasang context via
+  `set_config('app.customer_id', <id>, true)` — semantik `SET LOCAL`:
+  otomatis reset saat COMMIT/ROLLBACK, mustahil bocor ke transaksi
+  berikutnya yang memakai koneksi yang sama. Dipasang di
+  `require_customer` (dari token terverifikasi server) dan di worker
+  sinkronisasi sebelum menyentuh baris akun (`db.set_customer_context`).
+- **Role aplikasi non-owner**: koneksi produksi memakai
+  `transcendence_app` (NOSUPERUSER, NOBYPASSRLS — migrasi 002). Owner
+  database hanya untuk migrasi/administrasi dan BYPASS RLS (sifat bawaan
+  PostgreSQL; didokumentasikan, bukan jalur aplikasi).
+- **Bukti nyata** (test_rls_postgres.py, PostgreSQL sungguhan via
+  pgserver): role aplikasi tanpa context melihat 0 baris; dengan context
+  A hanya data A; query langsung `SELECT/UPDATE ... WHERE
+  account_id=<B>` dari koneksi ber-context A menghasilkan 0 baris.
+- **RLS BUKAN pengganti authorization backend**: filter `customer_id`
+  pada query tetap wajib dan tetap diuji (test_multi_customer,
+  test_api). RLS hanya lapisan terakhir bila ada lupa filter.
