@@ -25,15 +25,38 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 
 _local = threading.local()
 
+# GUC PostgreSQL yang dibaca policy RLS (migrations/postgres/001/002).
+CUSTOMER_GUC = "app.customer_id"
+
+# Kunci advisory lock PostgreSQL (xact-scoped) utk serialisasi cek-dan-
+# tulis kapasitas. Konstanta bebas yang tidak dipakai modul lain.
+CAPACITY_LOCK_REGISTER = 736451001   # registrasi customer (maks 4 aktif)
+CAPACITY_LOCK_TERMINAL = 736451002   # alokasi port terminal RPyC
+
 
 def is_postgres(conn) -> bool:
     return isinstance(conn, PostgresConn)
+
+
+def _integrity_errors() -> tuple:
+    """Kelas IntegrityError milik engine yang tersedia (lintas engine)."""
+    errs = [sqlite3.IntegrityError]
+    try:
+        import psycopg2.errors  # noqa: PLC0415 - lazy
+        errs.append(psycopg2.errors.IntegrityError)
+    except ImportError:  # pragma: no cover - PG opsional di dev
+        pass
+    return tuple(errs)
+
+
+INTEGRITY_ERRORS = _integrity_errors()
 
 
 def trades_table(conn) -> str:
@@ -74,6 +97,12 @@ class PostgresConn:
         self._RealDictCursor = RealDictCursor
         self._conn = psycopg2.connect(dsn)
         self._conn.autocommit = False
+        # Customer context utk RLS (audit #2). None = belum di-scope.
+        # Diterapkan via set_config(..., is_local=true) sehingga otomatis
+        # hilang di akhir transaksi; _reapply_context() memasangnya kembali
+        # pada transaksi berikutnya selama koneksi masih di-scope customer
+        # yang sama (koneksi per-thread dipakai lintas transaksi).
+        self._customer_id: int | None = None
 
     # -- infrastruktur ------------------------------------------------
     @property
@@ -89,6 +118,45 @@ class PostgresConn:
         # (diuji test_static_sql_safety) supaya replace ini selalu aman.
         return sql.replace("?", "%s")
 
+    # -- customer context utk RLS (audit #2) ---------------------------
+    def set_customer_context(self, customer_id: int | None) -> None:
+        """Pasang `app.customer_id` utk transaksi berjalan (RLS).
+
+        Memakai set_config(..., is_local => true): nilai hanya berlaku
+        sampai COMMIT/ROLLBACK lalu otomatis di-reset PostgreSQL — tidak
+        bisa bocor ke transaksi/request lain yang memakai koneksi ini.
+        Setelah commit/rollback, context dipasang ulang otomatis pada
+        transaksi berikutnya (lihat _reapply_context).
+        """
+        if customer_id is None:
+            self._customer_id = None
+            return
+        cur = self._conn.cursor()
+        cur.execute("SELECT set_config(%s, %s, true)",
+                    (CUSTOMER_GUC, str(int(customer_id))))
+        cur.close()
+        self._customer_id = int(customer_id)
+
+    def _reapply_context(self) -> None:
+        """Pasang ulang GUC customer pada transaksi yang baru terbuka."""
+        if self._customer_id is None:
+            return
+        cur = self._conn.cursor()
+        cur.execute("SELECT set_config(%s, %s, true)",
+                    (CUSTOMER_GUC, str(self._customer_id)))
+        cur.close()
+
+    def current_customer_context(self) -> int | None:
+        return self._customer_id
+
+    @property
+    def in_transaction(self) -> bool:
+        """True bila transaksi PostgreSQL sedang berjalan."""
+        import psycopg2.extensions as _ext  # noqa: PLC0415 - lazy
+        return (not self._conn.closed and
+                self._conn.info.transaction_status !=
+                _ext.TRANSACTION_STATUS_IDLE)
+
     # -- kompatibilitas sqlite3 ----------------------------------------
     def execute(self, sql: str, params=None):
         cur = self.cursor()
@@ -100,9 +168,11 @@ class PostgresConn:
 
     def commit(self) -> None:
         self._conn.commit()
+        self._reapply_context()
 
     def rollback(self) -> None:
         self._conn.rollback()
+        self._reapply_context()
 
     def executescript(self, script: str) -> None:
         """psycopg2 menerima multi-statement dalam satu execute."""
@@ -127,6 +197,56 @@ class PostgresConn:
 
 def connect_postgres(dsn: str) -> PostgresConn:
     return PostgresConn(dsn)
+
+
+# ---------------------------------------------- customer context (RLS)
+def set_customer_context(conn, customer_id: int | None) -> None:
+    """Scope koneksi ke 1 customer utk RLS (no-op di SQLite).
+
+    Dipanggil setelah customer context diturunkan dari token yang
+    terverifikasi server (routes.require_customer) dan oleh worker
+    sinkronisasi sebelum menyentuh baris milik akun tertentu.
+    RLS adalah defense-in-depth (brief §5) — BUKAN pengganti filter
+    customer_id di query backend.
+    """
+    if is_postgres(conn):
+        conn.set_customer_context(customer_id)
+
+
+@contextmanager
+def capacity_guard(conn, key: int):
+    """Serialisasi pola cek-dan-tulis (race condition, audit #3 lanjutan).
+
+    - PostgreSQL : pg_advisory_xact_lock(key) — kunci tingkat transaksi,
+      otomatis lepas saat COMMIT/ROLLBACK.
+    - SQLite     : BEGIN IMMEDIATE — write-lock sejak awal transaksi,
+      menutup celah TOCTOU antara SELECT COUNT dan INSERT.
+
+    Bila body melempar exception, transaksi di-rollback agar kunci
+    pasti lepas dan koneksi bersih untuk request berikutnya.
+
+    Catatan: bila koneksi SUDAH berada di dalam transaksi (mis. penulisan
+    audit sebelumnya belum di-commit), SQLite tidak bisa BEGIN lagi —
+    guard lanjut tanpa lock eksplisit; kebenaran tetap dijaga UNIQUE
+    constraint + retry di pemanggil. Pada PG advisory lock tetap diambil
+    (re-entrant dalam transaksi yang sama).
+    """
+    if is_postgres(conn):
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (int(key),))
+        try:
+            yield
+        except BaseException:
+            conn.rollback()
+            raise
+    else:
+        already_open = bool(getattr(conn, "in_transaction", False))
+        if not already_open:
+            conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+        except BaseException:
+            conn.rollback()
+            raise
 
 
 # ================================================================== common

@@ -1,37 +1,58 @@
-"""Isolasi terminal MT5 per customer (brief §4).
+"""Isolasi terminal MT5 per customer (brief §4; perbaikan audit #1).
 
 Setiap customer mendapat:
 - 1 akun MT5, 1 Wine prefix, 1 terminal, 1 direktori data,
-- 1 koneksi RPyC di 1 port localhost unik (18812 + index),
+- 1 server RPyC (mt5server) di 1 port localhost unik (18812 + index)
+  — unit systemd menjalankan terminal64.exe DAN server RPyC (yang
+  dibutuhkan MT5LinuxProvider), bukan terminal saja,
 - 1 unit systemd sendiri (restart satu terminal tidak menyentuh yang lain),
 - 1 provider READ-ONLY + 1 lock sinkronisasi per akun.
 
 Mode provisioning:
-- "real" (VPS) : buat direktori + tulis unit systemd + petunjuk instalasi;
+- "real" (VPS) : buat direktori + tulis unit systemd + skrip wrapper
+                 (run-terminal.sh / stop-terminal.sh) + petunjuk;
                  admin mengaktifkan unit (dokumen: docs/MULTI-CUSTOMER-
                  INSTALASI-PROVISIONING.md).
 - "mock" (dev/test): hanya buat direktori kosong + catat unit — tanpa
                  Wine/MT5, sehingga test berjalan di mana saja.
+
+Health check: health_check() melakukan koneksi TCP NYATA ke 127.0.0.1:
+<port> (server RPyC), opsional deep (mode real) membuka sesi RPyC
+read-only via provider dan memanggil terminal_info(). Status yang
+dilaporkan TIDAK PERNAH mengklaim "live MT5 berhasil" tanpa koneksi
+sungguhan — tanpa Wine/terminal, hasilnya reachable=False.
 """
 from __future__ import annotations
 
 import logging
+import socket
 import threading
 import time
 from pathlib import Path
 
+from db import CAPACITY_LOCK_TERMINAL, INTEGRITY_ERRORS, capacity_guard
 from mt5client.provider import MT5Error
 from security import crypto
 
 log = logging.getLogger(__name__)
 
-SYSTEMD_UNIT_TEMPLATE = """# Unit systemd per customer —Transcendence MT5 Terminal (read-only)
+RPYC_HOST = "127.0.0.1"   # WAJIB localhost — RPyC tidak punya auth kuat
+
+SYSTEMD_UNIT_TEMPLATE = """# Unit systemd per customer — Transcendence MT5 Terminal + RPyC mt5server (read-only)
 # Pasang:  sudo cp {unit_path} /etc/systemd/system/{service_name}.service
 #          sudo systemctl daemon-reload && sudo systemctl enable --now {service_name}
 # Restart SATU terminal TIDAK memengaruhi terminal customer lain:
 #          sudo systemctl restart {service_name}
+# Status/health check:
+#          systemctl status {service_name}
+#          curl -sS --max-time 3 127.0.0.1:{rpyc_port} >/dev/null && echo port-up
+#
+# ExecStart memanggil wrapper yang meluncurkan (1) terminal64.exe di
+# background dan (2) server RPyC (mt5server) di FOREGROUND — jalur data
+# yang dipakai MT5LinuxProvider — sehingga systemd mengawasi keduanya:
+# bila server RPyC mati, unit di-restart (terminal ikut di-launch ulang).
 [Unit]
-Description=Transcendence MT5 Terminal ({code}, RPyC localhost:{rpyc_port})
+Description=Transcendence MT5 Terminal + RPyC ({code}, localhost:{rpyc_port})
 After=network.target
 
 [Service]
@@ -39,11 +60,13 @@ Type=simple
 User=transcendence
 Environment=WINEPREFIX={wine_prefix}
 Environment=WINEDEBUG=-all
+Environment=MT5SERVER_BIN={mt5server_bin}
 WorkingDirectory={terminal_dir}
-ExecStart=/usr/bin/wine {terminal_dir}/terminal64.exe /portable
+ExecStart=/bin/sh {terminal_dir}/run-terminal.sh
+ExecStop=/bin/sh {terminal_dir}/stop-terminal.sh
 Restart=on-failure
 RestartSec=10
-# RPyC mt5server.exe hanya bind 127.0.0.1:{rpyc_port} — JANGAN buka ke publik.
+# RPyC mt5server HANYA bind 127.0.0.1:{rpyc_port} — JANGAN buka ke publik.
 NoNewPrivileges=true
 PrivateTmp=true
 
@@ -51,9 +74,67 @@ PrivateTmp=true
 WantedBy=multi-user.target
 """
 
+RUN_TERMINAL_TEMPLATE = """#!/bin/sh
+# Wrapper per customer — Transcendence MT5 (READ-ONLY; audit #1).
+# 1) terminal64.exe diluncurkan di background (Wine, prefix terisolasi).
+# 2) server RPyC (mt5server) berjalan di FOREGROUND dan HANYA bind
+#    127.0.0.1:{port} — systemd mengawal proses ini.
+# Ganti binary server via env MT5SERVER_BIN bila instalasi Wine Anda
+# memakai bridge lain, mis.:
+#   MT5SERVER_BIN="C:\\\\python\\\\python.exe -m mt5linux {host} {port}"
+# (mt5linux menyediakan server RPyC lewat `python -m mt5linux <host> <port>`
+# di dalam Wine; default di sini mengikuti nama brief: mt5server.exe.)
+set -eu
+export WINEPREFIX="{wine_prefix}"
+export WINEDEBUG=-all
+WINE_BIN="{wine_bin}"
+TERMINAL_DIR="{terminal_dir}"
+RPYC_HOST="{host}"
+RPYC_PORT="{port}"
+
+# --- (1) terminal MT5 (background) ---
+# /portable: profil terminal di dalam terminal_dir (isolasi per customer).
+if ! pgrep -f "terminal64.exe.*$TERMINAL_DIR" >/dev/null 2>&1; then
+    "$WINE_BIN" "$TERMINAL_DIR/terminal64.exe" /portable &
+fi
+
+# --- (2) server RPyC (foreground; dikelola systemd) ---
+SERVER_BIN="${{MT5SERVER_BIN:-$TERMINAL_DIR/mt5server.exe}}"
+# shellcheck disable=SC2086
+exec "$WINE_BIN" $SERVER_BIN "$RPYC_HOST" "$RPYC_PORT"
+"""
+
+STOP_TERMINAL_TEMPLATE = """#!/bin/sh
+# Stop elegan proses customer ini SAJA — terminal customer lain tidak disentuh
+# (pola cocok dibatasi direktori terminal + port, bukan nama generik).
+TERMINAL_DIR="{terminal_dir}"
+RPYC_PORT="{port}"
+pkill -TERM -f "terminal64.exe.*$TERMINAL_DIR" 2>/dev/null || true
+pkill -TERM -f "mt5server.*$RPYC_PORT" 2>/dev/null || true
+sleep 2
+pkill -KILL -f "terminal64.exe.*$TERMINAL_DIR" 2>/dev/null || true
+pkill -KILL -f "mt5server.*$RPYC_PORT" 2>/dev/null || true
+exit 0
+"""
+
 
 class TerminalError(Exception):
     pass
+
+
+def probe_rpyc_port(port: int, host: str = RPYC_HOST,
+                    timeout: float = 2.0) -> bool:
+    """Health check transport NYATA: TCP connect ke server RPyC.
+
+    Bukan simulasi — membuka socket sungguhan ke 127.0.0.1:<port>.
+    Server RPyC yang hidup menerima koneksi ini (baca selamat datang
+    RPyC tidak diperlukan untuk probe port).
+    """
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 class AccountRuntime:
@@ -87,65 +168,157 @@ class TerminalRegistry:
 
     # ------------------------------------------------------- provisioning
     def provision_terminal(self, conn, customer_id: int) -> dict:
-        """Alokasikan port + direktori + unit systemd untuk 1 customer.
+        """Alokasikan port + direktori + unit systemd utk 1 customer.
 
         Dipanggil saat bind akun. Port = port rendah yang masih bebas
         dalam jendela [base, base+max_customers).
+
+        Race condition (audit #4): pemilihan port + INSERT diserialisasi
+        capacity_guard (PG advisory lock / SQLite BEGIN IMMEDIATE) dan
+        dibackstop UNIQUE(rpyc_port) di skema — bila dua bind bersamaan
+        memilih port sama, yang kalah di-retry (maks 5x) lalu gagal
+        rapi dengan TerminalError, bukan 500.
         """
         cfg = self._cfg
-        n_terms = conn.execute(
-            "SELECT COUNT(*) AS n FROM mt5_terminals").fetchone()["n"]
-        if int(n_terms) >= cfg.max_customers:
-            raise TerminalError(
-                f"Kapasitas maksimal {cfg.max_customers} terminal tercapai")
         code_row = conn.execute("SELECT code FROM customers WHERE id=?",
                                 (customer_id,)).fetchone()
         if code_row is None:
             raise TerminalError("customer tidak ditemukan")
         code = code_row["code"]
 
-        taken = {int(r["rpyc_port"]) for r in conn.execute(
-            "SELECT rpyc_port FROM mt5_terminals")}
-        port = None
-        for cand in range(cfg.rpyc_port_base,
-                          cfg.rpyc_port_base + cfg.max_customers):
-            if cand not in taken:
-                port = cand
-                break
-        if port is None:
-            raise TerminalError("Tidak ada port RPyC bebas di jendela alokasi")
-
         base = Path(cfg.term_base_dir) / code
         wine_prefix = base / "wine-prefix"
         terminal_dir = base / "terminal"
         data_dir = base / "data"
         service_name = f"transcendence-mt5-{code.lower()}"
-        try:
-            for d in (wine_prefix, terminal_dir, data_dir):
-                d.mkdir(parents=True, exist_ok=True)
-            unit_path = base / f"{service_name}.service"
-            unit_path.write_text(SYSTEMD_UNIT_TEMPLATE.format(
-                unit_path=unit_path, service_name=service_name, code=code,
-                rpyc_port=port, wine_prefix=wine_prefix,
-                terminal_dir=terminal_dir), encoding="utf-8")
-        except OSError as e:
-            raise TerminalError(
-                f"Gagal menyiapkan direktori terminal {base}: {e}") from e
+        mt5server_bin = f"{terminal_dir}/mt5server.exe"
+        wine_bin = getattr(cfg, "wine_bin", "/usr/bin/wine") or "/usr/bin/wine"
 
-        status = "ready" if cfg.terminal_provision_mode == "mock" \
-            else "provisioning"
-        conn.execute(
-            """INSERT INTO mt5_terminals (customer_id, rpyc_port, wine_prefix,
-                 terminal_dir, data_dir, service_name, status)
-               VALUES (?,?,?,?,?,?,?)""",
-            (customer_id, port, str(wine_prefix), str(terminal_dir),
-             str(data_dir), service_name, status))
-        log.info("terminal %s diprovisikan: port=%d mode=%s",
-                 service_name, port, cfg.terminal_provision_mode)
-        return {"rpyc_port": port, "service_name": service_name,
-                "wine_prefix": str(wine_prefix),
-                "terminal_dir": str(terminal_dir), "data_dir": str(data_dir),
-                "status": status}
+        last_err: Exception | None = None
+        for _attempt in range(5):
+            try:
+                with capacity_guard(conn, CAPACITY_LOCK_TERMINAL):
+                    n_terms = conn.execute(
+                        "SELECT COUNT(*) AS n FROM mt5_terminals"
+                    ).fetchone()["n"]
+                    if int(n_terms) >= cfg.max_customers:
+                        raise TerminalError(
+                            f"Kapasitas maksimal {cfg.max_customers} "
+                            "terminal tercapai")
+                    taken = {int(r["rpyc_port"]) for r in conn.execute(
+                        "SELECT rpyc_port FROM mt5_terminals")}
+                    port = None
+                    for cand in range(cfg.rpyc_port_base,
+                                      cfg.rpyc_port_base + cfg.max_customers):
+                        if cand not in taken:
+                            port = cand
+                            break
+                    if port is None:
+                        raise TerminalError(
+                            "Tidak ada port RPyC bebas di jendela alokasi")
+
+                    try:
+                        for d in (wine_prefix, terminal_dir, data_dir):
+                            d.mkdir(parents=True, exist_ok=True)
+                        unit_path = base / f"{service_name}.service"
+                        unit_path.write_text(SYSTEMD_UNIT_TEMPLATE.format(
+                            unit_path=unit_path, service_name=service_name,
+                            code=code, rpyc_port=port,
+                            wine_prefix=wine_prefix,
+                            terminal_dir=terminal_dir,
+                            mt5server_bin=mt5server_bin), encoding="utf-8")
+                        run_sh = terminal_dir / "run-terminal.sh"
+                        run_sh.write_text(RUN_TERMINAL_TEMPLATE.format(
+                            wine_prefix=wine_prefix, wine_bin=wine_bin,
+                            terminal_dir=terminal_dir, host=RPYC_HOST,
+                            port=port), encoding="utf-8")
+                        stop_sh = terminal_dir / "stop-terminal.sh"
+                        stop_sh.write_text(STOP_TERMINAL_TEMPLATE.format(
+                            terminal_dir=terminal_dir, port=port),
+                            encoding="utf-8")
+                        for sh in (run_sh, stop_sh):
+                            sh.chmod(0o755)
+                    except OSError as e:
+                        raise TerminalError(
+                            f"Gagal menyiapkan direktori terminal {base}: "
+                            f"{e}") from e
+
+                    status = "ready" if cfg.terminal_provision_mode == "mock" \
+                        else "provisioning"
+                    conn.execute(
+                        """INSERT INTO mt5_terminals (customer_id, rpyc_port,
+                             wine_prefix, terminal_dir, data_dir,
+                             service_name, status)
+                           VALUES (?,?,?,?,?,?,?)""",
+                        (customer_id, port, str(wine_prefix),
+                         str(terminal_dir), str(data_dir), service_name,
+                         status))
+                    log.info("terminal %s diprovisikan: port=%d mode=%s "
+                             "(terminal64.exe + mt5server RPyC)",
+                             service_name, port, cfg.terminal_provision_mode)
+                    return {"rpyc_port": port, "rpyc_host": RPYC_HOST,
+                            "service_name": service_name,
+                            "wine_prefix": str(wine_prefix),
+                            "terminal_dir": str(terminal_dir),
+                            "data_dir": str(data_dir),
+                            "mt5server_bin": mt5server_bin,
+                            "status": status}
+            except INTEGRITY_ERRORS as e:  # balapan port antar request
+                last_err = e
+                conn.rollback()   # buang transaksi bermasalah, coba lagi
+                continue
+        raise TerminalError(
+            f"Alokasi port terminal gagal setelah beberapa percobaan: "
+            f"{last_err}")
+
+    # ------------------------------------------------------- health check
+    def health_check(self, conn, customer_id: int, deep: bool = False,
+                     timeout: float = 3.0) -> dict:
+        """Health check koneksi NYATA ke server RPyC customer.
+
+        - Selalu   : koneksi TCP ke 127.0.0.1:<rpyc_port> (socket nyata).
+        - deep=True: bila mode "real" dan akun ter-bind, buka sesi RPyC
+          read-only via provider dan panggil terminal_info().
+
+        Jujur terhadap status: tanpa listener/MT5 sungguhan hasilnya
+        reachable=False (TIDAK mengklaim live MT5 berhasil).
+        """
+        from mt5client.provider import utcnow_iso
+        row = conn.execute(
+            "SELECT * FROM mt5_terminals WHERE customer_id=?",
+            (customer_id,)).fetchone()
+        if row is None:
+            return {"customer_id": customer_id, "status": "missing",
+                    "reachable": False, "checked_at": utcnow_iso()}
+        port = int(row["rpyc_port"])
+        reachable = probe_rpyc_port(port, timeout=timeout)
+        detail: dict = {"customer_id": customer_id, "port": port,
+                        "host": RPYC_HOST, "reachable": reachable,
+                        "checked_at": utcnow_iso(),
+                        "mode": self._cfg.terminal_provision_mode}
+        if reachable and deep and self._cfg.terminal_provision_mode == "real":
+            acc = conn.execute(
+                "SELECT id FROM mt5_accounts WHERE customer_id=?",
+                (customer_id,)).fetchone()
+            if acc is not None:
+                try:
+                    rt = self.runtime_for(conn, int(acc["id"]))
+                    rt.provider.connect()
+                    ti = rt.provider.terminal_info()
+                    detail["mt5"] = {"connected": True,
+                                     "terminal_info": ti}
+                except MT5Error as e:
+                    detail["mt5"] = {"connected": False,
+                                     "error": str(e)[:200]}
+        # catat waktu health terakhir (kolom last_health_at tersedia)
+        try:
+            conn.execute(
+                "UPDATE mt5_terminals SET last_health_at=? "
+                "WHERE customer_id=?", (detail["checked_at"], customer_id))
+            conn.commit()
+        except Exception:  # noqa: BLE001 - health check tak boleh meledak
+            conn.rollback()
+        return detail
 
     # ----------------------------------------------------------- provider
     def _account_config(self, conn, account_id: int):
@@ -158,6 +331,10 @@ class TerminalRegistry:
                WHERE a.id=?""", (account_id,)).fetchone()
         if acc is None:
             raise TerminalError(f"akun {account_id} tidak ditemukan")
+        # RLS defense-in-depth (audit #2): scope koneksi ke customer akun
+        # SEBELUM membaca mt5_credentials (tabel ber-RLS di PostgreSQL).
+        from db import set_customer_context
+        set_customer_context(conn, int(acc["customer_id"]))
         cred = conn.execute(
             "SELECT enc_password, key_version FROM mt5_credentials"
             " WHERE account_id=?", (account_id,)).fetchone()

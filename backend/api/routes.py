@@ -25,6 +25,7 @@ from functools import wraps
 
 from flask import Blueprint, abort, current_app, g, jsonify, request
 
+import db as dbmod
 from mt5client.provider import MT5Error
 from services import analytics
 
@@ -67,6 +68,11 @@ def require_customer(fn):
         g.customer_id = info["customer_id"]
         g.user_id = info["user_id"]
         g.token_id = info["token_id"]
+        # RLS defense-in-depth (audit #2): scope koneksi PostgreSQL ke
+        # customer hasil verifikasi token (SET LOCAL per transaksi).
+        # SQLite no-op. Bukan pengganti filter customer_id di query.
+        import db as dbmod
+        dbmod.set_customer_context(get_db(), g.customer_id)
         return fn(*a, **kw)
     return wrapper
 
@@ -290,17 +296,26 @@ def accounts_bind():
     except TerminalError as e:
         abort(409, description=str(e))
     now = _now_iso()
-    conn.execute(
-        """INSERT INTO mt5_accounts (customer_id, login, server,
-             first_sync_at, last_sync_at) VALUES (?,?,?,?,?)""",
-        (g.customer_id, login_val, server, now, None))
-    acc_id = int(conn.execute(
-        "SELECT id FROM mt5_accounts WHERE customer_id=?",
-        (g.customer_id,)).fetchone()["id"])
-    conn.execute(
-        "INSERT INTO mt5_credentials (account_id, enc_password, key_version)"
-        " VALUES (?,?,?)", (acc_id, enc, key_version))
-    conn.commit()
+    try:
+        conn.execute(
+            """INSERT INTO mt5_accounts (customer_id, login, server,
+                 first_sync_at, last_sync_at) VALUES (?,?,?,?,?)""",
+            (g.customer_id, login_val, server, now, None))
+        acc_id = int(conn.execute(
+            "SELECT id FROM mt5_accounts WHERE customer_id=?",
+            (g.customer_id,)).fetchone()["id"])
+        conn.execute(
+            "INSERT INTO mt5_credentials (account_id, enc_password,"
+            " key_version) VALUES (?,?,?)", (acc_id, enc, key_version))
+        conn.commit()
+    except dbmod.INTEGRITY_ERRORS as e:
+        # balapan bind login/server sama antar customer (UNIQUE) —
+        # rollback melepas lock terminal juga; respons tetap 409.
+        conn.rollback()
+        log.warning("bind bentrok (UNIQUE) customer=%s login=%s: %s",
+                    g.customer_id, login_val, e)
+        abort(409, description="Akun MT5 itu sudah ter-bind ke customer "
+                               "lain (bentrok)")
     auditmod.audit(conn, "bind", customer_id=g.customer_id, user_id=g.user_id,
                    entity=f"mt5_account:{acc_id}",
                    detail={"server": server, "rpyc_port": term["rpyc_port"]})

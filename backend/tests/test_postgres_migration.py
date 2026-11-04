@@ -81,7 +81,9 @@ def test_migrasi_pg_dari_db_kosong(pg_server):
     uri = pg_server.get_uri().replace("/postgres?", f"/{name}?")
     conn = dbmod.connect_postgres(uri)
     applied = dbmod.migrate(conn)
-    assert applied == [1]
+    # audit #2: 002_rls_roles.sql (role aplikasi non-owner + grant) ikut
+    # diterapkan pada migrasi DB kosong.
+    assert applied == [1, 2]
     tables = {r["tablename"] for r in conn.execute(
         "SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     for t in WAJIB_TABLES:

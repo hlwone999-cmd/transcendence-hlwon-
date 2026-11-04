@@ -137,6 +137,10 @@ class SyncService:
             raise RuntimeError("sync_account butuh TerminalRegistry")
         conn = conn or dbmod.get_db(self._cfg)
         rt = self._registry.runtime_for(conn, account_id)
+        # RLS defense-in-depth (audit #2): scope koneksi thread ini ke
+        # customer pemilik akun SEBELUM menulis deals/orders/trades.
+        # (runtime_for mungkin cache hit — context harus dipasang eksplisit.)
+        dbmod.set_customer_context(conn, rt.customer_id)
         if not rt.lock.acquire(blocking=False):
             raise SyncLockBusy(f"sync akun {account_id} sedang berjalan")
         try:

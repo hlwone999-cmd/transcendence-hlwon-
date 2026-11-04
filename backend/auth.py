@@ -23,6 +23,9 @@ from datetime import datetime, timedelta, timezone
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
+import db as dbmod
+from db import CAPACITY_LOCK_REGISTER, INTEGRITY_ERRORS
+
 _EMAIL_MAX = 254
 _EMAIL_LOCAL = 64
 
@@ -206,28 +209,43 @@ def revoke_all_for_customer(conn, customer_id: int) -> None:
 # ---------------------------------------------------------------- register
 def register_customer(conn, config, email: str, password: str,
                       display_name: str | None = None) -> dict:
-    """Buat customer + user. Batas kapasitas MVP: max_customers aktif."""
+    """Buat customer + user. Batas kapasitas MVP: max_customers aktif.
+
+    Race condition (audit #4): cek kapasitas + INSERT diserialisasi
+    capacity_guard — PostgreSQL pg_advisory_xact_lock, SQLite BEGIN
+    IMMEDIATE — sehingga dua registrasi bersamaan pada slot terakhir
+    tidak bisa lolos keduanya (TOCTOU tertutup). Pelanggaran UNIQUE
+    (email/kode) diubah menjadi AuthError(409), bukan 500.
+    """
     email = normalize_email(email)
     validate_password(password)
-    n_active = conn.execute(
-        "SELECT COUNT(*) AS n FROM customers WHERE status='active'"
-    ).fetchone()["n"]
-    if int(n_active) >= config.max_customers:
-        raise AuthError(403, f"Kapasitas maksimal {config.max_customers} "
-                             "customer aktif sudah tercapai")
-    if conn.execute("SELECT 1 FROM users WHERE email=?",
-                    (email,)).fetchone() is not None:
-        raise AuthError(409, "Email sudah terdaftar")
-    n_all = conn.execute("SELECT COUNT(*) AS n FROM customers").fetchone()["n"]
-    code = f"C{int(n_all) + 1:03d}"
-    conn.execute("INSERT INTO customers (code, display_name) VALUES (?,?)",
-                 (code, (display_name or "").strip()[:80] or None))
-    row = conn.execute("SELECT id FROM customers WHERE code=?",
-                       (code,)).fetchone()
-    customer_id = int(row["id"])
-    conn.execute(
-        "INSERT INTO users (customer_id, email, password_hash) VALUES (?,?,?)",
-        (customer_id, email, generate_password_hash(password)))
+    try:
+        with dbmod.capacity_guard(conn, CAPACITY_LOCK_REGISTER):
+            n_active = conn.execute(
+                "SELECT COUNT(*) AS n FROM customers WHERE status='active'"
+            ).fetchone()["n"]
+            if int(n_active) >= config.max_customers:
+                raise AuthError(403,
+                                f"Kapasitas maksimal {config.max_customers} "
+                                "customer aktif sudah tercapai")
+            if conn.execute("SELECT 1 FROM users WHERE email=?",
+                            (email,)).fetchone() is not None:
+                raise AuthError(409, "Email sudah terdaftar")
+            n_all = conn.execute(
+                "SELECT COUNT(*) AS n FROM customers").fetchone()["n"]
+            code = f"C{int(n_all) + 1:03d}"
+            conn.execute("INSERT INTO customers (code, display_name)"
+                         " VALUES (?,?)",
+                         (code, (display_name or "").strip()[:80] or None))
+            row = conn.execute("SELECT id FROM customers WHERE code=?",
+                               (code,)).fetchone()
+            customer_id = int(row["id"])
+            conn.execute(
+                "INSERT INTO users (customer_id, email, password_hash)"
+                " VALUES (?,?,?)",
+                (customer_id, email, generate_password_hash(password)))
+    except INTEGRITY_ERRORS as e:  # balapan email/kode antar thread/proses
+        raise AuthError(409, "Registrasi bentrok — coba lagi") from e
     urow = conn.execute("SELECT id FROM users WHERE email=?",
                         (email,)).fetchone()
     return {"customer_id": customer_id, "user_id": int(urow["id"]),
