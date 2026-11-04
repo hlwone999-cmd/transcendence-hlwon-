@@ -62,10 +62,12 @@ jobs:
           sys.exit(0 if ok else 1)
           PY
 
-      - name: Guard kebijakan deploy (audit round-2 #2)
+      - name: Guard kebijakan deploy (audit round-2 + round-3)
         run: |
           python - <<'PY'
+          import re
           import sys
+          from pathlib import Path
           import yaml
 
           with open(".github/workflows/backend-deploy.yml",
@@ -95,16 +97,76 @@ jobs:
           if envs.get("APP_DIR") != "/opt/transcendence-hlwon-":
               err.append("APP_DIR harus path VPS aktual /opt/transcendence-hlwon-")
 
-          raw = open(".github/workflows/backend-deploy.yml",
-                     encoding="utf-8").read()
+          raw = Path(".github/workflows/backend-deploy.yml").read_text(
+              encoding="utf-8")
+
+          # ---- audit round-3 #2: commit produksi EKSPLISIT ------------
+          inputs = (trig.get("workflow_dispatch") or {}).get("inputs") or {}
+          if "deploy_sha" not in inputs:
+              err.append("workflow_dispatch wajib punya input deploy_sha "
+                         "(SHA eksplisit yang di-approve)")
+          guard_job = wf.get("jobs", {}).get("guard", {})
+          guard_raw = str(guard_job.get("steps", []))
+          if "merge-base --is-ancestor" not in raw:
+              err.append("guard wajib memvalidasi SHA bagian sejarah "
+                         "branch produksi (git merge-base --is-ancestor)")
+          if "PROD_BRANCH" not in envs:
+              err.append("env PROD_BRANCH wajib ada — aturan jelas ref "
+                         "produksi yang diizinkan")
+          # deploy kode: checkout --detach pada SHA, bukan origin/<branch>
+          if "git checkout --detach" not in raw:
+              err.append("deploy wajib git checkout --detach pada SHA "
+                         "eksplisit")
+          cmd_lines = [ln for ln in raw.splitlines()
+                       if ln.lstrip().startswith(("git ", "- git "))]
+          if any(re.search(r"reset --hard origin/", ln)
+                 for ln in cmd_lines):
+              err.append("deploy/rollback tidak boleh git reset --hard "
+                         "origin/<apa pun> — hanya SHA eksplisit")
+          if "APPROVED_COMMIT" not in raw:
+              err.append("SHA ter-approve wajib dicatat ke "
+                         "$BACKUP_DIR/APPROVED_COMMIT (jejak audit)")
+
+          # ---- audit round-3 #1: izin direktori backup ----------------
+          if "install -d -o" not in raw or "750" not in raw:
+              err.append("direktori backup wajib dibuat via "
+                         "install -d -o deploy -g deploy -m 750 "
+                         "(bukan sudo mkdir root-owned)")
+          if re.search(r"sudo\s+mkdir\s+-p\s+\$BACKUP_DIR", raw):
+              err.append("sudo mkdir -p $BACKUP_DIR (root-owned) "
+                         "dilarang — pakai install -d -o deploy")
+          if re.search(r"sudo tee \$BACKUP_DIR", raw):
+              err.append("penulisan file backup via sudo tee dilarang — "
+                         "direktori milik deploy, tulis langsung")
+
+          # ---- audit round-3 #3: rollback script ----------------------
+          rb = Path("backend/deploy/rollback.sh")
+          if not rb.is_file():
+              err.append("backend/deploy/rollback.sh wajib ada "
+                         "(logika rollback dites pytest)")
+          else:
+              rb_raw = rb.read_text(encoding="utf-8")
+              for needle in ("PREVIOUS_COMMIT", "systemctl stop",
+                             "FIRST-DEPLOY"):
+                  if needle not in rb_raw:
+                      err.append(f"rollback.sh wajib mengandung '{needle}'")
+              if "LAST_PRE_DEPLOY" not in raw or \
+                      "rollback.sh" not in raw:
+                  err.append("workflow wajib memanggil backend/deploy/"
+                             "rollback.sh dengan env eksplisit")
+          # larangan round-2 tetap: rollback memakai PREVIOUS_COMMIT
           if "PREVIOUS_COMMIT" not in raw:
               err.append("rollback wajib memakai PREVIOUS_COMMIT "
                          "(commit ter-deploy sebelumnya), bukan origin/main")
-          # larangan hanya untuk PERINTAH nyata, bukan komentar dokumentasi
-          cmd_lines = [ln for ln in raw.splitlines()
-                       if ln.lstrip().startswith(("git ", "- git "))]
           if any("reset --hard origin/main" in ln for ln in cmd_lines):
               err.append("rollback tidak boleh git reset --hard origin/main")
+
+          # ---- audit round-3 #4: health readiness ---------------------
+          routes = Path("backend/api/routes.py").read_text(
+              encoding="utf-8")
+          if "503" not in routes or "missing_tables" not in routes:
+              err.append("/api/v1/health wajib readiness: 503 bila DB/"
+                         "skema minimum tidak siap (lihat CORE_TABLES)")
 
           with open(".github/workflows/main.yml", encoding="utf-8") as fh:
               main_raw = fh.read()
@@ -115,7 +177,7 @@ jobs:
               print("PELANGGARAN:", e)
           sys.exit(1 if err else 0)
           PY
-          echo "guard kebijakan deploy OK"
+          echo "guard kebijakan deploy OK (round-2 + round-3)"
 
       - name: Tripwire file kalkulator (checksum baseline)
         run: |

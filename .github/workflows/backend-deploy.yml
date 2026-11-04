@@ -4,24 +4,40 @@
 # sebelumnya + database KE dump pra-deploy = pasangan versi kompatibel).
 #
 # Perbaikan audit round-2 #2:
-#   1. `environment: production` pindah dari level workflow ke JOB deploy
-#      — GitHub Environment protection rules (required reviewer) hanya
-#      dievaluasi pada job yang mendeklarasikan environment; di level
-#      workflow approval TIDAK valid.
+#   1. `environment: production` di JOB deploy (bukan level workflow) —
+#      required reviewer GitHub Environment dievaluasi per job.
 #   2. ENV_FILE disatukan dengan dokumentasi systemd:
 #      EnvironmentFile=/opt/transcendence-hlwon-/backend/.env
-#      (docs/MULTI-CUSTOMER-INSTALASI-PROVISIONING.md §7) — bukan lagi
-#      /etc/default/transcendence-backend. Satu file konfigurasi saja.
-#   3. Rollback TIDAK lagi `git reset --hard origin/main`: commit yang
-#      TER-DEPLOY sebelumnya dicatat di $BACKUP_DIR/PREVIOUS_COMMIT
-#      sebelum deploy, dan rollback mengembalikan kode ke commit itu
-#      DIPASANGKAN dengan dump database pra-deploy (dump diambil SEBELUM
-#      migrasi kode baru, sehingga skema DB cocok dengan kode lama —
-#      pasangan versi yang kompatibel, bukan main yang belum tentu
-#      punya migrasi PostgreSQL).
-#   4. Langkah normalisasi .env di awal deploy: bila deploy sebelumnya
-#      rollback ke database restore, .env dikembalikan ke $DB_NAME
-#      sebelum kode baru dinyalakan.
+#      (docs/MULTI-CUSTOMER-INSTALASI-PROVISIONING.md §7).
+#   3. Rollback TIDAK `git reset --hard origin/main`: kode kembali ke
+#      PREVIOUS_COMMIT (commit ter-deploy sebelumnya) DIPASANGKAN dengan
+#      dump database pra-deploy — pasangan versi yang kompatibel.
+#
+# Perbaikan audit round-3 (temuan deployment):
+#   1. BACKUP PERMISSION (temuan #1): /var/backups/transcendence dibuat
+#      dengan `install -d -o deploy -g deploy -m 750` — MILIK user
+#      deploy, bukan root-owned dari `sudo mkdir`. Penulisan dump
+#      (`gzip > $BACKUP_DIR/...`), PREVIOUS_COMMIT, APPROVED_COMMIT dan
+#      LAST_PRE_DEPLOY berjalan sebagai user deploy TANPA sudo (dengan
+#      umask 077 + chmod 600). Idempoten: bila owner/mode berubah,
+#      `install -d` mengembalikannya sebelum penulisan.
+#   2. DEPLOY IMMUTABLE COMMIT (temuan #2): deploy memakai SHA EKSPLISIT
+#      ($DEPLOY_SHA) yang divalidasi guard: ref pemicu wajib 'main',
+#      SHA wajib full 40-hex DAN bagian dari sejarah main. Kode di VPS
+#      di-checkout --detach pada SHA itu — TIDAK PERNAH reset ke
+#      origin/<branch> yang bisa berubah setelah approval. SHA juga
+#      dicatat ke $BACKUP_DIR/APPROVED_COMMIT sebagai jejak audit.
+#   3. FIRST-DEPLOY ROLLBACK (temuan #3): logika rollback dipindah ke
+#      backend/deploy/rollback.sh (dites pytest dengan stub — lihat
+#      tests/test_rollback_script.py). Bila PREVIOUS_COMMIT=NONE:
+#      TIDAK ada restore-lalu-biarkan-kode-baru-jalan — service
+#      DIHENTIKAN, database utama dikembalikan ke kondisi pra-deploy,
+#      .env tidak diubah, retry first-deploy secara manual. Gate juga
+#      menghentikan deploy SEBELUM migrasi bila "first deploy" tetapi
+#      database sudah berisi skema (status tidak konsisten).
+#   4. HEALTH CHECK (temuan #4): /api/v1/health sekarang readiness —
+#      200 hanya bila koneksi PostgreSQL hidup DAN tabel inti ada;
+#      status terminal MT5 dilaporkan terpisah dan tidak dipersyaratkan.
 #
 # Tidak ada kredensial di repo: semua via GitHub Environment secrets.
 # Workflow ini workflow_dispatch SAJA — tidak pernah dipicu push/PR —
@@ -36,6 +52,12 @@ on:
         description: 'Ketik DEPLOY untuk konfirmasi'
         required: true
         default: ''
+      deploy_sha:
+        description: >-
+          Full 40-hex SHA commit produksi yang di-approve
+          (kosong = SHA run ini pada main)
+        required: false
+        default: ''
 
 env:
   APP_DIR: /opt/transcendence-hlwon-
@@ -45,9 +67,13 @@ env:
   # unit systemd (docs/MULTI-CUSTOMER-INSTALASI-PROVISIONING.md §7).
   ENV_FILE: /opt/transcendence-hlwon-/backend/.env
   BACKUP_DIR: /var/backups/transcendence
+  # Pemilik direktori backup = user SSH deploy (audit round-3 #1).
+  BACKUP_OWNER: deploy
   DB_NAME: transcendence
   RESTORE_DB_NAME: transcendence_restore
   HEALTH_URL: http://127.0.0.1:8000/api/v1/health
+  # Aturan produksi (audit round-3 #2): hanya commit di sejarah branch ini.
+  PROD_BRANCH: main
 
 jobs:
   guard:
@@ -58,6 +84,35 @@ jobs:
           if [ "${{ github.event.inputs.confirm }}" != "DEPLOY" ]; then
             echo "Ketik DEPLOY pada input confirm untuk melanjutkan."; exit 1;
           fi
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Aturan produksi — ref + commit eksplisit (audit round-3 #2)
+        run: |
+          set -e
+          # (1) Produksi hanya dari branch terlindungi — aturan jelas.
+          if [ "${{ github.ref_name }}" != "$PROD_BRANCH" ]; then
+            echo "::error::Deploy produksi hanya diizinkan dari ref '$PROD_BRANCH' (run ini dipicu dari: ${{ github.ref_name }})"
+            exit 1
+          fi
+          # (2) Commit yang di-deploy = SHA EKSPLISIT yang dilihat (dan
+          #     di-approve) reviewer pada run ini — BUKAN origin/<branch>
+          #     yang bisa bergerak setelah approval.
+          SHA="${{ github.event.inputs.deploy_sha }}"
+          SHA="${SHA:-${{ github.sha }}}"
+          if ! echo "$SHA" | grep -qE '^[0-9a-fA-F]{40}$'; then
+            echo "::error::deploy_sha harus full 40-hex SHA commit (diterima: '$SHA')"
+            exit 1
+          fi
+          # (3) SHA wajib bagian dari sejarah branch produksi.
+          if ! git merge-base --is-ancestor "$SHA" "origin/$PROD_BRANCH"; then
+            echo "::error::SHA $SHA BUKAN bagian sejarah $PROD_BRANCH — produksi hanya menerima commit $PROD_BRANCH"
+            exit 1
+          fi
+          echo "DEPLOY_SHA=$SHA" >> "$GITHUB_ENV"
+          echo "Commit produksi terpilih (immutable): $SHA"
 
   deploy:
     needs: guard
@@ -77,18 +132,27 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Catat commit ter-deploy sebelumnya (target rollback)
+      - name: Catat commit ter-deploy sebelumnya + direktori backup (owner deploy)
         run: |
           PREV=$(ssh deploy@${{ secrets.VPS_HOST }} \
             "cd $APP_DIR 2>/dev/null && git rev-parse HEAD 2>/dev/null || true")
           if [ -z "$PREV" ]; then
-            echo "::warning::Tidak ada commit ter-deploy sebelumnya (deploy pertama?) — rollback kode tidak memilih commit lama, hanya DB restore."
+            echo "::warning::Tidak ada commit ter-deploy sebelumnya (FIRST DEPLOY) — bila deploy gagal, rollback menghentikan service + memulihkan DB pra-deploy (rollback.sh); retry manual."
             PREV="NONE"
           fi
           ssh deploy@${{ secrets.VPS_HOST }} "
-            sudo mkdir -p $BACKUP_DIR
-            echo '$PREV' | sudo tee $BACKUP_DIR/PREVIOUS_COMMIT >/dev/null
-            sudo chmod 600 $BACKUP_DIR/PREVIOUS_COMMIT"
+            set -e
+            # AUDIT ROUND-3 #1: direktori backup MILIK user deploy
+            # (750). `sudo install -d` idempoten — bila owner/mode
+            # menyimpang, dikembalikan di sini SEBELUM penulisan apa
+            # pun. Tidak ada lagi direktori root-owned yang membuat
+            # `gzip > $BACKUP_DIR/...` (sebagai deploy) gagal.
+            sudo install -d -o $BACKUP_OWNER -g $BACKUP_OWNER -m 750 $BACKUP_DIR
+            echo '$PREV' > $BACKUP_DIR/PREVIOUS_COMMIT
+            chmod 600 $BACKUP_DIR/PREVIOUS_COMMIT
+            # AUDIT ROUND-3 #2: jejak commit yang di-approve untuk run ini.
+            echo '$DEPLOY_SHA' > $BACKUP_DIR/APPROVED_COMMIT
+            chmod 600 $BACKUP_DIR/APPROVED_COMMIT"
           echo "PREV_COMMIT=$PREV" >> "$GITHUB_ENV"
           echo "Commit ter-deploy sebelumnya: $PREV"
 
@@ -96,13 +160,19 @@ jobs:
         run: |
           ssh deploy@${{ secrets.VPS_HOST }} "
             set -e
-            sudo mkdir -p $BACKUP_DIR
+            umask 077
+            # idempoten: pastikan kembali owner deploy + mode 750
+            sudo install -d -o $BACKUP_OWNER -g $BACKUP_OWNER -m 750 $BACKUP_DIR
             STAMP=\$(date +%Y%m%d-%H%M%S)
+            # pg_dump via stdout; penulisan file oleh user deploy pada
+            # direktori miliknya sendiri — tanpa sudo, tanpa tee.
             sudo -u postgres pg_dump $DB_NAME | gzip > \
               $BACKUP_DIR/pre-deploy-\$STAMP.sql.gz
-            # simpan nama backup terakhir agar rollback memakai file yang PASTI benar
-            echo \$STAMP | sudo tee $BACKUP_DIR/LAST_PRE_DEPLOY >/dev/null
-            sudo chmod 600 $BACKUP_DIR/pre-deploy-\$STAMP.sql.gz
+            chmod 600 $BACKUP_DIR/pre-deploy-\$STAMP.sql.gz
+            # simpan nama backup terakhir agar rollback memakai file
+            # yang PASTI benar (file milik deploy — tanpa sudo tee)
+            echo \$STAMP > $BACKUP_DIR/LAST_PRE_DEPLOY
+            chmod 600 $BACKUP_DIR/LAST_PRE_DEPLOY
             ls -1t $BACKUP_DIR/pre-deploy-*.sql.gz | head -3"
 
       - name: Normalisasi .env ke database utama (bekas rollback)
@@ -119,16 +189,43 @@ jobs:
               echo '.env sudah menunjuk database utama'
             fi"
 
-      - name: Deploy kode + sinkronkan dependensi venv
+      - name: Deploy kode pada commit yang di-approve (SHA eksplisit)
         run: |
           ssh deploy@${{ secrets.VPS_HOST }} "
             set -e
             cd $APP_DIR
             git fetch origin
-            git checkout ${{ github.ref_name }} 2>/dev/null || git checkout main
-            git reset --hard origin/\$(git rev-parse --abbrev-ref HEAD)
+            # AUDIT ROUND-3 #2: checkout --detach pada SHA yang sudah
+            # divalidasi guard — TIDAK ada `git reset --hard origin/...`
+            # yang bisa berubah setelah approval.
+            if ! git cat-file -e '$DEPLOY_SHA^{commit}' 2>/dev/null; then
+              echo '::error::SHA $DEPLOY_SHA tidak tersedia di remote — sinkronisasi repo VPS'
+              exit 1
+            fi
+            git checkout --detach '$DEPLOY_SHA'
+            git rev-parse HEAD
             source $VENV_DIR/bin/activate
             pip install -r backend/requirements.txt"
+
+      - name: Gate first-deploy — tolak bila database sudah berisi skema
+        run: |
+          # AUDIT ROUND-3 #3: "first deploy" pada database yang SUDAH
+          # ada isinya = status tidak konsisten (deploy manual lama
+          # tanpa catatan commit?). Hentikan SEBELUM perubahan apa pun;
+          # selaraskan catatan commit dulu atau kosongkan DB secara
+          # sadar (runbook provisioning §10).
+          if [ "$PREV_COMMIT" = "NONE" ]; then
+            ssh deploy@${{ secrets.VPS_HOST }} "
+              N=\$(sudo -u postgres psql -d $DB_NAME -tAc \
+                \"SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='customers'\" 2>/dev/null || echo 0)
+              if [ \"\$N\" != '0' ]; then
+                echo '::error::FIRST DEPLOY tetapi database $DB_NAME sudah berisi skema — hentikan sebelum perubahan; selaraskan $BACKUP_DIR/PREVIOUS_COMMIT atau kosongkan DB secara sadar (runbook §10)'
+                exit 1
+              fi
+              echo 'first deploy pada database kosong — aman untuk migrasi'"
+          else
+            echo "bukan first deploy (sebelumnya: $PREV_COMMIT) — gate dilewati"
+          fi
 
       - name: Migrasi PostgreSQL (jalankan sebagai role owner)
         run: |
@@ -141,53 +238,28 @@ jobs:
             export DATABASE_URL='${{ secrets.VPS_DB_ADMIN_URL }}'
             python -c \"import db, config; c=config.load_config(); conn=db.connect_postgres(c.db_url); print('migrasi:', db.migrate(conn)); conn.close()\""
 
-      - name: Restart service + health check
+      - name: Restart service + health check (readiness DB + skema)
         run: |
           ssh deploy@${{ secrets.VPS_HOST }} "
             set -e
             sudo systemctl restart $SERVICE
             for i in 1 2 3 4 5 6; do
               code=\$(curl -s -o /dev/null -w '%{http_code}' $HEALTH_URL || true)
-              [ \"\$code\" = \"200\" ] && echo 'health OK' && exit 0
+              [ \"\$code\" = \"200\" ] && echo 'health OK (DB + skema siap)' && exit 0
               echo \"percobaan \$i: HTTP \$code\"; sleep 5
             done
             echo 'health check GAGAL — memicu rollback'
             exit 1"
 
-      - name: Rollback bila deployment gagal (kode commit lama + DB pra-deploy)
+      - name: Rollback bila deployment gagal (kode lama + DB pra-deploy)
         if: failure()
         run: |
+          # AUDIT ROUND-3 #3: logika rollback dalam backend/deploy/
+          # rollback.sh (dites pytest — tests/test_rollback_script.py),
+          # dikirim ke VPS via stdin + parameter env eksplisit.
           ssh deploy@${{ secrets.VPS_HOST }} "
             set -e
-            cd $APP_DIR
-            # 1) kode kembali ke commit TER-DEPLOY sebelumnya (bukan main!):
-            #    pasangan versi kompatibel dengan dump di langkah 2.
-            PREV=\$(sudo cat $BACKUP_DIR/PREVIOUS_COMMIT 2>/dev/null || true)
-            if [ -n \"\$PREV\" ] && [ \"\$PREV\" != 'NONE' ]; then
-              git fetch origin
-              git checkout --detach \"\$PREV\"
-              echo \"kode dikembalikan ke commit ter-deploy sebelumnya: \$PREV\"
-            else
-              echo '::warning::commit ter-deploy sebelumnya tidak tercatat — kode TIDAK dipindah; hanya DB di-restore. Intervensi manual mungkin diperlukan.'
-            fi
-            source $VENV_DIR/bin/activate
-            pip install -r backend/requirements.txt
-            # 2) database: dump pra-deploy (skema SEBELUM migrasi kode baru
-            #    — cocok dengan kode lama) di-restore ke ${RESTORE_DB_NAME}.
-            LATEST=\$(cat $BACKUP_DIR/LAST_PRE_DEPLOY)
-            DUMP=$BACKUP_DIR/pre-deploy-\$LATEST.sql.gz
-            test -f \"\$DUMP\" || { echo 'dump tidak ditemukan'; exit 1; }
-            sudo -u postgres dropdb --if-exists $RESTORE_DB_NAME
-            sudo -u postgres createdb $RESTORE_DB_NAME
-            gunzip -c \"\$DUMP\" | sudo -u postgres psql -q $RESTORE_DB_NAME
-            # 3) service BENAR-BENAR diarahkan ke database restore:
-            #    DATABASE_URL di EnvironmentFile systemd diganti nama DB.
-            sudo sed -i -E 's#(postgresql://[^/]+)/${DB_NAME}([?[:space:]]|$)#\1/${RESTORE_DB_NAME}\2#' $ENV_FILE
-            sudo systemctl restart $SERVICE
-            # 4) health check ulang SETELAH service membaca DB restore
-            for i in 1 2 3 4 5 6; do
-              code=\$(curl -s -o /dev/null -w '%{http_code}' $HEALTH_URL || true)
-              [ \"\$code\" = \"200\" ] && echo \"ROLLBACK OK (kode \$PREV + DB $RESTORE_DB_NAME dari \$DUMP)\" && exit 0
-              echo \"rollback percobaan \$i: HTTP \$code\"; sleep 5
-            done
-            echo 'ROLLBACK health check GAGAL — intervensi manual wajib'; exit 1"
+            APP_DIR='$APP_DIR' VENV_DIR='$VENV_DIR' SERVICE='$SERVICE' \
+            ENV_FILE='$ENV_FILE' BACKUP_DIR='$BACKUP_DIR' DB_NAME='$DB_NAME' \
+            RESTORE_DB_NAME='$RESTORE_DB_NAME' HEALTH_URL='$HEALTH_URL' \
+            bash -s" < backend/deploy/rollback.sh
