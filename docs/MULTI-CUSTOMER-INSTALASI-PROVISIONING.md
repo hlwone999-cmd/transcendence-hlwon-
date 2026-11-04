@@ -124,6 +124,30 @@ curl -sS --max-time 3 127.0.0.1:18812 >/dev/null && echo port-up
 > artefak unit/wrapper benar, probe TCP nyata, health check jujur.
 > Live test wajib dijalankan admin di VPS sebelum produksi.
 
+### 6.1 Health backend = readiness (audit round-3 #4)
+
+```bash
+curl -s http://127.0.0.1:8000/api/v1/health
+# 200: {"ok":true, "database":{"ok":true,"engine":"postgresql"},
+#       "mt5_terminals":{"reported":N, ...}}
+# 503: database tidak terjangkau ATAU skema minimum tidak lengkap
+#      (missing_tables tercantum).
+```
+
+- `/api/v1/health` sekarang READINESS: 200 hanya bila koneksi DB hidup
+  DAN 8 tabel inti ada (customers, users, auth_tokens, mt5_accounts,
+  mt5_credentials, mt5_terminals, mt5_deals, mt5_orders).
+- Status terminal MT5 DILAPORKAN TERPISAH (`mt5_terminals`) dan TIDAK
+  pernah menentukan 200/503 — tidak ada kewajiban MT5 live untuk
+  health backend.
+- Probe terminal per customer (TCP + handshake RPyC, opsi `?deep=1`
+  menambah terminal_info read-only):
+
+```bash
+curl -s -H "X-API-Token: $API_TOKEN" \
+  http://127.0.0.1:8000/api/v1/admin/health/terminals
+```
+
 ## 7. Service backend (path VPS aktual)
 
 ```ini
@@ -155,6 +179,67 @@ WantedBy=multi-user.target
 
 ```bash
 curl -s http://127.0.0.1:8000/api/v1/health
+# health sekarang readiness (lihat §6.1): 200 = DB + skema siap.
 # register customer pertama, login, bind akun, sync manual — lihat
 # docs/HASIL-TEST-MULTI-CUSTOMER.md untuk daftar perintah lengkap.
 ```
+
+## 10. Deploy, backup & rollback (audit round-3 #1–#3)
+
+### 10.1 Direktori backup — MILIK user deploy (temuan #1)
+
+`/var/backups/transcendence` HARUS dimiliki user `deploy` (user SSH
+workflow), bukan root — penulisan dump `gzip > $BACKUP_DIR/...`
+dijalankan sebagai deploy:
+
+```bash
+sudo install -d -o deploy -g deploy -m 750 /var/backups/transcendence
+ls -ld /var/backups/transcendence   # drwxr-x--- deploy deploy
+```
+
+- `install -d` idempoten: workflow menjalankannya SEBELUM setiap
+  penulisan, sehingga owner/mode yang menyimpang dikoreksi otomatis.
+- Dump pra-deploy: `chmod 600` (umask 077), berisi data transaksi.
+- `PREVIOUS_COMMIT`, `APPROVED_COMMIT`, `LAST_PRE_DEPLOY` ditulis user
+  deploy TANPA `sudo tee`.
+
+### 10.2 Commit produksi — SHA eksplisit (temuan #2)
+
+- Deploy produksi HANYA dipicu `workflow_dispatch` dari branch `main`
+  (env `PROD_BRANCH`; guard menolak ref lain).
+- Commit yang di-deploy = `deploy_sha` (full 40-hex) atau SHA run.
+  Guard memvalidasi SHA adalah bagian SEJARAH `main`
+  (`git merge-base --is-ancestor`). Setelah approval GitHub Environment,
+  SHA TIDAK bergerak — VPS di-checkout `--detach` pada SHA itu;
+  `git reset --hard origin/<branch>` TIDAK pernah dipakai.
+- SHA ter-approve dicatat ke `$BACKUP_DIR/APPROVED_COMMIT` (jejak audit).
+
+### 10.3 Rollback (temuan #3)
+
+Logika rollback ada di `backend/deploy/rollback.sh` (dikirim ke VPS
+oleh workflow saat deploy gagal; diuji pytest `test_rollback_script.py`
+dengan stub systemctl/dropdb/psql):
+
+1. **Rollback normal** (commit ter-deploy sebelumnya tercatat di
+   `PREVIOUS_COMMIT`): kode → `git checkout --detach $PREVIOUS_COMMIT`,
+   database pra-deploy → `transcendence_restore`, `.env` → restore DB,
+   restart, health check. Pasangan (kode lama + DB pra-deploy) selalu
+   kompatibel karena dump diambil SEBELUM migrasi.
+2. **First deploy** (`PREVIOUS_COMMIT=NONE`) — TIDAK ada "restore DB
+   lalu biarkan kode baru jalan dengan skema lama":
+   - service DIHENTIKAN (`systemctl stop`);
+   - DATABASE UTAMA dikembalikan ke kondisi pra-deploy dari dump;
+   - `.env` tidak diubah; service TIDAK di-restart — sistem kembali
+     ke kondisi pra-deploy, first-deploy di-retry MANUAL:
+     ```bash
+     sudo systemctl stop transcendence-backend
+     sudo -u postgres dropdb --if-exists transcendence
+     sudo -u postgres createdb transcendence
+     gunzip -c /var/backups/transcendence/pre-deploy-<STAMP>.sql.gz \
+       | sudo -u postgres psql -q transcendence
+     # perbaiki penyebab kegagalan, lalu jalankan ulang deploy
+     ```
+   - Gate SEBELUM migrasi: bila "first deploy" tetapi database sudah
+     berisi skema (`customers` ada), deploy DIBATALKAN tanpa perubahan
+     — selaraskan `$BACKUP_DIR/PREVIOUS_COMMIT` dulu atau kosongkan DB
+     secara sadar.
