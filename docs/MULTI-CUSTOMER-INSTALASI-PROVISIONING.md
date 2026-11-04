@@ -90,9 +90,14 @@ cd /var/lib/transcendence/terminals/C001/terminal
 WINEPREFIX=../wine-prefix wine mt5setup.exe     # atau salin terminal64.exe portable
 # Pasang python di Wine + MetaTrader5 + mt5linux, lalu sediakan mt5server:
 #   WINEPREFIX=../wine-prefix wine python.exe -m pip install mt5linux MetaTrader5
-# Default wrapper memakai $TERMINAL_DIR/mt5server.exe dengan argumen
-#   <host> <port>  (mengikuti brief). Bila bridge Anda berbeda, override:
-#   Environment=MT5SERVER_BIN="C:\python\python.exe -m mt5linux 127.0.0.1 18812"
+# CLI resmi mt5server (rpyc-classic): SWITCH --host/--port (BUKAN
+# posisional), host SELALU 127.0.0.1:
+#   wine mt5server.exe --host 127.0.0.1 --port 18812
+# Wrapper (run-terminal.sh) sudah menjalankan bentuk ini secara otomatis:
+#   exec "$WINE_BIN" $SERVER_BIN --host "$RPYC_HOST" --port "$RPYC_PORT"
+# Override MT5SERVER_BIN hanya bila bridge Anda lain, mis.:
+#   Environment=MT5SERVER_BIN="C:\python\python.exe -m mt5linux"
+# (argumen --host/--port tetap ditambahkan wrapper — CLI-nya sama.)
 # terminal64.exe hanya membaca — tidak ada EA/auto-trading di dalamnya.
 ```
 

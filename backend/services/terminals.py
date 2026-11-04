@@ -17,10 +17,12 @@ Mode provisioning:
                  Wine/MT5, sehingga test berjalan di mana saja.
 
 Health check: health_check() melakukan koneksi TCP NYATA ke 127.0.0.1:
-<port> (server RPyC), opsional deep (mode real) membuka sesi RPyC
-read-only via provider dan memanggil terminal_info(). Status yang
-dilaporkan TIDAK PERNAH mengklaim "live MT5 berhasil" tanpa koneksi
-sungguhan — tanpa Wine/terminal, hasilnya reachable=False.
+<port> (server RPyC), lalu — bila paket rpyc tersedia — HANDSHAKE RPyC
+nyata (probe_rpyc_session; TCP probe saja TIDAK dianggap cukup, audit
+round-2 #1), opsional deep (mode real) membuka sesi RPyC read-only via
+provider dan memanggil terminal_info(). Status yang dilaporkan TIDAK
+PERNAH mengklaim "live MT5 berhasil" tanpa koneksi sungguhan — tanpa
+Wine/terminal, hasilnya reachable=False.
 """
 from __future__ import annotations
 
@@ -38,6 +40,37 @@ log = logging.getLogger(__name__)
 
 RPYC_HOST = "127.0.0.1"   # WAJIB localhost — RPyC tidak punya auth kuat
 
+# ---------------------------------------------------------------------
+# CLI RESMI server RPyC (audit round-2 #1).
+#
+# Binary mt5server.exe (rilis repo mt5linux) adalah server RPyC klasik —
+# entrypoint yang sama dengan `python -m mt5linux` (rpyc_classic):
+#
+#     mt5server.exe --host <host> --port <port>
+#
+# - Argumen adalah SWITCH (--host / -p --port), BUKAN posisional.
+#   Bentuk posisional `mt5server.exe <host> <port>` TIDAK pernah
+#   diterima CLI resmi (plumbum menolak positional tanpa handler).
+# - Default --port 18812; default --host "" -> 127.0.0.1 (localhost).
+#   Wrapper tetap mengirim --host 127.0.0.1 SECARA EKSPLISIT agar bind
+#   localhost dijamin terlepas dari default versi rpyc apa pun.
+# - Sumber: rpyc/cli/rpyc_classic.py (SwitchAttr ["-p","--port"],
+#   SwitchAttr ["--host"]), mt5linux/__main__.py (0.2.4 & 1.1.1),
+#   README mt5linux ("wine mt5server.exe [-p/--port <port>]"), dan
+#   docs/MT5-UBUNTU-NO-DOCKER.md §4/§8 di repo ini.
+# ---------------------------------------------------------------------
+MT5SERVER_SWITCHES = ("--host", "--port")
+
+
+def mt5server_command(server_bin: str, host: str, port: int) -> list[str]:
+    """Argv resmi peluncuran server RPyC (sumber tunggu wrapper + test).
+
+    Contoh: mt5server_command('mt5server.exe', '127.0.0.1', 18813)
+         -> ['mt5server.exe', '--host', '127.0.0.1', '--port', '18813']
+    """
+    return [str(server_bin), "--host", str(host), "--port", str(int(port))]
+
+
 SYSTEMD_UNIT_TEMPLATE = """# Unit systemd per customer — Transcendence MT5 Terminal + RPyC mt5server (read-only)
 # Pasang:  sudo cp {unit_path} /etc/systemd/system/{service_name}.service
 #          sudo systemctl daemon-reload && sudo systemctl enable --now {service_name}
@@ -48,8 +81,10 @@ SYSTEMD_UNIT_TEMPLATE = """# Unit systemd per customer — Transcendence MT5 Ter
 #          curl -sS --max-time 3 127.0.0.1:{rpyc_port} >/dev/null && echo port-up
 #
 # ExecStart memanggil wrapper yang meluncurkan (1) terminal64.exe di
-# background dan (2) server RPyC (mt5server) di FOREGROUND — jalur data
-# yang dipakai MT5LinuxProvider — sehingga systemd mengawasi keduanya:
+# background dan (2) server RPyC (mt5server) di FOREGROUND dengan CLI
+# resmi rpyc-classic: `mt5server --host 127.0.0.1 --port {rpyc_port}`
+# (switch --host/--port, BUKAN argumen posisional) — jalur data yang
+# dipakai MT5LinuxProvider — sehingga systemd mengawasi keduanya:
 # bila server RPyC mati, unit di-restart (terminal ikut di-launch ulang).
 [Unit]
 Description=Transcendence MT5 Terminal + RPyC ({code}, localhost:{rpyc_port})
@@ -79,11 +114,13 @@ RUN_TERMINAL_TEMPLATE = """#!/bin/sh
 # 1) terminal64.exe diluncurkan di background (Wine, prefix terisolasi).
 # 2) server RPyC (mt5server) berjalan di FOREGROUND dan HANYA bind
 #    127.0.0.1:{port} — systemd mengawal proses ini.
-# Ganti binary server via env MT5SERVER_BIN bila instalasi Wine Anda
-# memakai bridge lain, mis.:
-#   MT5SERVER_BIN="C:\\\\python\\\\python.exe -m mt5linux {host} {port}"
-# (mt5linux menyediakan server RPyC lewat `python -m mt5linux <host> <port>`
-# di dalam Wine; default di sini mengikuti nama brief: mt5server.exe.)
+# CLI resmi mt5server (rpyc-classic): SWITCH --host/--port, BUKAN
+# posisional — lihat mt5server_command() di services/terminals.py.
+# Ganti binary server via env MT5SERVER_BIN bila memakai python di Wine
+# — CLI-nya SAMA (`python -m mt5linux` = rpyc_classic):
+#   MT5SERVER_BIN="C:\\\\python\\\\python.exe -m mt5linux"
+# (argumen --host/--port ditambahkan wrapper di bawah; jangan menulis
+#  argumen posisional "<host> <port>" — tidak diterima CLI resmi.)
 set -eu
 export WINEPREFIX="{wine_prefix}"
 export WINEDEBUG=-all
@@ -100,8 +137,8 @@ fi
 
 # --- (2) server RPyC (foreground; dikelola systemd) ---
 SERVER_BIN="${{MT5SERVER_BIN:-$TERMINAL_DIR/mt5server.exe}}"
-# shellcheck disable=SC2086
-exec "$WINE_BIN" $SERVER_BIN "$RPYC_HOST" "$RPYC_PORT"
+# shellcheck disable=SC2086  -- MT5SERVER_BIN boleh berisi argumennya sendiri
+exec "$WINE_BIN" $SERVER_BIN --host "$RPYC_HOST" --port "$RPYC_PORT"
 """
 
 STOP_TERMINAL_TEMPLATE = """#!/bin/sh
@@ -124,16 +161,50 @@ class TerminalError(Exception):
 
 def probe_rpyc_port(port: int, host: str = RPYC_HOST,
                     timeout: float = 2.0) -> bool:
-    """Health check transport NYATA: TCP connect ke server RPyC.
+    """Probe transport: TCP connect ke 127.0.0.1:<port> (socket nyata).
 
-    Bukan simulasi — membuka socket sungguhan ke 127.0.0.1:<port>.
-    Server RPyC yang hidup menerima koneksi ini (baca selamat datang
-    RPyC tidak diperlukan untuk probe port).
+    Hanya membuktikan port terbuka — TIDAK membuktikan server RPyC sah.
+    Untuk kebenaran penuh gunakan probe_rpyc_session() (audit round-2 #1:
+    "TCP probe saja tidak cukup").
     """
     try:
         with socket.create_connection((host, int(port)), timeout=timeout):
             return True
     except OSError:
+        return False
+
+
+def probe_rpyc_session(port: int, host: str = RPYC_HOST,
+                       timeout: float = 2.0) -> bool | None:
+    """Handshake RPyC NYATA (bukan sekadar TCP probe).
+
+    - True  : sesi RPyC nyata terbuka (handshake servis berjalan) lalu
+              ditutup rapi — server RPyC yang SAH di port ini.
+    - False : port terbuka tapi bukan server RPyC (handshake gagal),
+              atau koneksi gagal.
+    - None  : paket rpyc tidak terpasang di backend (jalur terbatas:
+              hasil TCP probe tidak pernah diperlakukan sebagai bukti
+              server RPyC — field rpyc_handshake=None berarti tak terukur).
+
+    Host selalu loopback: connect localhost sukses/refused seketika,
+    tidak ada blackhole jaringan; rpyc.connect tanpa arg timeout pun
+    berbatas wajar di 127.0.0.1.
+    """
+    try:
+        import rpyc  # noqa: PLC0415 — lazy: backend tetap jalan tanpa rpyc
+    except ImportError:
+        return None
+    try:
+        conn = rpyc.connect(host, int(port),
+                            config={"sync_request_timeout":
+                                    max(float(timeout), 5.0)})
+        try:
+            # paksa satu round-trip nyata agar handshake benar-benar terjadi
+            _ = conn.root
+        finally:
+            conn.close()
+        return True
+    except Exception:  # noqa: BLE001 — probe tak boleh meledak
         return False
 
 
@@ -292,8 +363,14 @@ class TerminalRegistry:
                     "reachable": False, "checked_at": utcnow_iso()}
         port = int(row["rpyc_port"])
         reachable = probe_rpyc_port(port, timeout=timeout)
+        # Audit round-2 #1: TCP probe SAJA tidak cukup — bila rpyc
+        # tersedia, lakukan handshake RPyC nyata sebelum menyebut
+        # server RPyC hidup. None = rpyc tidak terpasang (tak terukur).
+        handshake = probe_rpyc_session(port, timeout=timeout) \
+            if reachable else False
         detail: dict = {"customer_id": customer_id, "port": port,
                         "host": RPYC_HOST, "reachable": reachable,
+                        "rpyc_handshake": handshake,
                         "checked_at": utcnow_iso(),
                         "mode": self._cfg.terminal_provision_mode}
         if reachable and deep and self._cfg.terminal_provision_mode == "real":
