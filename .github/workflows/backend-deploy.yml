@@ -1,18 +1,32 @@
 # Deployment backend — HANYA dengan approval manual (brief §10).
-# Urutan wajib: backup DB -> deploy kode -> migrasi -> health check ->
-# rollback bila gagal (kode + database + service DIARAHKAN ke restore).
+# Urutan wajib: catat commit lama -> backup DB -> deploy kode -> migrasi
+# -> health check -> rollback bila gagal (kode KE commit ter-deploy
+# sebelumnya + database KE dump pra-deploy = pasangan versi kompatibel).
 #
-# Perbaikan audit #3: path mengikuti VPS aktual
-#   - aplikasi : /opt/transcendence-hlwon-
-#   - venv     : /opt/transcendence-hlwon-/backend/.venv
-#   - service  : transcendence-backend (systemd)
-# Rollback TIDAK lagi sekadar me-restore ke database transcendence_restore
-# tanpa mengalihkan service — EnvironmentFile systemd di-update sehingga
-# service benar-benar membaca database restore, lalu health check ulang.
+# Perbaikan audit round-2 #2:
+#   1. `environment: production` pindah dari level workflow ke JOB deploy
+#      — GitHub Environment protection rules (required reviewer) hanya
+#      dievaluasi pada job yang mendeklarasikan environment; di level
+#      workflow approval TIDAK valid.
+#   2. ENV_FILE disatukan dengan dokumentasi systemd:
+#      EnvironmentFile=/opt/transcendence-hlwon-/backend/.env
+#      (docs/MULTI-CUSTOMER-INSTALASI-PROVISIONING.md §7) — bukan lagi
+#      /etc/default/transcendence-backend. Satu file konfigurasi saja.
+#   3. Rollback TIDAK lagi `git reset --hard origin/main`: commit yang
+#      TER-DEPLOY sebelumnya dicatat di $BACKUP_DIR/PREVIOUS_COMMIT
+#      sebelum deploy, dan rollback mengembalikan kode ke commit itu
+#      DIPASANGKAN dengan dump database pra-deploy (dump diambil SEBELUM
+#      migrasi kode baru, sehingga skema DB cocok dengan kode lama —
+#      pasangan versi yang kompatibel, bukan main yang belum tentu
+#      punya migrasi PostgreSQL).
+#   4. Langkah normalisasi .env di awal deploy: bila deploy sebelumnya
+#      rollback ke database restore, .env dikembalikan ke $DB_NAME
+#      sebelum kode baru dinyalakan.
 #
 # Tidak ada kredensial di repo: semua via GitHub Environment secrets.
-# TIDAK pernah dijalankan otomatis dari branch fitur. Workflow ini
-# TIDAK dijalankan oleh pipeline apa pun di repo (workflow_dispatch saja).
+# Workflow ini workflow_dispatch SAJA — tidak pernah dipicu push/PR —
+# dan TIDAK dijalankan oleh pipeline apa pun (perbaikan TIDAK menjalankan
+# deployment ini; hanya admin dengan approval yang boleh).
 name: Backend Deploy
 
 on:
@@ -27,15 +41,13 @@ env:
   APP_DIR: /opt/transcendence-hlwon-
   VENV_DIR: /opt/transcendence-hlwon-/backend/.venv
   SERVICE: transcendence-backend
-  ENV_FILE: /etc/default/transcendence-backend
+  # SATU sumber konfigurasi: sama persis dengan EnvironmentFile pada
+  # unit systemd (docs/MULTI-CUSTOMER-INSTALASI-PROVISIONING.md §7).
+  ENV_FILE: /opt/transcendence-hlwon-/backend/.env
   BACKUP_DIR: /var/backups/transcendence
   DB_NAME: transcendence
   RESTORE_DB_NAME: transcendence_restore
   HEALTH_URL: http://127.0.0.1:8000/api/v1/health
-
-environment:
-  name: production          # environment dengan required reviewer di GitHub
-  url: https://jurnal.domain.com
 
 jobs:
   guard:
@@ -50,6 +62,11 @@ jobs:
   deploy:
     needs: guard
     runs-on: ubuntu-latest
+    # environment di JOB (bukan workflow): required reviewer GitHub
+    # Environment dievaluasi di sini — approval valid sebelum deploy.
+    environment:
+      name: production
+      url: https://jurnal.domain.com
     steps:
       - uses: actions/checkout@v4
 
@@ -59,6 +76,21 @@ jobs:
           echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Catat commit ter-deploy sebelumnya (target rollback)
+        run: |
+          PREV=$(ssh deploy@${{ secrets.VPS_HOST }} \
+            "cd $APP_DIR 2>/dev/null && git rev-parse HEAD 2>/dev/null || true")
+          if [ -z "$PREV" ]; then
+            echo "::warning::Tidak ada commit ter-deploy sebelumnya (deploy pertama?) — rollback kode tidak memilih commit lama, hanya DB restore."
+            PREV="NONE"
+          fi
+          ssh deploy@${{ secrets.VPS_HOST }} "
+            sudo mkdir -p $BACKUP_DIR
+            echo '$PREV' | sudo tee $BACKUP_DIR/PREVIOUS_COMMIT >/dev/null
+            sudo chmod 600 $BACKUP_DIR/PREVIOUS_COMMIT"
+          echo "PREV_COMMIT=$PREV" >> "$GITHUB_ENV"
+          echo "Commit ter-deploy sebelumnya: $PREV"
 
       - name: Backup database sebelum migration (pg_dump)
         run: |
@@ -72,6 +104,20 @@ jobs:
             echo \$STAMP | sudo tee $BACKUP_DIR/LAST_PRE_DEPLOY >/dev/null
             sudo chmod 600 $BACKUP_DIR/pre-deploy-\$STAMP.sql.gz
             ls -1t $BACKUP_DIR/pre-deploy-*.sql.gz | head -3"
+
+      - name: Normalisasi .env ke database utama (bekas rollback)
+        run: |
+          # Bila deploy sebelumnya gagal dan service sempat diarahkan ke
+          # ${RESTORE_DB_NAME}, kembalikan DATABASE_URL ke $DB_NAME agar
+          # kode baru tidak jalan di atas database restore lama.
+          ssh deploy@${{ secrets.VPS_HOST }} "
+            set -e
+            if sudo grep -q '/${RESTORE_DB_NAME}' $ENV_FILE; then
+              sudo sed -i -E 's#(postgresql://[^/]+)/${RESTORE_DB_NAME}([?[:space:]]|$)#\1/${DB_NAME}\2#' $ENV_FILE
+              echo '.env dinormalisasi ke database utama'
+            else
+              echo '.env sudah menunjuk database utama'
+            fi"
 
       - name: Deploy kode + sinkronkan dependensi venv
         run: |
@@ -108,17 +154,26 @@ jobs:
             echo 'health check GAGAL — memicu rollback'
             exit 1"
 
-      - name: Rollback bila deployment gagal (kode + DB + service)
+      - name: Rollback bila deployment gagal (kode commit lama + DB pra-deploy)
         if: failure()
         run: |
           ssh deploy@${{ secrets.VPS_HOST }} "
             set -e
             cd $APP_DIR
-            # 1) kode kembali ke main
-            git fetch origin && git reset --hard origin/main
+            # 1) kode kembali ke commit TER-DEPLOY sebelumnya (bukan main!):
+            #    pasangan versi kompatibel dengan dump di langkah 2.
+            PREV=\$(sudo cat $BACKUP_DIR/PREVIOUS_COMMIT 2>/dev/null || true)
+            if [ -n \"\$PREV\" ] && [ \"\$PREV\" != 'NONE' ]; then
+              git fetch origin
+              git checkout --detach \"\$PREV\"
+              echo \"kode dikembalikan ke commit ter-deploy sebelumnya: \$PREV\"
+            else
+              echo '::warning::commit ter-deploy sebelumnya tidak tercatat — kode TIDAK dipindah; hanya DB di-restore. Intervensi manual mungkin diperlukan.'
+            fi
             source $VENV_DIR/bin/activate
             pip install -r backend/requirements.txt
-            # 2) database: restore backup terakhir ke ${RESTORE_DB_NAME}
+            # 2) database: dump pra-deploy (skema SEBELUM migrasi kode baru
+            #    — cocok dengan kode lama) di-restore ke ${RESTORE_DB_NAME}.
             LATEST=\$(cat $BACKUP_DIR/LAST_PRE_DEPLOY)
             DUMP=$BACKUP_DIR/pre-deploy-\$LATEST.sql.gz
             test -f \"\$DUMP\" || { echo 'dump tidak ditemukan'; exit 1; }
@@ -132,7 +187,7 @@ jobs:
             # 4) health check ulang SETELAH service membaca DB restore
             for i in 1 2 3 4 5 6; do
               code=\$(curl -s -o /dev/null -w '%{http_code}' $HEALTH_URL || true)
-              [ \"\$code\" = \"200\" ] && echo \"ROLLBACK OK (service -> $RESTORE_DB_NAME) dari \$DUMP\" && exit 0
+              [ \"\$code\" = \"200\" ] && echo \"ROLLBACK OK (kode \$PREV + DB $RESTORE_DB_NAME dari \$DUMP)\" && exit 0
               echo \"rollback percobaan \$i: HTTP \$code\"; sleep 5
             done
             echo 'ROLLBACK health check GAGAL — intervensi manual wajib'; exit 1"
