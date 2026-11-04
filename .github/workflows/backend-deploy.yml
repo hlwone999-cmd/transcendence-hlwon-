@@ -1,7 +1,18 @@
 # Deployment backend — HANYA dengan approval manual (brief §10).
-# Urutan wajib: backup DB -> migrasi -> health check -> rollback bila gagal.
+# Urutan wajib: backup DB -> deploy kode -> migrasi -> health check ->
+# rollback bila gagal (kode + database + service DIARAHKAN ke restore).
+#
+# Perbaikan audit #3: path mengikuti VPS aktual
+#   - aplikasi : /opt/transcendence-hlwon-
+#   - venv     : /opt/transcendence-hlwon-/backend/.venv
+#   - service  : transcendence-backend (systemd)
+# Rollback TIDAK lagi sekadar me-restore ke database transcendence_restore
+# tanpa mengalihkan service — EnvironmentFile systemd di-update sehingga
+# service benar-benar membaca database restore, lalu health check ulang.
+#
 # Tidak ada kredensial di repo: semua via GitHub Environment secrets.
-# TIDAK pernah dijalankan otomatis dari branch fitur.
+# TIDAK pernah dijalankan otomatis dari branch fitur. Workflow ini
+# TIDAK dijalankan oleh pipeline apa pun di repo (workflow_dispatch saja).
 name: Backend Deploy
 
 on:
@@ -11,6 +22,16 @@ on:
         description: 'Ketik DEPLOY untuk konfirmasi'
         required: true
         default: ''
+
+env:
+  APP_DIR: /opt/transcendence-hlwon-
+  VENV_DIR: /opt/transcendence-hlwon-/backend/.venv
+  SERVICE: transcendence-backend
+  ENV_FILE: /etc/default/transcendence-backend
+  BACKUP_DIR: /var/backups/transcendence
+  DB_NAME: transcendence
+  RESTORE_DB_NAME: transcendence_restore
+  HEALTH_URL: http://127.0.0.1:8000/api/v1/health
 
 environment:
   name: production          # environment dengan required reviewer di GitHub
@@ -42,42 +63,76 @@ jobs:
       - name: Backup database sebelum migration (pg_dump)
         run: |
           ssh deploy@${{ secrets.VPS_HOST }} "
-            sudo -u postgres pg_dump transcendence | gzip > \
-              /var/backups/transcendence/pre-deploy-\$(date +%Y%m%d-%H%M%S).sql.gz
-            ls -1t /var/backups/transcendence/pre-deploy-*.sql.gz | head -3"
+            set -e
+            sudo mkdir -p $BACKUP_DIR
+            STAMP=\$(date +%Y%m%d-%H%M%S)
+            sudo -u postgres pg_dump $DB_NAME | gzip > \
+              $BACKUP_DIR/pre-deploy-\$STAMP.sql.gz
+            # simpan nama backup terakhir agar rollback memakai file yang PASTI benar
+            echo \$STAMP | sudo tee $BACKUP_DIR/LAST_PRE_DEPLOY >/dev/null
+            sudo chmod 600 $BACKUP_DIR/pre-deploy-\$STAMP.sql.gz
+            ls -1t $BACKUP_DIR/pre-deploy-*.sql.gz | head -3"
 
-      - name: Deploy kode + migrasi PostgreSQL
+      - name: Deploy kode + sinkronkan dependensi venv
         run: |
           ssh deploy@${{ secrets.VPS_HOST }} "
             set -e
-            cd /opt/transcendence
-            git fetch origin && git checkout ${{ github.ref_name }} || git checkout main
-            cd backend
-            source /opt/transcendence/venv/bin/activate
-            python -c \"import db, config; c=config.load_config(); conn=db.get_db(c); print('migrasi:', db.migrate(conn))\"
-            sudo systemctl restart transcendence-backend"
+            cd $APP_DIR
+            git fetch origin
+            git checkout ${{ github.ref_name }} 2>/dev/null || git checkout main
+            git reset --hard origin/\$(git rev-parse --abbrev-ref HEAD)
+            source $VENV_DIR/bin/activate
+            pip install -r backend/requirements.txt"
 
-      - name: Health check setelah deployment
+      - name: Migrasi PostgreSQL (jalankan sebagai role owner)
         run: |
-          for i in 1 2 3 4 5; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' \
-              http://127.0.0.1:8000/api/v1/health || true)
-            [ "$code" = "200" ] && echo "health OK" && exit 0
-            echo "percobaan $i: HTTP $code"; sleep 5
-          done
-          echo "health check GAGAL — memicu rollback"
-          exit 1
+          ssh deploy@${{ secrets.VPS_HOST }} "
+            set -e
+            source $VENV_DIR/bin/activate
+            cd $APP_DIR/backend
+            # Migrasi butuh hak DDL (CREATE TABLE/ROLE): pakai DSN admin
+            # dari secret, BUKAN DSN aplikasi (role non-owner transcendence_app).
+            export DATABASE_URL='${{ secrets.VPS_DB_ADMIN_URL }}'
+            python -c \"import db, config; c=config.load_config(); conn=db.connect_postgres(c.db_url); print('migrasi:', db.migrate(conn)); conn.close()\""
 
-      - name: Rollback bila deployment gagal
+      - name: Restart service + health check
+        run: |
+          ssh deploy@${{ secrets.VPS_HOST }} "
+            set -e
+            sudo systemctl restart $SERVICE
+            for i in 1 2 3 4 5 6; do
+              code=\$(curl -s -o /dev/null -w '%{http_code}' $HEALTH_URL || true)
+              [ \"\$code\" = \"200\" ] && echo 'health OK' && exit 0
+              echo \"percobaan \$i: HTTP \$code\"; sleep 5
+            done
+            echo 'health check GAGAL — memicu rollback'
+            exit 1"
+
+      - name: Rollback bila deployment gagal (kode + DB + service)
         if: failure()
         run: |
           ssh deploy@${{ secrets.VPS_HOST }} "
             set -e
-            cd /opt/transcendence
-            git reset --hard origin/main
-            LATEST=\$(ls -1t /var/backups/transcendence/pre-deploy-*.sql.gz | head -1)
-            sudo -u postgres dropdb --if-exists transcendence_restore
-            sudo -u postgres createdb transcendence_restore
-            gunzip -c \"\$LATEST\" | sudo -u postgres psql transcendence_restore
-            sudo systemctl restart transcendence-backend
-            echo 'ROLLBACK selesai dari backup:' \$LATEST"
+            cd $APP_DIR
+            # 1) kode kembali ke main
+            git fetch origin && git reset --hard origin/main
+            source $VENV_DIR/bin/activate
+            pip install -r backend/requirements.txt
+            # 2) database: restore backup terakhir ke ${RESTORE_DB_NAME}
+            LATEST=\$(cat $BACKUP_DIR/LAST_PRE_DEPLOY)
+            DUMP=$BACKUP_DIR/pre-deploy-\$LATEST.sql.gz
+            test -f \"\$DUMP\" || { echo 'dump tidak ditemukan'; exit 1; }
+            sudo -u postgres dropdb --if-exists $RESTORE_DB_NAME
+            sudo -u postgres createdb $RESTORE_DB_NAME
+            gunzip -c \"\$DUMP\" | sudo -u postgres psql -q $RESTORE_DB_NAME
+            # 3) service BENAR-BENAR diarahkan ke database restore:
+            #    DATABASE_URL di EnvironmentFile systemd diganti nama DB.
+            sudo sed -i -E 's#(postgresql://[^/]+)/${DB_NAME}([?[:space:]]|$)#\1/${RESTORE_DB_NAME}\2#' $ENV_FILE
+            sudo systemctl restart $SERVICE
+            # 4) health check ulang SETELAH service membaca DB restore
+            for i in 1 2 3 4 5 6; do
+              code=\$(curl -s -o /dev/null -w '%{http_code}' $HEALTH_URL || true)
+              [ \"\$code\" = \"200\" ] && echo \"ROLLBACK OK (service -> $RESTORE_DB_NAME) dari \$DUMP\" && exit 0
+              echo \"rollback percobaan \$i: HTTP \$code\"; sleep 5
+            done
+            echo 'ROLLBACK health check GAGAL — intervensi manual wajib'; exit 1"
