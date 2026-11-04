@@ -64,7 +64,27 @@ def create_app(config: Config | None = None,
     app.extensions["mt5_scheduler"] = scheduler
 
     @app.teardown_appcontext
-    def _close_db(_exc):  # koneksi per-thread dipertahankan antar request
+    def _release_customer_scope(_exc):
+        """Audit round-3: bersihkan scope RLS tiap selesai request.
+
+        Koneksi per-thread DIPERTAHANKAN antar request (perf), tetapi
+        scope customer WAJIB lepas di akhir setiap request — kalau
+        tidak, request berikutnya (unauth: health/register/login/401)
+        mewarisi GUC customer sebelumnya saat transaksi berikutnya di-
+        commit (lihat PostgresConn.clear_customer_context dan test
+        test_rls_no_leak_requests).
+
+        Aman terhadap transaksi yang sudah berhasil: endpoint sukses
+        sudah commit sebelum teardown; cleanup hanya menutup transaksi
+        tersisa (rollback no-op pada koneksi idle) + reset GUC.
+        Kegagalan cleanup tidak pernah mengubah status response.
+        """
+        try:
+            dbmod.clear_customer_context(dbmod.get_db(config))
+        except Exception:  # noqa: BLE001 - teardown tak boleh meledak
+            logging.getLogger(__name__).debug(
+                "cleanup scope RLS gagal (koneksi mungkin sudah tertutup)",
+                exc_info=True)
         return None
 
     return app

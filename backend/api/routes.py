@@ -167,9 +167,142 @@ def _audit(action: str, **kw):
 
 
 # ------------------------------------------------------------------ health
+# Tabel minimum yang WAJIB ada (brief §5) supaya backend benar-benar
+# siap melayani — bukan sekadar proses hidup.
+CORE_TABLES = ("customers", "users", "auth_tokens", "mt5_accounts",
+               "mt5_credentials", "mt5_terminals", "mt5_deals",
+               "mt5_orders")
+
+
+def _existing_tables(conn) -> set[str]:
+    """Nama tabel yang benar-benar ada (dipakai health readiness)."""
+    if dbmod.is_postgres(conn):
+        rows = conn.execute(
+            "SELECT tablename AS t FROM pg_tables"
+            " WHERE schemaname='public'").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT name AS t FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    return {str(r["t"]) for r in rows}
+
+
+def _database_readiness(conn) -> dict:
+    """Cek koneksi + skema minimum (audit round-3 #4).
+
+    Return dict laporan; key 'ok' = readiness penuh. TIDAK pernah
+    melempar exception — kegagalan dilaporkan sebagai status.
+    """
+    try:
+        engine = "postgresql" if dbmod.is_postgres(conn) else "sqlite"
+        conn.execute("SELECT 1")
+        tables = _existing_tables(conn)
+        missing = [t for t in CORE_TABLES if t not in tables]
+        report = {"ok": not missing, "engine": engine}
+        if missing:
+            report["missing_tables"] = missing
+        return report
+    except Exception as e:  # noqa: BLE001 — health tidak boleh 500 mentah
+        return {"ok": False, "engine": None,
+                "error": f"{type(e).__name__}: {str(e)[:120]}"}
+
+
+def _terminals_overview(conn) -> dict:
+    """Ringkasan status terminal MT5 (audit round-3 #4).
+
+    DILAPORKAN TERPISAH dan TIDAK pernah memengaruhi 200/503 health
+    backend: backend tetap 'ok' walau MT5/terminal mati. Pada
+    PostgreSQL tanpa scope customer hanya baris yang terlihat oleh
+    role aplikasi yang dihitung (RLS default-deny); probe per customer
+    tersedia di GET /api/v1/admin/health/terminals.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT customer_id, status, rpyc_port, last_health_at"
+            " FROM mt5_terminals ORDER BY customer_id").fetchall()
+        return {"reported": len(rows),
+                "probe_endpoint": "/api/v1/admin/health/terminals",
+                "note": "tidak dipakai untuk penentuan health backend"}
+    except Exception as e:  # noqa: BLE001
+        return {"reported": None,
+                "error": f"{type(e).__name__}: {str(e)[:120]}"}
+
+
 @api_bp.get("/health")
 def health():
-    return jsonify({"ok": True, "service": "jurnal-mt5", "time": _now_iso()})
+    """Readiness backend: database + skema minimum (audit round-3 #4).
+
+    - 200 : koneksi DB hidup DAN tabel inti ada.
+    - 503 : DB tidak terjangkau / skema belum dimigrasi.
+    Status terminal MT5 hanya DILAPORKAN (sub-objek `mt5_terminals`)
+    dan tidak pernah menurunkan health backend — tidak ada kewajiban
+    MT5 live untuk health (audit: jangan wajibkan MT5 untuk health).
+    """
+    # koneksi DB gagal pun harus tetap 503 terstruktur, bukan 500 mentah
+    try:
+        conn = get_db()
+    except Exception as e:  # noqa: BLE001
+        db_report = {"ok": False, "engine": None,
+                     "error": f"{type(e).__name__}: {str(e)[:120]}"}
+        terminals = {"reported": None, "error": "database tidak tersedia"}
+    else:
+        db_report = _database_readiness(conn)
+        # health hanya SELECT — akhiri transaksi agar tidak idle-in-tx;
+        # koneksi thread-local tetap dipakai request lain setelah ini.
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        terminals = _terminals_overview(conn)
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+    ok = bool(db_report.get("ok"))
+    body = {"ok": ok, "service": "jurnal-mt5", "time": _now_iso(),
+            "database": db_report, "mt5_terminals": terminals}
+    return jsonify(body), (200 if ok else 503)
+
+
+@api_bp.get("/admin/health/terminals")
+def admin_health_terminals():
+    """Status terminal per customer — probe NYATA, terpisah dari health.
+
+    Bootstrap admin via env API_TOKEN. Untuk setiap customer aktif:
+    scope RLS ke customer itu, baca baris terminal, lalu probe TCP+
+    handshake RPyC (terminal_registry.health_check — mode deep MT5
+    HANYA bila ?deep=1). Kegagalan satu terminal tidak menggagalkan
+    endpoint; endpoint tetap 200 dengan status per customer (bila DB
+    sendiri mati, /api/v1/health yang sudah melapor 503).
+    """
+    if not _admin_token_ok():
+        abort(401, description="Token admin tidak valid")
+    conn = get_db()
+    deep = _bool_arg("deep")
+    ids = [int(r["id"]) for r in conn.execute(
+        "SELECT id FROM customers ORDER BY id").fetchall()]
+    items = []
+    registry = current_app.extensions.get("mt5_registry")
+    for cid in ids:
+        try:
+            dbmod.set_customer_context(conn, cid)
+            if registry is None:
+                items.append({"customer_id": cid, "status": "unknown",
+                              "error": "registry tidak tersedia"})
+                continue
+            items.append(registry.health_check(conn, cid, deep=deep,
+                                               timeout=2.0))
+        except Exception as e:  # noqa: BLE001 — 1 customer gagal ≠ semua
+            items.append({"customer_id": cid, "status": "error",
+                          "error": f"{type(e).__name__}: {str(e)[:120]}"})
+        finally:
+            dbmod.clear_customer_context(conn)
+    try:
+        conn.rollback()
+    except Exception:  # noqa: BLE001
+        pass
+    return jsonify({"ok": True, "checked_at": _now_iso(),
+                    "items": items})
 
 
 # ------------------------------------------------------------------- auth

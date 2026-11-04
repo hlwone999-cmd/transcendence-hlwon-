@@ -149,6 +149,48 @@ class PostgresConn:
     def current_customer_context(self) -> int | None:
         return self._customer_id
 
+    def clear_customer_context(self) -> None:
+        """Bersihkan scope customer di sisi Python DAN PostgreSQL sekaligus.
+
+        Audit round-3 (tambahan): setelah request selesai, koneksi
+        thread-local TIDAK BOLEH menyimpan customer scope aktif — kalau
+        tidak, request berikutnya yang tidak berautentikasi (health,
+        register/login, 401) mewarisi scope customer sebelumnya begitu
+        transaksi berikutnya di-commit (reapply GUC lama, test
+        test_rls_no_leak_requests membuktikan celah ini).
+
+        Langkah (urutan penting):
+        1. Hentikan transaksi yang masih menggantung: rollback().
+           - Request yang SUDAH sukses pasti sudah commit() sebelum
+             sini — rollback di titik itu no-op dan TIDAK membatalkan
+             data yang sudah tersimpan (audit: cleanup tidak boleh
+             membatalkan transaksi yang seharusnya sudah berhasil).
+           - Bila request gagal dan transaksi masih terbuka, rollback
+             MENUTUP transaksi itu — justru itu pembersihannya (tidak
+             ada transaksi terbuka yang bocor ke request berikutnya).
+        2. Reset GUC di level SESSION (is_local=false): menjamin GUC
+           kosong walau ada jalur yang memasangnya non-local.
+        3. Hapus memori `_customer_id` agar reapply transaksi berikutnya
+           tidak memasang ulang context lama.
+        """
+        try:
+            if self.in_transaction:
+                self._conn.rollback()
+        except Exception:  # noqa: BLE001 - koneksi mungkin sudah mati
+            pass
+        try:
+            cur = self._conn.cursor()
+            cur.execute("SELECT set_config(%s, '', false)",
+                        (CUSTOMER_GUC,))
+            cur.close()
+            self._conn.commit()
+        except Exception:  # noqa: BLE001 - pembersihan tak boleh meledak
+            try:
+                self._conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+        self._customer_id = None
+
     @property
     def in_transaction(self) -> bool:
         """True bila transaksi PostgreSQL sedang berjalan."""
@@ -211,6 +253,23 @@ def set_customer_context(conn, customer_id: int | None) -> None:
     """
     if is_postgres(conn):
         conn.set_customer_context(customer_id)
+
+
+def clear_customer_context(conn) -> None:
+    """Lepas scope customer dari koneksi (no-op di SQLite).
+
+    Audit round-3: dipanggil teardown Flask tiap selesai request dan
+    finally worker sync — koneksi thread-local kembali ke kondisi:
+    tanpa transaksi terbuka + GUC app.customer_id kosong + memori
+    scope Python kosong. Request berikutnya pada thread yang sama
+    PASTI mulai tanpa scope (tidak mewarisi customer sebelumnya).
+
+    Tidak membatalkan transaksi yang sudah berhasil: request sukses
+    sudah commit sebelum cleanup; rollback hanya menutup transaksi
+    yang tersisa (no-op pada koneksi idle).
+    """
+    if is_postgres(conn):
+        conn.clear_customer_context()
 
 
 @contextmanager

@@ -165,6 +165,15 @@ class SyncService:
             rt.last_error = f"{type(e).__name__}: {e}"
             raise
         finally:
+            # Audit round-3: scope customer worker WAJIB lepas di akhir
+            # tugas sync — thread worker memakai koneksi thread-local
+            # jangka panjang; scope yang tertinggal akan membocorkan
+            # akses data akun sebelumnya ke tugas berikutnya yang
+            # membuka transaksi baru (sama seperti request HTTP).
+            try:
+                dbmod.clear_customer_context(conn)
+            except Exception:  # noqa: BLE001 - cleanup tak boleh meledak
+                pass
             if rt.lock.locked():
                 rt.lock.release()
 
