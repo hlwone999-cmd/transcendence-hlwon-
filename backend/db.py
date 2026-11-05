@@ -127,8 +127,23 @@ class PostgresConn:
         bisa bocor ke transaksi/request lain yang memakai koneksi ini.
         Setelah commit/rollback, context dipasang ulang otomatis pada
         transaksi berikutnya (lihat _reapply_context).
+
+        AUDIT ROUND-4 #1 — customer_id None = lepas scope TANPA rollback
+        (soft-clear): GUC transaksi berjalan dikosongkan (set_config '',
+        is_local=true — hilang saat commit/rollback) dan memori di-reset
+        agar reapply tidak menghidupkannya. Aman dipakai di tengah
+        transaksi pemanggil (beda dgn clear_customer_context yang
+        me-rollback) — dipakai untuk MEMULIHKAN scope lama pemanggil
+        setelah blok scoped (lihat TerminalRegistry._account_config).
         """
         if customer_id is None:
+            try:
+                cur = self._conn.cursor()
+                cur.execute("SELECT set_config(%s, '', true)",
+                            (CUSTOMER_GUC,))
+                cur.close()
+            except Exception:  # noqa: BLE001 - koneksi mungkin sudah mati
+                pass
             self._customer_id = None
             return
         cur = self._conn.cursor()

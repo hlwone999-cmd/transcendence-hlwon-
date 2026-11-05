@@ -137,13 +137,25 @@ class SyncService:
             raise RuntimeError("sync_account butuh TerminalRegistry")
         conn = conn or dbmod.get_db(self._cfg)
         rt = self._registry.runtime_for(conn, account_id)
-        # RLS defense-in-depth (audit #2): scope koneksi thread ini ke
-        # customer pemilik akun SEBELUM menulis deals/orders/trades.
-        # (runtime_for mungkin cache hit — context harus dipasang eksplisit.)
-        dbmod.set_customer_context(conn, rt.customer_id)
+        # AUDIT ROUND-4 #1: lock DULU, scope RLS kemudian. Urutan lama
+        # (set_customer_context -> lock) bocor: bila lock gagal,
+        # SyncLockBusy dilempar SEBELUM blok try/finally sehingga
+        # clear_customer_context tidak pernah berjalan — scope customer
+        # tertinggal di koneksi thread-local dan tugas/request berikutnya
+        # pada thread itu mewarisi scope akun sebelumnya. Sekarang:
+        #   - lock gagal -> SyncLockBusy DILEMPAR SEBELUM context dipasang
+        #     (tidak ada scope yang perlu dibersihkan);
+        #   - lock sukses -> context dipasang DI DALAM try, jadi setiap
+        #     kegagalan setelahnya (termasuk gagal pasang context) tetap
+        #     melewati finally: scope dibersihkan + lock dilepas.
         if not rt.lock.acquire(blocking=False):
             raise SyncLockBusy(f"sync akun {account_id} sedang berjalan")
         try:
+            # RLS defense-in-depth (audit #2): scope koneksi thread ini ke
+            # customer pemilik akun SEBELUM menulis deals/orders/trades.
+            # (runtime_for mungkin cache hit — context harus dipasang
+            # eksplisit.)
+            dbmod.set_customer_context(conn, rt.customer_id)
             summary = self._run_sync(
                 mode=mode, full=full, days=days, conn=conn,
                 account_id=account_id,

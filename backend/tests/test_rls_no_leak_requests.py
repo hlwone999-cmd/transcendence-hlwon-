@@ -21,6 +21,10 @@ request seperti produksi):
 6. Worker sinkronisasi (sync_account) juga membersihkan scope di
    finally — thread koneksi jangka panjang tidak membawa scope akun
    sebelumnya ke tugas berikutnya.
+7. AUDIT ROUND-4 #1: sync_account dengan LOCK GAGAL (sync lain masih
+   berjalan) TIDAK BOLEH memasang scope sama sekali — versi lama
+   memasang context SEBELUM lock sehingga SyncLockBusy (yang dilempar
+   di luar try/finally) meninggalkan scope customer di koneksi.
 """
 import uuid
 
@@ -33,6 +37,7 @@ psycopg2 = pytest.importorskip(
 
 import db as dbmod  # noqa: E402
 from cryptography.fernet import Fernet  # noqa: E402
+from services.sync import SyncLockBusy  # noqa: E402
 from tests.conftest import bind_account, register_and_login  # noqa: E402
 
 GUC = dbmod.CUSTOMER_GUC
@@ -255,3 +260,55 @@ def test_worker_sync_bersihkan_scope_di_finally(pg_cfg):
     conn.execute("SELECT 1")
     conn.commit()
     assert _guc(conn) in ("", None)
+
+
+def test_sync_lock_busy_tidak_meninggalkan_scope(pg_cfg):
+    """AUDIT ROUND-4 #1 — lock gagal -> SyncLockBusy dan scope RLS
+    benar-benar bersih di level koneksi PostgreSQL (memori Python None
+    + GUC session kosong walau transaksi baru di-commit).
+
+    Versi lama: set_customer_context() dipanggil SEBELUM rt.lock.
+    acquire(); SyncLockBusy dilempar di luar try/finally sehingga
+    clear_customer_context tidak pernah berjalan — scope customer
+    TERTINGGAL di koneksi thread-local. Kontrol negatif di akhir test
+    membuktikan mekanisme leak itu nyata dan terdeteksi oleh assert
+    yang sama."""
+    from tests.test_multi_customer import _ds_two_trades
+
+    c = _client(pg_cfg, datasets={
+        "88888888": _ds_two_trades(88888888, "Exness-MT5Real", "XAUUSD",
+                                    0.01, 2, 88, 10.0)})
+    hA = register_and_login(c, email="lkb@test.id")
+    bind_account(c, hA, login=88888888, server="Exness-MT5Real")
+    conn = _thread_conn(pg_cfg)
+    acc_id = int(conn.execute(
+        "SELECT id FROM mt5_accounts").fetchone()["id"])
+    sync = c.application.extensions["mt5_sync"]
+    rt = sync._registry.runtime_for(conn, acc_id)
+
+    # pihak lain memegang lock akun ini -> sync_account wajib gagal cepat
+    assert rt.lock.acquire(blocking=False)
+    with pytest.raises(SyncLockBusy):
+        sync.sync_account(acc_id)
+
+    # scope wajib bersih: memori Python + GUC setelah transaksi baru
+    assert conn.current_customer_context() is None, \
+        "lock gagal: scope customer tertinggal di koneksi (leak round-4 #1)"
+    conn.execute("SELECT 1")
+    conn.commit()          # reapply tidak boleh menghidupkan GUC lama
+    assert _guc(conn) in ("", None), \
+        "lock gagal: GUC app.customer_id tidak boleh terisi"
+
+    # KONTROL NEGATIF (bukti assert menangkap bug asli): pasang scope
+    # lalu biarkan tertinggal (persis perilaku urutan lama) — detektor
+    # WAJIB melihatnya. Setelah itu dibersihkan kembali.
+    dbmod.set_customer_context(conn, rt.customer_id)
+    assert conn.current_customer_context() == rt.customer_id, \
+        "kontrol negatif: detektor memori wajib melihat scope yang sengaja " \
+        "ditinggalkan (persis leak urutan lama)"
+    conn.execute("SELECT 1")
+    conn.commit()
+    assert _guc(conn) == str(rt.customer_id), \
+        "kontrol negatif: GUC wajib terlihat saat scope ditinggalkan"
+    dbmod.clear_customer_context(conn)
+    rt.lock.release()

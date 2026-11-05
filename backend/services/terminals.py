@@ -410,15 +410,31 @@ class TerminalRegistry:
             raise TerminalError(f"akun {account_id} tidak ditemukan")
         # RLS defense-in-depth (audit #2): scope koneksi ke customer akun
         # SEBELUM membaca mt5_credentials (tabel ber-RLS di PostgreSQL).
-        from db import set_customer_context
+        #
+        # AUDIT ROUND-4 #1: scope DIPULIHKAN ke kondisi pemanggil setelah
+        # kredensial terbaca. Versi lama membiarkan scope terpasang —
+        # runtime_for (cache miss) meninggalkan scope customer di koneksi
+        # thread-local, jadi tugas berikutnya pada thread itu mewarisi
+        # scope (leak satu kelas dengan urutan lock/context di sync.py;
+        # regression test test_sync_lock_busy_tidak_meninggalkan_scope
+        # membuktikan keduanya). Pemulihan memakai set_customer_context
+        # (soft-clear bila pemanggil tanpa scope) — TANPA rollback, aman
+        # di tengah transaksi pemanggil, dan bila pemanggil SUDAH di-
+        # scope customer lain, scope itu dipasang kembali apa adanya.
+        from db import is_postgres, set_customer_context
+        prev = (conn.current_customer_context()
+                if is_postgres(conn) else None)
         set_customer_context(conn, int(acc["customer_id"]))
-        cred = conn.execute(
-            "SELECT enc_password, key_version FROM mt5_credentials"
-            " WHERE account_id=?", (account_id,)).fetchone()
-        if cred is None:
-            raise TerminalError(f"kredensial akun {account_id} tidak ada")
-        password = crypto.decrypt_password(self._cfg, cred["enc_password"],
-                                           cred["key_version"])
+        try:
+            cred = conn.execute(
+                "SELECT enc_password, key_version FROM mt5_credentials"
+                " WHERE account_id=?", (account_id,)).fetchone()
+            if cred is None:
+                raise TerminalError(f"kredensial akun {account_id} tidak ada")
+            password = crypto.decrypt_password(self._cfg, cred["enc_password"],
+                                               cred["key_version"])
+        finally:
+            set_customer_context(conn, prev)
 
         class _AccCfg:  # namespace ringan — antarmuka sama dengan Config
             mt5_host = "127.0.0.1"
