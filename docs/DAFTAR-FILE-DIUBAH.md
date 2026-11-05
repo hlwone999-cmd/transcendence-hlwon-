@@ -52,6 +52,27 @@ Basis: `main` @ `fbf844ff4c5ceaa666e0a64f3e4c3b034b3c1333`.
 | `backend/.env.example` | Variabel env baru multi-customer |
 | `.github/workflows/backend-tests.yml` | Diperluas: PG test, security check, checksum (tujuan sama: CI backend) |
 
+## Audit round-4 (`fix/audit4-final-hardening`, basis `15e2f5a`)
+
+Dua temuan audit independen + regression test. Sifat perubahan: kecil,
+terlokalisasi, tanpa menyentuh algoritma kalkulator maupun MT5.
+
+| File | Baru/Ubah | Alasan (temuan) |
+|---|---|---|
+| `backend/services/sync.py` | ubah | **Round-4 #1**: `sync_account()` — lock di-acquire SEBELUM `set_customer_context()`; context dipasang DI DALAM try. Bila lock gagal, `SyncLockBusy` dilempar sebelum scope terpasang — tidak ada lagi scope customer tertinggal di koneksi thread |
+| `backend/services/terminals.py` | ubah | **Round-4 #1 lanjutan**: `_account_config()` (dipakai `runtime_for` cache-miss) memulihkan scope pemanggil di `finally` — versi lama meninggalkan scope customer setelah membaca `mt5_credentials` |
+| `backend/db.py` | ubah | `PostgresConn.set_customer_context(None)` = soft-clear GUC transaksi berjalan (`set_config('',true)`) TANPA rollback — aman memulihkan scope lama di tengah transaksi pemanggil |
+| `backend/deploy/backup_db.sh` | **baru** | **Round-4 #2**: logika backup dipindah dari workflow agar bisa dites sungguhan: `set -euo pipefail`, dump ke file `.part`, validasi `gzip -t` + non-kosong + marker dump PG, publikasi atomik `mv`, `LAST_PRE_DEPLOY` HANYA setelah tervalidasi, trap bersih-bersih |
+| `backend/deploy/rollback.sh` | ubah | **Round-4 #2**: rollback hanya memakai backup MILIK run ini (`PRE_DEPLOY_STAMP` dari workflow); backup run gagal/korup → MENOLAK restore, backup lama TIDAK dipakai (kondisi masih pra-deploy); `LAST_PRE_DEPLOY` tidak lagi jadi dasar keputusan |
+| `.github/workflows/backend-deploy.yml` | ubah | Step backup mengirim `backup_db.sh` via `bash -s` + mengekspor `PRE_DEPLOY_STAMP` ke GITHUB_ENV; step rollback meneruskan `PRE_DEPLOY_STAMP` |
+| `backend/tests/test_sync_scope_lock.py` | **baru** | Regression round-4 #1: lock gagal → scope TIDAK pernah dipasang (rekam panggilan); urutan set→run→clear saat sukses; cleanup saat pekerjaan error; kontrol negatif bukti leak lama terdeteksi |
+| `backend/tests/test_rls_no_leak_requests.py` | ubah | + `test_sync_lock_busy_tidak_meninggalkan_scope`: bukti GUC PostgreSQL sungguhan bersih ketika lock gagal + kontrol negatif |
+| `backend/tests/test_backup_script.py` | **baru** | Regression round-4 #2 (12 test): backup sukses, pg_dump gagal, gzip gagal, dump kosong, bukan dump PG, gzip korup, stamp aneh, rantai "backup gagal → rollback menolak backup lama" |
+| `backend/tests/test_rollback_script.py` | ubah | Kontrak `PRE_DEPLOY_STAMP` + 5 test baru: tanpa stamp ditolak, backup run gagal → backup lama TIDAK dipakai, dump korup/bukan-PG ditolak, jalur normal terbukti memakai dump run ini (bukan dump lama) |
+| `backend/tests/test_deploy_backup_permission.py` | ubah | Test statik izin backup menunjuk `backup_db.sh` (logika dipindah); jaminan round-3 dipertahankan |
+| `docs/MULTI-CUSTOMER-BACKUP-ROLLBACK.md` | ubah | Runbook diselaraskan kontrak round-4 (backup tervalidasi, stamp, rollback tanpa backup lama) |
+| `docs/HASIL-TEST-AUDIT-4.md` | **baru** | Bukti test round-4 |
+
 ## TIDAK disentuh (protected + fitur lama)
 
 - `lib/engine.dart`, `legacy-web/script.js`, `lib/montecarlo.dart`,
