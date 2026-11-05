@@ -39,6 +39,23 @@
 #      200 hanya bila koneksi PostgreSQL hidup DAN tabel inti ada;
 #      status terminal MT5 dilaporkan terpisah dan tidak dipersyaratkan.
 #
+# Perbaikan audit round-4 (hardening final):
+#   1. SYNC SCOPE LEAK (temuan #1): di backend/services/sync.py — lock
+#      di-acquire SEBELUM set_customer_context; scope RLS dibersihkan
+#      walau SyncLockBusy (dites: tests/test_sync_scope_lock.py + PG).
+#   2. BACKUP PIPEFAIL (temuan #2): logika backup dipindah ke
+#      backend/deploy/backup_db.sh (dites pytest —
+#      tests/test_backup_script.py): `set -euo pipefail`, dump ke file
+#      sementara (.part), validasi `gzip -t` + non-kosong + marker dump
+#      PG, publikasi atomik mv, LAST_PRE_DEPLOY HANYA setelah
+#      tervalidasi. Kegagalan pg_dump/gzip/validasi => deployment
+#      BERHENTI; backup lama tidak pernah dianggap backup run ini.
+#   3. ROLLBACK TIDAK PAKAI BACKUP LAMA: stamp backup run ini
+#      (PRE_DEPLOY_STAMP) diekspor runner lalu diteruskan ke
+#      rollback.sh — rollback hanya me-restore dump MILIK run ini yang
+#      lolos validasi; bila run ini gagal backup, rollback MENOLAK
+#      memakai dump lama (kondisi masih pra-deploy; intervensi manual).
+#
 # Tidak ada kredensial di repo: semua via GitHub Environment secrets.
 # Workflow ini workflow_dispatch SAJA — tidak pernah dipicu push/PR —
 # dan TIDAK dijalankan oleh pipeline apa pun (perbaikan TIDAK menjalankan
@@ -156,24 +173,21 @@ jobs:
           echo "PREV_COMMIT=$PREV" >> "$GITHUB_ENV"
           echo "Commit ter-deploy sebelumnya: $PREV"
 
-      - name: Backup database sebelum migration (pg_dump)
+      - name: Backup database pra-deploy (pg_dump + gzip, tervalidasi)
         run: |
+          # AUDIT ROUND-4 #2: stamp run ini diputuskan di runner dan
+          # diekspor agar rollback (step if: failure()) tahu persis
+          # backup milik run INI — rollback tidak akan memakai backup
+          # lama bila run ini gagal sebelum/ke dalam backup.
+          STAMP=$(date +%Y%m%d-%H%M%S)
+          echo "PRE_DEPLOY_STAMP=$STAMP" >> "$GITHUB_ENV"
+          # Logika backup = backend/deploy/backup_db.sh (dites pytest):
+          # set -euo pipefail, file sementara, gzip -t + validasi isi,
+          # mv atomik, LAST_PRE_DEPLOY hanya setelah tervalidasi.
           ssh deploy@${{ secrets.VPS_HOST }} "
-            set -e
-            umask 077
-            # idempoten: pastikan kembali owner deploy + mode 750
-            sudo install -d -o $BACKUP_OWNER -g $BACKUP_OWNER -m 750 $BACKUP_DIR
-            STAMP=\$(date +%Y%m%d-%H%M%S)
-            # pg_dump via stdout; penulisan file oleh user deploy pada
-            # direktori miliknya sendiri — tanpa sudo, tanpa tee.
-            sudo -u postgres pg_dump $DB_NAME | gzip > \
-              $BACKUP_DIR/pre-deploy-\$STAMP.sql.gz
-            chmod 600 $BACKUP_DIR/pre-deploy-\$STAMP.sql.gz
-            # simpan nama backup terakhir agar rollback memakai file
-            # yang PASTI benar (file milik deploy — tanpa sudo tee)
-            echo \$STAMP > $BACKUP_DIR/LAST_PRE_DEPLOY
-            chmod 600 $BACKUP_DIR/LAST_PRE_DEPLOY
-            ls -1t $BACKUP_DIR/pre-deploy-*.sql.gz | head -3"
+            STAMP='$STAMP' BACKUP_DIR='$BACKUP_DIR' \
+            BACKUP_OWNER='$BACKUP_OWNER' DB_NAME='$DB_NAME' \
+            bash -s" < backend/deploy/backup_db.sh
 
       - name: Normalisasi .env ke database utama (bekas rollback)
         run: |
@@ -254,12 +268,16 @@ jobs:
       - name: Rollback bila deployment gagal (kode lama + DB pra-deploy)
         if: failure()
         run: |
-          # AUDIT ROUND-3 #3: logika rollback dalam backend/deploy/
-          # rollback.sh (dites pytest — tests/test_rollback_script.py),
-          # dikirim ke VPS via stdin + parameter env eksplisit.
+          # AUDIT ROUND-3 #3 + ROUND-4 #2: logika rollback dalam
+          # backend/deploy/rollback.sh (dites pytest —
+          # tests/test_rollback_script.py), dikirim ke VPS via stdin +
+          # parameter env eksplisit. PRE_DEPLOY_STAMP = stamp backup
+          # run INI — rollback MENOLAK memakai backup lama bila run ini
+          # gagal sebelum backup tervalidasi.
           ssh deploy@${{ secrets.VPS_HOST }} "
             set -e
             APP_DIR='$APP_DIR' VENV_DIR='$VENV_DIR' SERVICE='$SERVICE' \
             ENV_FILE='$ENV_FILE' BACKUP_DIR='$BACKUP_DIR' DB_NAME='$DB_NAME' \
             RESTORE_DB_NAME='$RESTORE_DB_NAME' HEALTH_URL='$HEALTH_URL' \
+            PRE_DEPLOY_STAMP='$PRE_DEPLOY_STAMP' \
             bash -s" < backend/deploy/rollback.sh

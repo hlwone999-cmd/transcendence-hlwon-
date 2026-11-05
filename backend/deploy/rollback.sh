@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Rollback deployment backend — audit round-3 (temuan #3).
+# Rollback deployment backend — audit round-3 (temuan #3) + round-4
+# (temuan #2: rollback tidak boleh memakai backup lama saat run gagal).
 #
 # Dijalankan DI VPS oleh workflow Backend Deploy (step `if: failure()`)
-# via `ssh ... 'APP_DIR=... bash -s' < backend/deploy/rollback.sh`.
-# Semua parameter masuk sebagai environment variable (wajib ada):
+# via `ssh ... 'APP_DIR=... PRE_DEPLOY_STAMP=... bash -s' < backend/
+# deploy/rollback.sh`. Semua parameter masuk sebagai environment
+# variable (wajib ada):
 #   APP_DIR, VENV_DIR, SERVICE, ENV_FILE, BACKUP_DIR, DB_NAME,
-#   RESTORE_DB_NAME, HEALTH_URL
+#   RESTORE_DB_NAME, HEALTH_URL, PRE_DEPLOY_STAMP (round-4)
 #
 # DUA jalur rollback (logika ini DITES — backend/tests/test_rollback_
 # script.py memakai stub systemctl/dropdb/createdb/psql/curl):
@@ -26,8 +28,21 @@
 #        c. .env TIDAK diubah (tetap menunjuk database utama);
 #        d. service dibiarkan STOP — first-deploy di-retry manual
 #           sesuai runbook (provisioning §10).
-#      Bila dump pra-deploy tidak ada: TIDAK menyentuh apa pun,
-#      exit 1 (intervensi manual wajib).
+#
+# AUDIT ROUND-4 #2 — HANYA backup MILIK run deploy ini:
+#   Workflow mengekspor PRE_DEPLOY_STAMP (stamp backup run ini, lihat
+#   backend/deploy/backup_db.sh) lalu meneruskannya ke sini. Rollback
+#   HANYA me-restore dump `pre-deploy-$PRE_DEPLOY_STAMP.sql.gz` yang
+#   ADA dan lolos validasi (gzip -t + marker dump PG). Konsekuensi:
+#   - backup run ini GAGAL (file tidak ada / korup) => rollback
+#     MENOLAK me-restore dump LAMA (LAST_PRE_DEPLOY sengaja TIDAK
+#     dipakai lagi: dump lama bukan pasangan pra-deploy run ini dan
+#     bisa jauh lebih tua dari state DB sekarang — me-restore-nya
+#     justru MENGHAPUS data). Kondisi sistem saat backup gagal masih
+#     pra-deploy (migration belum jalan, kode belum di-checkout), jadi
+#     tidak ada yang perlu dikembalikan — intervensi manual wajib.
+#   - LAST_PRE_DEPLOY tetap ditulis backup_db.sh sebagai info operasi
+#     "backup valid terakhir", bukan lagi dasar keputusan rollback.
 set -euo pipefail
 
 : "${APP_DIR:?APP_DIR wajib}" "${VENV_DIR:?VENV_DIR wajib}" \
@@ -48,14 +63,40 @@ health_ok() {
 }
 
 PREV=$(cat "$BACKUP_DIR/PREVIOUS_COMMIT" 2>/dev/null || echo NONE)
-LATEST=$(cat "$BACKUP_DIR/LAST_PRE_DEPLOY" 2>/dev/null || true)
-DUMP="$BACKUP_DIR/pre-deploy-$LATEST.sql.gz"
 
-# Jaga-jaga: dump harus benar-benar ada SEBELUM menyentuh apa pun.
-if [ -z "$LATEST" ] || [ ! -f "$DUMP" ]; then
-  echo "::error::dump pra-deploy tidak ditemukan ($DUMP) — rollback DIBATALKAN tanpa perubahan; intervensi manual wajib"
+# AUDIT ROUND-4 #2: stamp backup MILIK run deploy ini (dikirim
+# workflow). TANPA stamp ini rollback tidak bisa memastikan backup
+# mana yang satu pasangan dengan run ini — dan DILARANG menebak dari
+# LAST_PRE_DEPLOY (bisa menunjuk backup run LAMA).
+RUN_STAMP="${PRE_DEPLOY_STAMP:-}"
+if [ -z "$RUN_STAMP" ]; then
+  echo "::error::PRE_DEPLOY_STAMP tidak diberikan — rollback tidak bisa memastikan backup milik run ini; backup LAMA DILARANG dipakai. Tidak ada perubahan dilakukan; intervensi manual wajib"
   exit 1
 fi
+case "$RUN_STAMP" in
+  *[!0-9A-Za-z_-]*)
+    echo "::error::PRE_DEPLOY_STAMP tidak valid: '$RUN_STAMP'"
+    exit 1 ;;
+esac
+DUMP="$BACKUP_DIR/pre-deploy-$RUN_STAMP.sql.gz"
+
+# Jaga-jaga round-4: backup run INI harus ada + valid SEBELUM menyentuh
+# apa pun. Bila run ini gagal backup (pg_dump/gzip/validasi), kondisi
+# sistem masih pra-deploy (migration belum jalan) — rollback TIDAK
+# boleh menggantinya dengan dump lama.
+if [ ! -f "$DUMP" ]; then
+  echo "::error::backup run ini tidak ada ($DUMP) — backup run saat ini GAGAL sebelum tervalidasi; backup LAMA tidak boleh dipakai (bukan pasangan run ini). DB & kode TIDAK diubah (kondisi masih pra-deploy); intervensi manual wajib"
+  exit 1
+fi
+if ! gzip -t "$DUMP"; then
+  echo "::error::backup run ini korup ($DUMP) — ditolak; backup LAMA tidak boleh dipakai. Tidak ada perubahan dilakukan; intervensi manual wajib"
+  exit 1
+fi
+if ! gzip -dc "$DUMP" | grep "PostgreSQL database dump" > /dev/null; then
+  echo "::error::isi $DUMP bukan dump PostgreSQL — ditolak; intervensi manual wajib"
+  exit 1
+fi
+echo "backup pra-deploy run ini TERNVALIDASI: $DUMP"
 
 if [ -n "$PREV" ] && [ "$PREV" != "NONE" ]; then
   # ============================================================ NORMAL

@@ -5,18 +5,25 @@ MILIK ROOT, sedangkan `gzip > $BACKUP_DIR/...` (dan `chmod`) dijalankan
 sebagai user deploy — penulisan GAGAL (Permission denied) atau, bila
 admin kebetulan meng-chown manual, kebijakan tidak terjaga.
 
-Perbaikan (backend-deploy.yml): `sudo install -d -o deploy -g deploy
--m 750 $BACKUP_DIR` — idempoten, owner/mode dijaga SEBELUM penulisan;
-dump ditulis user deploy (umask 077 + chmod 600), tanpa sudo tee.
+Perbaikan: `sudo install -d -o deploy -g deploy -m 750 $BACKUP_DIR` —
+idempoten, owner/mode dijaga SEBELUM penulisan; dump ditulis user
+deploy (umask 077 + chmod 600), tanpa sudo tee.
+
+CATATAN AUDIT ROUND-4 #2: logika backup dipindah dari workflow ke
+`backend/deploy/backup_db.sh` (agar bisa DITES sungguhan — lihat
+tests/test_backup_script.py; kegagalan pg_dump/gzip kini mematikan
+deployment lewat pipefail). Test statik di bawah menunjuk skrip itu;
+workflow tetap wajib mengirim BACKUP_OWNER + memanggil skripnya.
 
 Pengujian 3 lapis (jujur soal batas sandbox):
-1. STATIK    — workflow memakai install -d -o deploy + urutan benar
+1. STATIK    — skrip backup memakai install -d -o deploy + urutan benar
                (izin dipasang SEBELUM penulisan dump), tanpa sudo tee,
-               dump chmod 600. Selalu jalan.
+               dump chmod 600; workflow mengirim env lengkap. Selalu
+               jalan.
 2. SIMULASI  — perilaku: direktori tanpa izin tulis -> penulisan gagal;
                setelah langkah perbaikan (pasang izin yang benar) ->
                penulisan berhasil, file 600, direktori 750. Selalu jalan
-               (meniru langkah workflow pada direktori milik sendiri).
+               (meniru langkah skrip pada direktori milik sendiri).
 3. LIVE root — bila passwordless sudo tersedia (CI ubuntu-latest):
                buat direktori root-owned sungguhan -> tulis sebagai user
                biasa GAGAL -> `sudo install -d -o <user>` -> BERHASIL.
@@ -32,43 +39,48 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 DEPLOY_WF = REPO / ".github" / "workflows" / "backend-deploy.yml"
+BACKUP_SH = REPO / "backend" / "deploy" / "backup_db.sh"
 
 
 # ---------------------------------------------------------------- 1. statik
-def test_workflow_pakai_install_d_owner_deploy():
-    raw = DEPLOY_WF.read_text(encoding="utf-8")
+def test_backup_script_pakai_install_d_owner_deploy():
+    raw = BACKUP_SH.read_text(encoding="utf-8")
     # langkah perbaikan izin wajib ada dan menarget owner deploy
-    m = re.findall(r"install -d -o \$BACKUP_OWNER -g \$BACKUP_OWNER"
-                   r" -m 750 \$BACKUP_DIR", raw)
-    assert len(m) >= 2, \
-        "workflow wajib memasang izin backup (owner deploy, 750) di " \
-        "step pencatatan commit DAN step backup"
-    assert "BACKUP_OWNER: deploy" in raw, \
-        "BACKUP_OWNER harus user SSH deploy"
+    m = re.findall(r"install -d -o \"?\$BACKUP_OWNER\"? -g \"?\$BACKUP_OWNER\"?"
+                   r" -m 750 \"?\$BACKUP_DIR\"?", raw)
+    assert len(m) >= 1, \
+        "skrip backup wajib memasang izin backup (owner deploy, 750) " \
+        "sebelum penulisan dump"
+    wf = DEPLOY_WF.read_text(encoding="utf-8")
+    assert "BACKUP_OWNER: deploy" in wf, \
+        "BACKUP_OWNER harus user SSH deploy (workflow env)"
+    assert re.search(r"BACKUP_OWNER='\$BACKUP_OWNER'", wf), \
+        "workflow wajib meneruskan BACKUP_OWNER ke backup_db.sh"
 
 
-def test_workflow_tidak_ada_sudo_mkdir_backup_dir():
-    raw = DEPLOY_WF.read_text(encoding="utf-8")
-    assert not re.search(r"sudo\s+mkdir\s+-p\s+\$BACKUP_DIR", raw), \
-        "`sudo mkdir -p $BACKUP_DIR` (root-owned) masih ada — sumber masalah"
+def test_backup_script_tidak_ada_sudo_mkdir_backup_dir():
+    for label, raw in (("workflow", DEPLOY_WF.read_text(encoding="utf-8")),
+                       ("backup_db.sh", BACKUP_SH.read_text(encoding="utf-8"))):
+        assert not re.search(r"sudo\s+mkdir\s+-p\s+\$BACKUP_DIR", raw), \
+            f"{label}: `sudo mkdir -p $BACKUP_DIR` (root-owned) masih ada " \
+            "— sumber masalah"
 
 
 def test_backup_dump_ditulis_tanpa_sudo_tee_dan_chmod_600():
-    raw = DEPLOY_WF.read_text(encoding="utf-8")
-    assert re.search(r"gzip >\s*\\\n?\s*\$BACKUP_DIR/pre-deploy-", raw) or \
-        re.search(r"gzip > \$BACKUP_DIR/pre-deploy-", raw), \
+    raw = BACKUP_SH.read_text(encoding="utf-8")
+    assert re.search(r"gzip >\s*\"?\$PART", raw), \
         "dump harus ditulis langsung oleh user deploy (gzip > file)"
     assert not re.search(r"sudo tee \$BACKUP_DIR", raw), \
         "sudo tee ke $BACKUP_DIR dilarang — file backup milik deploy"
     assert "umask 077" in raw, "umask 077 wajib sebelum menulis dump"
-    assert re.search(r"chmod 600 \$BACKUP_DIR/pre-deploy-", raw), \
+    assert re.search(r"chmod 600 \"\$TARGET\"", raw), \
         "dump berisi data transaksi — wajib 600"
 
 
 def test_izin_dipasang_sebelum_penulisan_dump():
     """Urutan wajib: install -d (izin) harus muncul SEBELUM baris
-    penulisan dump pada step backup."""
-    raw = DEPLOY_WF.read_text(encoding="utf-8")
+    penulisan dump pada skrip backup."""
+    raw = BACKUP_SH.read_text(encoding="utf-8")
     lines = raw.splitlines()
     idx_install = [i for i, ln in enumerate(lines)
                    if "install -d -o" in ln]
