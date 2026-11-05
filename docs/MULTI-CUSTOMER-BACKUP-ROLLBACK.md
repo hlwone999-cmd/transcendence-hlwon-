@@ -19,6 +19,22 @@ divalidasi berlapis (`gzip -t` + tidak kosong + header dump PostgreSQL),
 baru dipublikasi atomik ke
 `/var/backups/transcendence/pre-deploy-<STAMP>.sql.gz`.
 
+**Stamp backup unik per run (audit round-5 #2).** STAMP bukan lagi
+timestamp detik (dua run/re-run pada detik sama bisa identik — file
+saling menimpa). Sekarang stamp = identifier unik yang memuat
+`github.run_id` dan `github.run_attempt`:
+
+```
+STAMP="run-<run_id>-attempt-<run_attempt>"
+# contoh: pre-deploy-run-1892374561-attempt-1.sql.gz
+```
+
+Dibuat `backend/deploy/make_backup_stamp.sh` (validasi numerik +
+filename-safe `[0-9A-Za-z_-]`, sama dengan gate backup_db.sh dan
+rollback.sh). `run_id` unik per workflow run; `run_attempt` naik pada
+tiap re-run → stamp selalu unik dan re-run tidak pernah menimpa backup
+run sebelumnya.
+
 `LAST_PRE_DEPLOY` hanya diperbarui SETELAH backup tervalidasi — isinya
 selalu stamp backup valid terakhir (informasi operasi, bukan dasar
 keputusan rollback; lihat §5).
@@ -76,10 +92,13 @@ wajib rollback DB.
 
 Workflow deploy: step mana pun gagal → step rollback (`if: failure()`)
 menjalankan `backend/deploy/rollback.sh` di VPS. Kontrak (audit
-round-4 #2):
+round-4 #2, stamp baru round-5 #2):
 
-- Runner mengekspor `PRE_DEPLOY_STAMP` = stamp backup run INI dan
-  meneruskannya ke rollback.sh.
+- Runner mengekspor `PRE_DEPLOY_STAMP` = stamp backup run INI
+  (`run-<run_id>-attempt-<run_attempt>`) dan meneruskannya ke
+  rollback.sh — diekspor SEBELUM backup dijalankan, jadi walau step
+  backup gagal, rollback tetap tahu stamp run ini dan TIDAK akan
+  menebak dari backup lain.
 - Rollback HANYA me-restore dump `pre-deploy-$PRE_DEPLOY_STAMP.sql.gz`
   yang ada dan lolos validasi ulang (gzip -t + header dump).
 - Backup run ini GAGAL (dump tidak ada / korup) → rollback MENOLAK
@@ -89,6 +108,28 @@ round-4 #2):
 - First deploy (`PREVIOUS_COMMIT=NONE`): service DIHENTIKAN, database
   utama dikembalikan ke pra-deploy, `.env` tidak diubah, retry manual
   (runbook provisioning §10) — tidak ada "kode baru + skema lama".
+
+### 5.1 Serialisasi deployment production (audit round-5 #1)
+
+Workflow memakai concurrency group workflow-level:
+
+```yaml
+concurrency:
+  group: backend-deploy-production
+  cancel-in-progress: false
+```
+
+- Tepat SATU deployment production berjalan pada satu waktu — run
+  berikutnya MENUNGGU (queued); VPS/database tidak pernah dimodifikasi
+  dua deployment sekaligus.
+- `cancel-in-progress: false`: deployment berjalan TIDAK PERNAH
+  dibatalkan run baru (membatalkan di tengah jalan = backup/migrasi
+  terpotong).
+- Group statis dan monopoli workflow ini (dites statik: workflow lain
+  tidak boleh memakai nama group sama — group GitHub Actions berlaku
+  global lintas workflow).
+- Lapis kedua: stamp backup unik per run (§2) membuat backup antar-run
+  mustahil bertabrakan walau antrian dilanggar.
 
 ## 6. Rotasi kredensial (MT5_CRED_KEY)
 

@@ -73,6 +73,22 @@ terlokalisasi, tanpa menyentuh algoritma kalkulator maupun MT5.
 | `docs/MULTI-CUSTOMER-BACKUP-ROLLBACK.md` | ubah | Runbook diselaraskan kontrak round-4 (backup tervalidasi, stamp, rollback tanpa backup lama) |
 | `docs/HASIL-TEST-AUDIT-4.md` | **baru** | Bukti test round-4 |
 
+## Audit round-5 (`fix/audit5-deploy-serialization`, basis `871f3655`)
+
+Satu temuan deployment (serialisasi + stamp) dipecah dua sub-temuan.
+Sifat perubahan: terlokalisasi pada workflow deploy + skrip backup,
+tanpa menyentuh algoritma kalkulator maupun MT5.
+
+| File | Baru/Ubah | Alasan (temuan) |
+|---|---|---|
+| `.github/workflows/backend-deploy.yml` | ubah | **Round-5 #1**: block workflow-level `concurrency: group: backend-deploy-production` + `cancel-in-progress: false` — satu antrian produksi (tepat satu deployment memodifikasi VPS/database; run berikutnya MENUNGGU; deployment berjalan tidak dibatalkan). **Round-5 #2**: step backup memanggil `make_backup_stamp.sh` dengan `github.run_id` + `github.run_attempt` (stamp timestamp detik dihapus); `PRE_DEPLOY_STAMP` tetap diekspor sebelum backup dan diteruskan ke rollback.sh |
+| `backend/deploy/make_backup_stamp.sh` | **baru** | **Round-5 #2**: generator stamp unik per run — `run-<run_id>-attempt-<run_attempt>` (memuat github.run_id dan github.run_attempt); validasi numerik + gate filename-safe `[0-9A-Za-z_-]` identik dengan backup_db.sh/rollback.sh; deterministik |
+| `backend/deploy/backup_db.sh` | ubah | Komentar kontrak STAMP diselaraskan (format baru); LOGIKA TIDAK BERUBAH — gate charset `[0-9A-Za-z_-]` yang sama tetap menerima stamp baru dan menolak yang lain (dites round-4 tetap lulus) |
+| `backend/deploy/rollback.sh` | ubah | Komentar referensi sumber stamp (make_backup_stamp.sh); LOGIKA TIDAK BERUBAH — rollback tetap HANYA memakai backup milik run yang sama (`PRE_DEPLOY_STAMP`, kontrak round-4) |
+| `backend/tests/test_deploy_serialization.py` | **baru** | **Round-5 #3** (12 test): statik concurrency (workflow-level kolom-0, group statis khusus production, cancel-in-progress: false, monopoli nama group antar workflow, skema timestamp dihapus) + statik wiring run_id/attempt→stamp→PRE_DEPLOY_STAMP→rollback + perilaku stamp (deterministik, unik konkuren 60 panggilan, tolak input tidak valid, diterima backup_db.sh) + perilaku backup konkuren tanpa saling menimpa + skenario rollback attempt-2 gagal MENOLAK dump attempt-1/LAST_PRE_DEPLOY sementara attempt-1 restore dump-nya persis |
+| `docs/MULTI-CUSTOMER-BACKUP-ROLLBACK.md` | ubah | Runbook: §2 format stamp baru + §5.1 serialisasi deployment production |
+| `docs/HASIL-TEST-AUDIT-5.md` | **baru** | Bukti test round-5 (191 passed, 1 skipped) |
+
 ## TIDAK disentuh (protected + fitur lama)
 
 - `lib/engine.dart`, `legacy-web/script.js`, `lib/montecarlo.dart`,
