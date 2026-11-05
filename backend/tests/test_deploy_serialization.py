@@ -30,6 +30,18 @@ Perbaikan (semuanya dites di file ini):
    run yang sama — dump run/attempt SEBELUMNYA (atau LAST_PRE_DEPLOY)
    tidak pernah dianggap backup run terbaru.
 
+TEMUAN AUDIT ROUND-6 (file yang sama diperluas):
+
+4. QUEUE MAX: default GitHub Actions hanya mempertahankan SATU run
+   berjalan + SATU run pending per concurrency group — pending LAMA
+   bisa DIBATALKAN dan digantikan pending terbaru (run baru menggusur
+   yang sudah mengantre; deploy yang sudah di-approve bisa hilang
+   dari antrian). Block concurrency workflow kini wajib memuat TIGA
+   nilai sekaligus: group "backend-deploy-production",
+   cancel-in-progress: false, dan queue: max — hingga 100 run pending
+   mengantre sequential; run tambahan saat antrean penuh dibatalkan
+   (queue: max TIDAK boleh dipasangkan cancel-in-progress: true).
+
 Empat lapis pengujian:
   1. STATIK WORKFLOW — concurrency block di level workflow (kolom 0),
      group statis khusus production tanpa ${{ }}, cancel-in-progress:
@@ -57,6 +69,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO = Path(__file__).resolve().parents[2]
 WORKFLOWS = REPO / ".github" / "workflows"
@@ -94,6 +107,75 @@ def test_concurrency_group_khusus_production_di_level_workflow():
     raw = WF.read_text(encoding="utf-8")
     assert not re.search(r"cancel-in-progress:\s*true", raw), \
         "tidak boleh ada cancel-in-progress: true di workflow ini"
+
+
+def test_concurrency_queue_max_group_dan_cancel_false_tiga_nilai():
+    """TEMUAN ROUND-6: block concurrency workflow-level wajib memuat
+    TIGA nilai sekaligus (regresi ketiga nilai):
+      1. group: backend-deploy-production (tetap, round-5)
+      2. cancel-in-progress: false        (tetap, round-5)
+      3. queue: max                       (baru, round-6)
+    Default GitHub Actions hanya menyimpan satu running + satu pending
+    run — pending LAMA dibatalkan dan digantikan pending terbaru.
+    `queue: max` membuat hingga 100 run pending mengantre sequential;
+    run tambahan saat antrean penuh dibatalkan. queue: max TIDAK boleh
+    dipasangkan cancel-in-progress: true (konflik perilaku — dokumentasi
+    GitHub Actions)."""
+    lines = WF.read_text(encoding="utf-8").splitlines()
+    idx = [i for i, ln in enumerate(lines) if re.match(r"^concurrency:\s*$", ln)]
+    assert len(idx) == 1, "block concurrency tetap TEPAT SATU di level workflow"
+    i = idx[0]
+    # Kumpulkan seluruh isi block: baris ter-indent setelah 'concurrency:'
+    # (baris kosong dilewati — bukan kunci; berhenti di baris kolom-0,
+    #  mis. 'jobs:')
+    body = []
+    for ln in lines[i + 1:]:
+        if ln.strip() == "":
+            continue
+        if ln.startswith((" ", "\t")):
+            body.append(ln)
+        else:
+            break
+    keys = {}
+    for ln in body:
+        m = re.match(r"^\s+([a-z-]+):\s*(\S+)\s*$", ln)
+        assert m, f"baris block concurrency tidak terurai: {ln!r}"
+        keys[m.group(1)] = m.group(2)
+    # TIGA nilai wajib — persis, tanpa kunci lain:
+    assert keys == {
+        "group": "backend-deploy-production",
+        "cancel-in-progress": "false",
+        "queue": "max",
+    }, f"block concurrency wajib persis tiga nilai (dapat: {keys})"
+    # Detil per nilai (pesan galat spesifik utk auditor):
+    assert keys["group"] == "backend-deploy-production", \
+        "group produksi wajib tetap 'backend-deploy-production'"
+    assert keys["cancel-in-progress"] == "false", \
+        "cancel-in-progress wajib tetap FALSE (deployment berjalan tidak dibatalkan)"
+    assert keys["queue"] == "max", \
+        "queue wajib 'max' — tanpa ini pending lama bisa dibatalkan dan " \
+        "digantikan pending terbaru (deploy ber-approval bisa hilang dari antrean)"
+
+
+def test_yaml_concurrency_struktural_tiga_kunci_tanpa_job_level():
+    """Validasi YAML struktural: seluruh file parse sebagai YAML valid;
+    dict concurrency top-level = TEPAT tiga kunci bernilai benar; dan
+    TIDAK ada concurrency job-level (antrian produksi dikelola DI LEVEL
+    WORKFLOW — concurrency job terpisah membuat antrian tidak konsisten)."""
+    parsed = yaml.safe_load(WF.read_text(encoding="utf-8"))
+    assert isinstance(parsed, dict)
+    assert parsed.get("concurrency") == {
+        "group": "backend-deploy-production",
+        "cancel-in-progress": False,
+        "queue": "max",
+    }, f"concurrency YAML salah: {parsed.get('concurrency')!r}"
+    # Tidak ada concurrency di level job (guard / deploy / lainnya):
+    jobs = parsed.get("jobs", {})
+    assert isinstance(jobs, dict) and jobs, "workflow wajib punya jobs"
+    for name, job in jobs.items():
+        assert "concurrency" not in (job or {}), \
+            f"job '{name}' tidak boleh punya concurrency job-level — " \
+            "antrian produksi wajib satu di level workflow"
 
 
 def test_group_production_monopoli_backend_deploy():
