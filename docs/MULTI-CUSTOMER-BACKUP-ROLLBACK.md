@@ -109,14 +109,16 @@ round-4 #2, stamp baru round-5 #2):
   utama dikembalikan ke pra-deploy, `.env` tidak diubah, retry manual
   (runbook provisioning §10) — tidak ada "kode baru + skema lama".
 
-### 5.1 Serialisasi deployment production (audit round-5 #1)
+### 5.1 Serialisasi deployment production (audit round-5 #1 + round-6)
 
-Workflow memakai concurrency group workflow-level:
+Workflow memakai concurrency group workflow-level dengan antrean
+pending maksimal:
 
 ```yaml
 concurrency:
   group: backend-deploy-production
   cancel-in-progress: false
+  queue: max
 ```
 
 - Tepat SATU deployment production berjalan pada satu waktu — run
@@ -125,11 +127,32 @@ concurrency:
 - `cancel-in-progress: false`: deployment berjalan TIDAK PERNAH
   dibatalkan run baru (membatalkan di tengah jalan = backup/migrasi
   terpotong).
+- `queue: max` (audit round-6): default GitHub Actions hanya
+  mempertahankan SATU run berjalan dan SATU run pending per concurrency
+  group — run pending LAMA dapat DIBATALKAN dan digantikan run pending
+  terbaru (run baru menggusur yang sudah mengantre; deployment yang
+  sudah di-approve reviewer bisa hilang dari antrian tanpa jejak).
+  Dengan `queue: max`, hingga **100 run pending** dapat mengantre dan
+  diproses SEQUENTIAL sesuai urutan masuk antrean; run tambahan yang
+  datang saat antrean penuh (ke-101) **ditolak/dibatalkan** — tidak ada
+  run di dalam antrean yang digusur. Konsekuensi operasional: antrean
+  produksi tidak pernah "lupa" deploy ber-approval, tetapi pemantauan
+  tetap wajib — bila run ke-101 ditolak, jalankan ulang dispatch
+  setelah antrean menyusut.
+- `queue: max` hanya valid bersama `cancel-in-progress: false` —
+  GitHub Actions melarang kombinasi dengan `cancel-in-progress: true`
+  (dua opsi menggambarkan perilaku bertentangan untuk run yang sedang
+  berjalan); kombinasi salah dites statik di pytest.
 - Group statis dan monopoli workflow ini (dites statik: workflow lain
   tidak boleh memakai nama group sama — group GitHub Actions berlaku
-  global lintas workflow).
+  global lintas workflow), dan TIDAK ada concurrency job-level —
+  antrian produksi dikelola tepat satu di level workflow.
 - Lapis kedua: stamp backup unik per run (§2) membuat backup antar-run
-  mustahil bertabrakan walau antrian dilanggar.
+  mustahil bertabrakan; dan kontrak rollback tidak berubah oleh
+  panjangnya antrean — rollback (§5) tetap HANYA memakai
+  `PRE_DEPLOY_STAMP` milik run yang sama, jadi urutan antrean mana pun
+  yang berjalan, pasangan kode+database yang di-restorasi selalu
+  pasangan run itu sendiri.
 
 ## 6. Rotasi kredensial (MT5_CRED_KEY)
 

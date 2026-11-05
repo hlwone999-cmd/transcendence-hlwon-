@@ -89,6 +89,23 @@ tanpa menyentuh algoritma kalkulator maupun MT5.
 | `docs/MULTI-CUSTOMER-BACKUP-ROLLBACK.md` | ubah | Runbook: §2 format stamp baru + §5.1 serialisasi deployment production |
 | `docs/HASIL-TEST-AUDIT-5.md` | **baru** | Bukti test round-5 (191 passed, 1 skipped) |
 
+## Audit round-6 (`fix/audit6-github-deploy-queue`, basis `bc4bf81`)
+
+Satu temuan deployment (antrean GitHub Actions) — concurrency group
+round-5 sudah ada, tetapi belum `queue: max`, sehingga default GitHub
+Actions hanya mempertahankan SATU running + SATU pending run dan
+pending lama bisa dibatalkan/digantikan pending terbaru. Perubahan:
+kecil, terlokalisasi pada block concurrency + dokumentasi; tanpa
+menyentuh algoritma kalkulator maupun MT5.
+
+| File | Baru/Ubah | Alasan (temuan) |
+|---|---|---|
+| `.github/workflows/backend-deploy.yml` | ubah | **Round-6 #1**: block workflow-level `concurrency` ditambah **`queue: max`** (hingga 100 run pending mengantre sequential; run tambahan saat antrean penuh ditolak). Group `backend-deploy-production` dan `cancel-in-progress: false` TIDAK berubah (temuan #2, #3). Komentar header + block concurrency menjelaskan perilaku antrean |
+| `backend/tests/test_deploy_serialization.py` | ubah | **Round-6 #4** (2 test baru): `test_concurrency_queue_max_group_dan_cancel_false_tiga_nilai` — regresi KETIGA nilai (group statis, cancel-in-progress: false, queue: max — persis tiga kunci tanpa kunci lain); `test_yaml_concurrency_struktural_tiga_kunci_tanpa_job_level` — YAML `yaml.safe_load` parse valid + dict concurrency persis tiga kunci + TIDAK ada concurrency job-level |
+| `docs/MULTI-CUSTOMER-BACKUP-ROLLBACK.md` | ubah | §5.1: YAML tiga nilai + penjelasan default GitHub Actions (1 running + 1 pending; pending lama digantikan), antrean maks **100 pending run**, run tambahan **ditolak/dibatalkan saat antrean penuh**, larangan kombinasi `queue: max` dengan `cancel-in-progress: true`, konsekuensi operasional |
+| `docs/DAFTAR-FILE-DIUBAH.md` | ubah | Bagian ini |
+| `docs/HASIL-TEST-AUDIT-6.md` | **baru** | Bukti test round-6 |
+
 ## TIDAK disentuh (protected + fitur lama)
 
 - `lib/engine.dart`, `legacy-web/script.js`, `lib/montecarlo.dart`,
