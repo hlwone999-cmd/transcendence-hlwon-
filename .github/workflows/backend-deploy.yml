@@ -79,6 +79,20 @@
 #      serialization.py). Rollback TETAP memakai PRE_DEPLOY_STAMP
 #      milik run yang sama (kontrak round-4, tidak berubah).
 #
+# Perbaikan audit round-6 (antrean pending GitHub Actions):
+#   1. QUEUE MAX (temuan #1): concurrency block workflow ditambah
+#      `queue: max`. Default GitHub Actions hanya mempertahankan SATU
+#      run berjalan + SATU run pending per group — pending LAMA bisa
+#      DIBATALKAN dan digantikan pending terbaru (run baru menggusur
+#      yang sudah mengantre). Deploy produksi yang sudah di-approve
+#      reviewer bisa hilang dari antrian. Dengan `queue: max` hingga
+#      100 run pending mengantre dan diproses SEQUENTIAL; run tambahan
+#      saat antrean penuh dibatalkan (lihat docs/MULTI-CUSTOMER-
+#      BACKUP-ROLLBACK.md §5.1). Group + cancel-in-progress: false
+#      TIDAK berubah; kontrak stamp/rollback round-4/5 tidak berubah —
+#      antrean berapa pun panjang, rollback tetap hanya memakai
+#      PRE_DEPLOY_STAMP milik run yang sama.
+#
 # Tidak ada kredensial di repo: semua via GitHub Environment secrets.
 # Workflow ini workflow_dispatch SAJA — tidak pernah dipicu push/PR —
 # dan TIDAK dijalankan oleh pipeline apa pun (perbaikan TIDAK menjalankan
@@ -128,9 +142,19 @@ env:
 # Lapis kedua: job `deploy` menarget environment `production` (proteksi
 # reviewer GitHub) dan stamp backup unik per run (round-5 #2) membuat
 # backup antar-run mustahil bertabrakan walau antrian dilanggar.
+#
+# AUDIT ROUND-6 — ANTREAN PENDING MAKSIMAL (temuan round-6 #1).
+#   Default GitHub Actions: SATU running + SATU pending per group —
+#   pending lama DIBATALKAN dan digantikan pending terbaru. Dengan
+#   `queue: max`: hingga 100 run pending mengantre dan diproses
+#   berurutan sesuai urutan masuk antrean; run tambahan yang datang
+#   saat antrean penuh (ke-101) dibatalkan — tidak ada run di antrean
+#   yang di-gusur. `queue: max` hanya boleh dipasangkan dengan
+#   cancel-in-progress false (dites statik; tidak boleh true).
 concurrency:
   group: backend-deploy-production
   cancel-in-progress: false
+  queue: max
 
 jobs:
   guard:
