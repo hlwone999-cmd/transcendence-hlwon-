@@ -27,8 +27,13 @@
 #   6. `trap rm -f` membersihkan file .part pada kegagalan apa pun.
 #
 # Kontrak (dari workflow, semua wajib):
-#   STAMP        stamp run deploy ini (YYYYmmdd-HHMMSS, dari runner agar
-#                bisa diteruskan ke rollback sebagai PRE_DEPLOY_STAMP)
+#   STAMP        identifier UNIK run deploy ini —
+#                "run-<github.run_id>-attempt-<github.run_attempt>"
+#                (audit round-5 #2, dibuat backend/deploy/make_backup_
+#                stamp.sh; BUKAN lagi timestamp detik yang bisa identik
+#                antar dua run/re-run) — diteruskan ke rollback sebagai
+#                PRE_DEPLOY_STAMP. Gate charset di bawah tetap
+#                menolak apa pun di luar [0-9A-Za-z_-].
 #   BACKUP_DIR   /var/backups/transcendence
 #   BACKUP_OWNER user pemilik direktori backup (deploy)
 #   DB_NAME      nama database PostgreSQL produksi

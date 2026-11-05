@@ -29,9 +29,12 @@
 #        d. service dibiarkan STOP — first-deploy di-retry manual
 #           sesuai runbook (provisioning §10).
 #
-# AUDIT ROUND-4 #2 — HANYA backup MILIK run deploy ini:
-#   Workflow mengekspor PRE_DEPLOY_STAMP (stamp backup run ini, lihat
-#   backend/deploy/backup_db.sh) lalu meneruskannya ke sini. Rollback
+# AUDIT ROUND-4 #2 (kontrak tetap di round-5) — HANYA backup MILIK run
+#   deploy ini:
+#   Workflow mengekspor PRE_DEPLOY_STAMP (stamp backup run ini —
+#   identifier unik "run-<github.run_id>-attempt-<github.run_attempt>",
+#   dibuat backend/deploy/make_backup_stamp.sh) lalu meneruskannya ke
+#   sini. Rollback
 #   HANYA me-restore dump `pre-deploy-$PRE_DEPLOY_STAMP.sql.gz` yang
 #   ADA dan lolos validasi (gzip -t + marker dump PG). Konsekuensi:
 #   - backup run ini GAGAL (file tidak ada / korup) => rollback

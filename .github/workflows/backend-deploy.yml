@@ -56,6 +56,29 @@
 #      lolos validasi; bila run ini gagal backup, rollback MENOLAK
 #      memakai dump lama (kondisi masih pra-deploy; intervensi manual).
 #
+# Perbaikan audit round-5 (serialisasi deployment):
+#   1. CONCURRENCY GROUP KHUSUS PRODUCTION (temuan #1): block
+#      workflow-level `concurrency: group: backend-deploy-production`
+#      + `cancel-in-progress: false`. SEMUA run workflow ini — satu-
+#      satunya jalur otomatis ke VPS/database produksi — masuk SATU
+#      antrian: tepat satu deployment berjalan pada satu waktu, run
+#      berikutnya MENUNGGU (queued), dan deployment yang sedang
+#      berjalan TIDAK PERNAH dibatalkan run baru (membatalkan deploy
+#      di tengah jalan = backup/migrasi terpotong). Nama group STATIS
+#      dan tidak dipakai workflow lain (dites statik) — pipeline CI
+#      tidak bisa memicu/membatalkan antrian ini.
+#   2. STAMP BACKUP UNIK PER RUN (temuan #2): stamp lama adalah
+#      timestamp berbasis `date` beresolusi DETIK (format
+#      YYYYmmdd-HHMMSS) — dua run (atau re-run) pada detik yang sama
+#      menghasilkan stamp identik, file backup saling menimpa, dan
+#      backup lama bisa terkecoh dianggap milik run ini. Sekarang
+#      stamp = identifier unik yang
+#      MEMUAT github.run_id dan github.run_attempt —
+#      "run-<run_id>-attempt-<run_attempt>" (filename-safe, dites:
+#      backend/deploy/make_backup_stamp.sh + tests/test_deploy_
+#      serialization.py). Rollback TETAP memakai PRE_DEPLOY_STAMP
+#      milik run yang sama (kontrak round-4, tidak berubah).
+#
 # Tidak ada kredensial di repo: semua via GitHub Environment secrets.
 # Workflow ini workflow_dispatch SAJA — tidak pernah dipicu push/PR —
 # dan TIDAK dijalankan oleh pipeline apa pun (perbaikan TIDAK menjalankan
@@ -91,6 +114,23 @@ env:
   HEALTH_URL: http://127.0.0.1:8000/api/v1/health
   # Aturan produksi (audit round-3 #2): hanya commit di sejarah branch ini.
   PROD_BRANCH: main
+
+# AUDIT ROUND-5 #1 — SERIALISASI deployment production.
+# Workflow-level (bukan job-level): berlaku utk SEMUA job run ini.
+#   - group statis "backend-deploy-production" — khusus produksi;
+#     TIDAK memuat ${{ ... }} (kalau dinamis per-ref, dua run dari
+#     ref berbeda bisa jalan paralel dan keduanya menyentuh VPS yang
+#     sama). Satu antrian global utk workflow ini = tepat satu
+#     deployment memodifikasi VPS/database pada satu waktu.
+#   - cancel-in-progress: false — run berikutnya MENUNGGU; deployment
+#     berjalan tidak dibatalkan di tengah-tengah (backup, migrasi,
+#     restart service tidak pernah terpotong oleh run lain).
+# Lapis kedua: job `deploy` menarget environment `production` (proteksi
+# reviewer GitHub) dan stamp backup unik per run (round-5 #2) membuat
+# backup antar-run mustahil bertabrakan walau antrian dilanggar.
+concurrency:
+  group: backend-deploy-production
+  cancel-in-progress: false
 
 jobs:
   guard:
@@ -175,11 +215,19 @@ jobs:
 
       - name: Backup database pra-deploy (pg_dump + gzip, tervalidasi)
         run: |
-          # AUDIT ROUND-4 #2: stamp run ini diputuskan di runner dan
-          # diekspor agar rollback (step if: failure()) tahu persis
-          # backup milik run INI — rollback tidak akan memakai backup
-          # lama bila run ini gagal sebelum/ke dalam backup.
-          STAMP=$(date +%Y%m%d-%H%M%S)
+          # AUDIT ROUND-5 #2: stamp = identifier UNIK per run deploy —
+          # "run-<github.run_id>-attempt-<github.run_attempt>" — BUKAN
+          # lagi timestamp detik yang bisa identik antar dua run/re-run
+          # (file backup saling menimpa, backup lama terkecoh dianggap
+          # milik run ini). run_id unik per workflow run; run_attempt
+          # naik pada tiap re-run -> stamp selalu unik + filename-safe
+          # (validasi ganda di backup_db.sh & rollback.sh).
+          STAMP=$(RUN_ID='${{ github.run_id }}' \
+            RUN_ATTEMPT='${{ github.run_attempt }}' \
+            bash backend/deploy/make_backup_stamp.sh)
+          # Kontrak round-4 tetap: stamp diekspor SEKARANG (sebelum
+          # backup dijalankan) agar step rollback `if: failure()` tahu
+          # persis backup milik run INI — walau step ini gagal.
           echo "PRE_DEPLOY_STAMP=$STAMP" >> "$GITHUB_ENV"
           # Logika backup = backend/deploy/backup_db.sh (dites pytest):
           # set -euo pipefail, file sementara, gzip -t + validasi isi,
