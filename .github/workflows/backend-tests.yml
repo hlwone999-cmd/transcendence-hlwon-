@@ -19,6 +19,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history — step "Bukti kalkulator lot tidak berubah"
+          # menjalankan `git diff --exit-code <base.sha>`; checkout
+          # shallow (depth 1) membuat objek base.sha tidak ada
+          # ("fatal: bad object") sehingga step melapor pelanggaran palsu
+          # padahal checksum protected files identik.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
