@@ -77,13 +77,43 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
     setState(() {
       _baseUrl = sp.getString(_kPrefUrl) ?? '';
       _token = tok ?? '';
-      _api = widget.api ?? Mt5Api(baseUrl: _baseUrl, token: _token);
+      // M-A: URL tersimpan lama bisa melanggar kebijakan M3 (mis. HTTP
+      // produksi dari konfigurasi versi sebelumnya) — jangan crash saat
+      // boot; perlakukan sebagai belum terkonfigurasi.
+      _api = widget.api ?? _buildApiSafe(_baseUrl, _token);
     });
     if (!(_api?.isConfigured ?? false)) {
       setState(() => _phase = _Phase.unconfigured);
       return;
     }
     await refreshAll();
+  }
+
+  /// M-A: konstruksi Mt5Api dengan gerbang kebijakan M3 (Mt5UrlPolicy).
+  /// URL tersimpan yang kini ilegal TIDAK membuat halaman crash — halaman
+  /// kembali ke status "belum terkonfigurasi" dan URL baru divalidasi
+  /// lewat dialog ATUR SERVER.
+  Mt5Api? _buildApiSafe(String base, String token) {
+    try {
+      return Mt5Api(baseUrl: base, token: token);
+    } on Mt5ApiError {
+      return null;
+    }
+  }
+
+  /// M-A: validasi URL jalur simpan manual memakai kebijakan M3 yang SAMA
+  /// dengan klien auth/data (Mt5UrlPolicy) — tidak ada jalur alternatif.
+  /// Null = valid. String kosong diterima (berarti menghapus konfigurasi
+  /// — perilaku lama dipertahankan).
+  String? _urlPolicyError(String rawUrl) {
+    final base = rawUrl.trim();
+    if (base.isEmpty) return null;
+    try {
+      Mt5UrlPolicy.validatedBase(base);
+      return null;
+    } on Mt5ApiError catch (e) {
+      return e.message;
+    }
   }
 
   /// Rentang aktif dari preset + zona waktu. Null hanya jika preset
@@ -268,6 +298,9 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
     final tokC = TextEditingController(text: _token);
     final emailC = TextEditingController();
     final passC = TextEditingController();
+    // M-A: pesan galat validasi URL (kebijakan M3) untuk tombol SIMPAN —
+    // ditampilkan di dalam sheet supaya penolakan terlihat jelas.
+    final sheetUrlError = ValueNotifier<String?>(null);
     final ok = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
@@ -353,10 +386,39 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
                 const SizedBox(height: 8),
                 _textField(ctx, 'Token sesi', 'xxxxxxxx...', tokC, true),
                 const SizedBox(height: 16),
+                ValueListenableBuilder<String?>(
+                  valueListenable: sheetUrlError,
+                  builder: (ctx, err, _) => err == null
+                      ? const SizedBox.shrink()
+                      : Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(Icons.report, size: 15, color: p.redSolid),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Text(
+                                  err,
+                                  style: txt(ctx, 12, color: p.redSolid),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                ),
                 GoldButton(
                   'SIMPAN',
                   icon: Icons.save_outlined,
-                  onTap: () => Navigator.pop(ctx, true),
+                  // M-A: validasi M3 sebelum sheet ditutup — URL HTTP
+                  // non-loopback DITOLAK di sini; sheet tetap terbuka
+                  // dan pesan galat ditampilkan.
+                  onTap: () {
+                    final err = _urlPolicyError(urlC.text);
+                    sheetUrlError.value = err;
+                    if (err != null) return;
+                    Navigator.pop(ctx, true);
+                  },
                 ),
               ],
             ),
@@ -365,12 +427,21 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
       },
     );
     if (ok != true) return;
+    final newBase = urlC.text.trim();
+    // M-A: gerbang persist — validasi M3 yang sama dengan klien auth/data.
+    // Tidak ada jalur alternatif: URL ilegal TIDAK tersimpan sama sekali
+    // (URL maupun token tidak disentuh) dan user melihat pesan galat.
+    final urlErr = _urlPolicyError(newBase);
+    if (urlErr != null) {
+      _toast(urlErr, err: true);
+      return;
+    }
     final sp = await SharedPreferences.getInstance();
-    await sp.setString(_kPrefUrl, urlC.text.trim());
+    await sp.setString(_kPrefUrl, newBase);
     await SessionStore().saveToken(tokC.text.trim());
     if (!mounted) return;
     setState(() {
-      _baseUrl = urlC.text.trim();
+      _baseUrl = newBase;
       _token = tokC.text.trim();
       _api = widget.api ?? Mt5Api(baseUrl: _baseUrl, token: _token);
     });

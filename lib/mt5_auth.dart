@@ -16,6 +16,8 @@
 //    timeout, kegagalan jaringan, dan 5xx TIDAK menyentuh sesi.
 //  - M3: URL HTTP ditolak untuk konfigurasi produksi; HTTP hanya untuk
 //    localhost/loopback atau development eksplisit (allowInsecureHttp).
+//    Kebijakan M3 kini SATU SUMBER di Mt5UrlPolicy (mt5_api.dart) — dipakai
+//    bersama klien auth DAN klien data (remediasi M-A, audit PR #4).
 import 'dart:convert';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -114,7 +116,8 @@ class Mt5AuthApi {
 
   /// M3: HTTP (tanpa TLS) hanya untuk localhost/loopback, atau untuk
   /// konfigurasi development yang eksplisit lewat flag ini.
-  /// Konfigurasi produksi WAJIB HTTPS.
+  /// Konfigurasi produksi WAJIB HTTPS. Validasi memakai [Mt5UrlPolicy] —
+  /// kebijakan yang sama dengan klien data Mt5Api.
   final bool allowInsecureHttp;
 
   final http.Client _http;
@@ -123,36 +126,10 @@ class Mt5AuthApi {
   Mt5AuthApi({required String baseUrl, http.Client? client,
               SessionStoreContract? store,
               this.allowInsecureHttp = false})
-      : baseUrl = _validatedBase(baseUrl, allowInsecureHttp),
+      : baseUrl = Mt5UrlPolicy.validatedBase(baseUrl,
+            allowInsecureHttp: allowInsecureHttp),
         _http = client ?? http.Client(),
         store = store ?? SessionStore();
-
-  /// M3: tolak URL HTTP untuk konfigurasi produksi. HTTP diterima hanya
-  /// untuk localhost/loopback (127.0.0.0/8, ::1) atau saat
-  /// [allowInsecureHttp] dinyalakan eksplisit (development). Host tanpa
-  /// scheme tetap dianggap https:// — perilaku lama dipertahankan.
-  static String _validatedBase(String raw, bool allowInsecureHttp) {
-    final base = raw.trim().replaceAll(RegExp(r'/+$'), '');
-    final candidate = base.startsWith('http') ? base : 'https://$base';
-    final u = Uri.tryParse(candidate);
-    if (u == null || (u.scheme != 'http' && u.scheme != 'https')) {
-      throw Mt5ApiError(Mt5ApiErrorKind.badResponse,
-          'URL server tidak valid: "$raw"');
-    }
-    if (u.scheme == 'http' && !_isLoopback(u.host) && !allowInsecureHttp) {
-      throw Mt5ApiError(
-          Mt5ApiErrorKind.badResponse,
-          'URL HTTP ditolak — produksi wajib HTTPS. HTTP hanya untuk '
-          'localhost atau mode development yang eksplisit.');
-    }
-    return base;
-  }
-
-  /// Loopback: localhost, 127.0.0.0/8, ::1 (host dari Uri sudah lowercase).
-  static bool _isLoopback(String host) {
-    final h = host.toLowerCase();
-    return h == 'localhost' || h.startsWith('127.') || h == '::1';
-  }
 
   Uri _uri(String path) {
     final base =
