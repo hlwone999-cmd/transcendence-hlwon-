@@ -8,6 +8,14 @@
 //
 // TIDAK ADA bagian dari file ini yang menyentuh kalkulator lot
 // (lib/engine.dart, lib/montecarlo.dart, main.dart — protected).
+//
+// Remediasi keamanan (hasil security review lib/mt5_auth.dart):
+//  - M1: token plaintext lama di SharedPreferences dihapus HANYA setelah
+//    migrasi ke secure storage berhasil dan terverifikasi terbaca balik.
+//  - M2: HTTP 401 pada panggilan ber-token membersihkan sesi lokal;
+//    timeout, kegagalan jaringan, dan 5xx TIDAK menyentuh sesi.
+//  - M3: URL HTTP ditolak untuk konfigurasi produksi; HTTP hanya untuk
+//    localhost/loopback atau development eksplisit (allowInsecureHttp).
 import 'dart:convert';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
@@ -37,20 +45,45 @@ class SessionStore implements SessionStoreContract {
 
   @override
   Future<String?> readToken() async {
+    String? t;
     try {
-      final t = await _sec.read(key: _kToken);
-      if (t != null && t.isNotEmpty) return t;
+      t = await _sec.read(key: _kToken);
     } catch (_) {
-      // secure storage tidak tersedia -> fallback di bawah
+      t = null; // secure storage tidak tersedia -> cek fallback di bawah
     }
+    if (t != null && t.isNotEmpty) {
+      // M1: secure storage sudah memegang sesi — sisa token lama di
+      // SharedPreferences (plaintext) tidak diperlukan lagi; bersihkan
+      // bila ada. Pembersihan bersifat best-effort.
+      try {
+        final sp = await SharedPreferences.getInstance();
+        if (sp.getString(_kLegacyToken) != null) {
+          await sp.remove(_kLegacyToken);
+        }
+      } catch (_) {
+        // gagal membersihkan sisa -> sesi tetap aman di secure storage
+      }
+      return t;
+    }
+
     final sp = await SharedPreferences.getInstance();
     final legacy = sp.getString(_kLegacyToken);
-    if (legacy != null && legacy.isNotEmpty) {
-      // migrasi sekali ke secure storage
-      await saveToken(legacy);
-      return legacy;
+    if (legacy == null || legacy.isEmpty) return null;
+
+    // M1: migrasi sekali ke secure storage. Token lama (plaintext di
+    // SharedPreferences) dihapus HANYA setelah penulisan secure storage
+    // berhasil DAN terverifikasi terbaca kembali. Bila penulisan gagal,
+    // token lama dipertahankan agar sesi tidak hilang — migrasi dicoba
+    // ulang pada readToken() berikutnya.
+    try {
+      await _sec.write(key: _kToken, value: legacy);
+      final verify = await _sec.read(key: _kToken);
+      if (verify != legacy) return legacy; // tidak terverifikasi -> simpan
+    } catch (_) {
+      return legacy; // penulisan gagal -> token lama TIDAK dihapus
     }
-    return null;
+    await sp.remove(_kLegacyToken); // migrasi sukses -> hapus plaintext
+    return legacy;
   }
 
   @override
@@ -78,13 +111,48 @@ class SessionStore implements SessionStoreContract {
 /// Klien endpoint auth & manajemen akun (/api/v1/auth/*, /api/v1/accounts).
 class Mt5AuthApi {
   final String baseUrl;
+
+  /// M3: HTTP (tanpa TLS) hanya untuk localhost/loopback, atau untuk
+  /// konfigurasi development yang eksplisit lewat flag ini.
+  /// Konfigurasi produksi WAJIB HTTPS.
+  final bool allowInsecureHttp;
+
   final http.Client _http;
   final SessionStoreContract store;
 
-  Mt5AuthApi({required this.baseUrl, http.Client? client,
-              SessionStoreContract? store})
-      : _http = client ?? http.Client(),
+  Mt5AuthApi({required String baseUrl, http.Client? client,
+              SessionStoreContract? store,
+              this.allowInsecureHttp = false})
+      : baseUrl = _validatedBase(baseUrl, allowInsecureHttp),
+        _http = client ?? http.Client(),
         store = store ?? SessionStore();
+
+  /// M3: tolak URL HTTP untuk konfigurasi produksi. HTTP diterima hanya
+  /// untuk localhost/loopback (127.0.0.0/8, ::1) atau saat
+  /// [allowInsecureHttp] dinyalakan eksplisit (development). Host tanpa
+  /// scheme tetap dianggap https:// — perilaku lama dipertahankan.
+  static String _validatedBase(String raw, bool allowInsecureHttp) {
+    final base = raw.trim().replaceAll(RegExp(r'/+$'), '');
+    final candidate = base.startsWith('http') ? base : 'https://$base';
+    final u = Uri.tryParse(candidate);
+    if (u == null || (u.scheme != 'http' && u.scheme != 'https')) {
+      throw Mt5ApiError(Mt5ApiErrorKind.badResponse,
+          'URL server tidak valid: "$raw"');
+    }
+    if (u.scheme == 'http' && !_isLoopback(u.host) && !allowInsecureHttp) {
+      throw Mt5ApiError(
+          Mt5ApiErrorKind.badResponse,
+          'URL HTTP ditolak — produksi wajib HTTPS. HTTP hanya untuk '
+          'localhost atau mode development yang eksplisit.');
+    }
+    return base;
+  }
+
+  /// Loopback: localhost, 127.0.0.0/8, ::1 (host dari Uri sudah lowercase).
+  static bool _isLoopback(String host) {
+    final h = host.toLowerCase();
+    return h == 'localhost' || h.startsWith('127.') || h == '::1';
+  }
 
   Uri _uri(String path) {
     final base =
@@ -98,16 +166,27 @@ class Mt5AuthApi {
         if (token != null && token.isNotEmpty) 'X-API-Token': token,
       };
 
-  Future<dynamic> _send(Future<http.Response> Function() fn) async {
+  /// [clearSessionOn401] = true untuk panggilan yang memakai token sesi:
+  /// bila server menjawab 401 (token tidak valid/dicabut), sesi lokal
+  /// dibersihkan (M2). Panggilan kredensial (login/register) TIDAK
+  /// membersihkan sesi — 401 di sana berarti email/password salah,
+  /// bukan sesi yang basi.
+  Future<dynamic> _send(Future<http.Response> Function() fn,
+      {bool clearSessionOn401 = false}) async {
     http.Response r;
     try {
       r = await fn().timeout(const Duration(seconds: 25));
     } catch (_) {
+      // M2: timeout / kegagalan jaringan — sesi lokal TIDAK disentuh.
       throw Mt5ApiError(Mt5ApiErrorKind.network, '');
     }
     if (r.statusCode == 401) {
+      // M2: token ditolak server -> bersihkan token/sesi lokal supaya
+      // token basi tidak terus dipakai ulang.
+      if (clearSessionOn401) await store.clear();
       throw Mt5ApiError(Mt5ApiErrorKind.auth, '');
     }
+    // M2: 5xx / respons rusak di bawah — sesi lokal TIDAK disentuh.
     dynamic j;
     try {
       j = jsonDecode(utf8.decode(r.bodyBytes));
@@ -149,8 +228,10 @@ class Mt5AuthApi {
   /// Logout: revoke token di server + hapus dari perangkat.
   Future<void> logout(String token) async {
     try {
-      await _send(() => _http.post(_uri('/auth/logout'),
-          headers: _headers(token), body: '{}'));
+      await _send(
+          () => _http.post(_uri('/auth/logout'),
+              headers: _headers(token), body: '{}'),
+          clearSessionOn401: true);
     } finally {
       await store.clear();
     }
@@ -163,21 +244,26 @@ class Mt5AuthApi {
       async {
     // _send mengembalikan Future<dynamic> — cast nilainya SETELAH await,
     // bukan cast objek Future-nya (yang selalu melempar TypeError).
-    final j = await _send(() => _http.post(_uri('/accounts/bind'),
-        headers: _headers(token),
-        body: jsonEncode(
-            {'login': login, 'server': server, 'password': password})));
+    final j = await _send(
+        () => _http.post(_uri('/accounts/bind'),
+            headers: _headers(token),
+            body: jsonEncode(
+                {'login': login, 'server': server, 'password': password})),
+        clearSessionOn401: true);
     return j as Map<String, dynamic>;
   }
 
   Future<void> unbindAccount(String token) async {
-    await _send(() => _http.post(_uri('/accounts/unbind'),
-        headers: _headers(token), body: '{}'));
+    await _send(
+        () => _http.post(_uri('/accounts/unbind'),
+            headers: _headers(token), body: '{}'),
+        clearSessionOn401: true);
   }
 
   Future<Map<String, dynamic>> me(String token) async {
-    final j =
-        await _send(() => _http.get(_uri('/auth/me'), headers: _headers(token)));
+    final j = await _send(
+        () => _http.get(_uri('/auth/me'), headers: _headers(token)),
+        clearSessionOn401: true);
     return j as Map<String, dynamic>;
   }
 }
