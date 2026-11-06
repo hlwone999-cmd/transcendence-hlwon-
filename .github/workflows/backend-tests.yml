@@ -27,7 +27,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install flask psycopg2-binary cryptography pytest pgserver \
+          pip install flask psycopg2-binary cryptography pytest pgserver pyyaml \
             python-dotenv waitress
 
       - name: Compile check (lint sintaks)
