@@ -902,11 +902,11 @@ class _JournalPageState extends State<JournalPage> {
                 expanded: true,
                 onTap: () async {
                   try {
-                    // file_picker 11.x: FilePicker.pickFiles statis
+                    // file_picker 10.x: FilePicker.platform.pickFiles
                     // mengembalikan FilePickerResult? — .files berisi
                     // PlatformFile dengan path; isi byte dibaca dari path
                     // (sama dengan readAsBytes() milik 13.x).
-                    final picked = await FilePicker.pickFiles(
+                    final picked = await FilePicker.platform.pickFiles(
                       type: FileType.custom,
                       allowedExtensions: ['xlsx'],
                     );

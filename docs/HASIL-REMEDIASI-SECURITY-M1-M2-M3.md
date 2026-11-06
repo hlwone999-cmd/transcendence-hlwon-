@@ -40,16 +40,21 @@ perilaku aplikasi tidak berubah):
 | Paket | Versi terkunci | Constraint win32 |
 |---|---|---|
 | share_plus | 12.0.2 | ^5.5.3 |
-| file_picker | 11.0.3 | ^5.9.0 |
+| file_picker | 10.3.10 | ^5.9.0 |
 | flutter_secure_storage | 9.2.4 (rentang ^9.2.2) | → fss_windows 3.1.2 → ^5.0.0 |
 | **win32 (resolved)** | **5.15.0** | memenuhi semua ^5 |
 
-`file_picker` 11.0.3 tetap menyediakan `FilePicker.pickFiles` statis,
-hanya saja mengembalikan `FilePickerResult?` (bukan `List<PlatformFile>`
-seperti 13.x) dan `PlatformFile` tanpa `readAsBytes()`. Satu-satunya
-call-site (`lib/journal.dart`, tombol PILIH FILE EXCEL) diadaptasi:
-byte dibaca via `File(path).readAsBytes()` — semantik identik dengan
-implementasi `readAsBytes()` 13.x. Perilaku UX tidak berubah.
+> Catatan putaran CI: versi file_picker awalnya dipilih 11.0.3, lalu
+> **diturunkan ke 10.3.10** setelah Build APK gagal di CI — lihat
+> bagian "Putaran CI pertama" di bawah. Alasannya bukan win32, melainkan
+> kompilasi Kotlin Android.
+
+`file_picker` 10.x memakai API `FilePicker.platform.pickFiles()` yang
+mengembalikan `FilePickerResult?`, dan `PlatformFile` tanpa
+`readAsBytes()`. Satu-satunya call-site (`lib/journal.dart`, tombol
+PILIH FILE EXCEL) diadaptasi: byte dibaca via `File(path).readAsBytes()`
+— semantik identik dengan implementasi `readAsBytes()` 13.x. Perilaku
+UX tidak berubah.
 
 `flutter pub get` nyata (Flutter 3.47.1 • Dart 3.13.1 — sama dengan
 `main.yml`) sukses tanpa konflik; `pubspec.lock` ikut di-commit
@@ -122,6 +127,60 @@ Skips Backend CI (dokumentasi jujur, bukan disembunyikan):
 2. `test_deploy_backup_permission.py:160` — butuh passwordless sudo;
    semantik izin sudah dibuktikan lewat simulasi non-root; jalan di
    CI ubuntu-latest.
+
+## Putaran CI pertama (push `cd267ee` → `4a890d2`) — dua kegagalan & perbaikannya
+
+Push pertama memicu tiga workflow. Hasil:
+
+| Workflow | `cd267ee` | `4a890d2` |
+|---|---|---|
+| Backend Lint | SUCCESS | SUCCESS |
+| Backend CI | FAILURE | **SUCCESS** |
+| Build APK | FAILURE | FAILURE → diperbaiki lagi (lihat bawah) |
+
+**Kegagalan 1 — Backend CI, step "Bukti kalkulator lot tidak berubah".**
+Log CI: `fatal: bad object fbf844ff...` → "PELANGGARAN: file kalkulator
+berubah!" — **pelanggaran palsu**: sha256 yang dicetak step itu di CI
+identik dengan baseline `fbf844f`; yang gagal adalah `git diff
+--exit-code <pull_request.base.sha>` karena checkout default
+(actions/checkout tanpa `fetch-depth`) hanya depth 1 sehingga objek
+commit base tidak ada di clone. Simulasi lokal mereproduksi keduanya:
+shallow clone → `fatal: bad object`; setelah objek base ter-fetch →
+`PROTECTED FILES IDENTIK`. Perbaikan: `fetch-depth: 0` pada checkout
+`backend-tests.yml` (commit `4a890d2`). Backend CI kemudian SUCCESS
+(run 42156293779).
+
+**Kegagalan 2 — Build APK, `:app:compileReleaseJavaWithJavac`.**
+Log CI: `GeneratedPluginRegistrant.java:19: error: cannot find symbol:
+class FilePickerPlugin (package com.mr.flutter.plugin.filepicker)`.
+Rantai penyebab:
+
+1. `android/gradle.properties` aplikasi memuat `android.builtInKotlin=false`
+   (plugin lain masih menerapkan Kotlin Gradle Plugin, jadi built-in
+   Kotlin AGP 9 dimatikan).
+2. `file_picker 11.0.3` menulis: bila AGP ≥ 9 → JANGAN terapkan
+   `org.jetbrains.kotlin.android` (mengandalkan built-in Kotlin) —
+   tanpa mengecek properti `android.builtInKotlin`. Dengan properti
+   `false`, tidak ada pihak yang mengompilasi sumber Kotlin modul
+   `:file_picker` → AAR tanpa kelas → javac gagal.
+3. Pembanding: `share_plus 12.0.2` menerapkan `kotlin-android` tanpa
+   syarat (kompilasi aman — terbukti di CI), dan
+   `android_file_picker 2.0.0` (dipakai file_picker 13.x, build sukses
+   di baseline `fbf844f`) mengecek `android.builtInKotlin` sebelum
+   memutuskan.
+
+Perbaikan: **file_picker ^11.0.3 → ^10.3.10** — rilis 10.x terakhir
+yang tidak di-retract (`10.3.11` di-retract penerbitnya; pub menolaknya),
+win32 ^5.9.0 (rantai win32 ^5 tetap utuh), dan build.gradle-nya
+menerapkan `kotlin-android` **tanpa syarat** — konstruksi yang sama
+dengan share_plus yang terbukti kompilasi. Call-site `journal.dart`
+menyesuaikan satu kata: `FilePicker.platform.pickFiles(...)`. Perilaku
+pemilihan file tidak berubah.
+
+Setelah perubahan: `flutter pub get` delta minimal (lock hanya berubah
+file_picker 11.0.3 → 10.3.10), `flutter analyze` 0 issue,
+`flutter test` **127 passed**, kelima protected files tetap IDENTIK
+(blob SHA + tripwire sha256).
 
 ## Bukti penutupan tiap temuan (test → assertion)
 

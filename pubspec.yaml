@@ -43,11 +43,16 @@ dependencies:
   share_plus: ^12.0.2
   path_provider: ^2.1.6
   excel: ^4.0.6          # baca + tulis file .xlsx (pure Dart)
-  # 11.0.3 = rilis 11.x terakhir (win32 ^5.9.0). File_picker 12/13.x
-  # memakai windows_file_picker yang mewajibkan win32 ^6.3.0 — bentrok
-  # dengan rantai win32 ^5 di atas. API statis FilePicker.pickFiles tetap
-  # ada di 11.x (return FilePickerResult? — lihat adaptasi journal.dart).
-  file_picker: ^11.0.3   # pilih file .xlsx saat impor
+  # 10.3.10 = rilis 10.x terakhir yang tidak di-retract (10.3.11
+  # diretract penerbitnya; pub menolaknya). win32 ^5.9.0, Kotlin Android
+  # diterapkan tanpa syarat — kompilasi aman dengan
+  # android.builtInKotlin=false. File_picker 11.x tidak menerapkan KGP
+  # pada AGP >= 9 dan mengandalkan built-in Kotlin yang dimatikan
+  # aplikasi ini -> kelas Android tak pernah terkompilasi (CI Build APK
+  # gagal: cannot find symbol FilePickerPlugin). 12/13.x memakai
+  # windows_file_picker (win32 ^6.3.0) — bentrok dengan rantai win32 ^5.
+  # API dipakai via FilePicker.platform (lihat journal.dart).
+  file_picker: ^10.3.10  # pilih file .xlsx saat impor
 
 dev_dependencies:
   flutter_test:
