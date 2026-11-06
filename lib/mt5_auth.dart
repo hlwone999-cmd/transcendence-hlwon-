@@ -35,6 +35,7 @@ class SessionStore implements SessionStoreContract {
               aOptions: AndroidOptions(encryptedSharedPreferences: true),
             );
 
+  @override
   Future<String?> readToken() async {
     try {
       final t = await _sec.read(key: _kToken);
@@ -52,6 +53,7 @@ class SessionStore implements SessionStoreContract {
     return null;
   }
 
+  @override
   Future<void> saveToken(String token) async {
     try {
       await _sec.write(key: _kToken, value: token);
@@ -61,6 +63,7 @@ class SessionStore implements SessionStoreContract {
     }
   }
 
+  @override
   Future<void> clear() async {
     try {
       await _sec.delete(key: _kToken);
@@ -139,7 +142,7 @@ class Mt5AuthApi {
         body: jsonEncode({
           'email': email,
           'password': password,
-          if (displayName != null) 'display_name': displayName,
+          'display_name': ?displayName,
         })));
   }
 
@@ -156,11 +159,15 @@ class Mt5AuthApi {
   /// Bind akun MT5 (MVP: 1 akun per customer). Password MT5 TIDAK
   /// pernah disimpan lokal — langsung dikirim ke server utk dienkripsi.
   Future<Map<String, dynamic>> bindAccount(String token,
-      {required int login, required String server, required String password}) {
-    return _send(() => _http.post(_uri('/accounts/bind'),
+      {required int login, required String server, required String password})
+      async {
+    // _send mengembalikan Future<dynamic> — cast nilainya SETELAH await,
+    // bukan cast objek Future-nya (yang selalu melempar TypeError).
+    final j = await _send(() => _http.post(_uri('/accounts/bind'),
         headers: _headers(token),
         body: jsonEncode(
-            {'login': login, 'server': server, 'password': password}))) as Future<Map<String, dynamic>>;
+            {'login': login, 'server': server, 'password': password})));
+    return j as Map<String, dynamic>;
   }
 
   Future<void> unbindAccount(String token) async {
@@ -168,8 +175,9 @@ class Mt5AuthApi {
         headers: _headers(token), body: '{}'));
   }
 
-  Future<Map<String, dynamic>> me(String token) {
-    return _send(() => _http.get(_uri('/auth/me'), headers: _headers(token)))
-        as Future<Map<String, dynamic>>;
+  Future<Map<String, dynamic>> me(String token) async {
+    final j =
+        await _send(() => _http.get(_uri('/auth/me'), headers: _headers(token)));
+    return j as Map<String, dynamic>;
   }
 }

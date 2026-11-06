@@ -12,6 +12,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
+import 'package:transcendence/mt5_api.dart';
 import 'package:transcendence/mt5_auth.dart';
 
 class _FakeStore implements SessionStoreContract {
@@ -41,7 +42,7 @@ void main() {
     final api = Mt5AuthApi(
         baseUrl: 'https://jurnal.domain.com',
         client: client,
-        store: SessionStore(contract: store));
+        store: store);
     final tok = await api.login('budi@test.id', 'rahasia123');
     expect(tok, 'SESI123');
     expect(store.token, 'SESI123');
@@ -55,8 +56,7 @@ void main() {
           'error': {'code': 401, 'message': 'Email atau password salah'}
         }), 401));
     final api = Mt5AuthApi(
-        baseUrl: 'https://x.id', client: client, store: SessionStore(
-        contract: store));
+        baseUrl: 'https://x.id', client: client, store: store);
     await expectLater(api.login('a@b.id', 'salah'),
         throwsA(isA<Mt5ApiError>()));
     expect(store.token, isNull); // tidak ada token tersimpan
@@ -74,8 +74,7 @@ void main() {
           }), 201);
     });
     final api = Mt5AuthApi(
-        baseUrl: 'https://x.id', client: client, store: SessionStore(
-        contract: store));
+        baseUrl: 'https://x.id', client: client, store: store);
     final r = await api.bindAccount('TOK',
         login: 11111111, server: 'Exness-MT5Real', password: 'MT5PW');
     expect(r['login'], 11111111);
@@ -89,9 +88,11 @@ void main() {
     store.token = 'OLD';
     final client = MockClient((req) async => http.Response('x', 500));
     final api = Mt5AuthApi(
-        baseUrl: 'https://x.id', client: client, store: SessionStore(
-        contract: store));
-    await api.logout('OLD'); // finally: clear tetap jalan
-    expect(store.token, isNull);
+        baseUrl: 'https://x.id', client: client, store: store);
+    // Kontrak implementasi: error server DITERUSKAN ke pemanggil, tapi
+    // finally menjamin token lokal tetap dihapus walau revoke gagal.
+    await expectLater(
+        api.logout('OLD'), throwsA(isA<Mt5ApiError>()));
+    expect(store.token, isNull); // clear di finally tetap jalan
   });
 }
