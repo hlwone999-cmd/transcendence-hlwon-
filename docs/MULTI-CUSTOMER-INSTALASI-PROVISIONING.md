@@ -202,6 +202,10 @@ ls -ld /var/backups/transcendence   # drwxr-x--- deploy deploy
 - Dump pra-deploy: `chmod 600` (umask 077), berisi data transaksi.
 - `PREVIOUS_COMMIT`, `APPROVED_COMMIT`, `LAST_PRE_DEPLOY` ditulis user
   deploy TANPA `sudo tee`.
+- Backup harian (cron) juga menulis sebagai user deploy via
+  `backend/deploy/backup_daily.sh` — user `postgres` tidak pernah
+  menulis ke direktori ini (temuan review N7; entri cron di
+  MULTI-CUSTOMER-BACKUP-ROLLBACK.md §1, sudoers minimal di §10.4).
 
 ### 10.2 Commit produksi — SHA eksplisit (temuan #2)
 
@@ -243,3 +247,33 @@ dengan stub systemctl/dropdb/psql):
      berisi skema (`customers` ada), deploy DIBATALKAN tanpa perubahan
      — selaraskan `$BACKUP_DIR/PREVIOUS_COMMIT` dulu atau kosongkan DB
      secara sadar.
+
+### 10.4 Sudoers minimal user deploy — backup (temuan review N7)
+
+Backup harian (cron, sebagai deploy) dan backup pra-deploy
+(`backup_db.sh`, dikirim workflow) sama-sama membaca dump via peer-auth
+sudo — pasang minimal:
+
+```bash
+# /etc/sudoers.d/transcendence-deploy  (pasang dengan visudo -f, chmod 440)
+deploy ALL=(postgres) NOPASSWD: /usr/bin/pg_dump transcendence
+```
+
+- `pg_dump` adalah SATU-SATUNYA sudo yang dibutuhkan cron backup
+  harian: `backup_daily.sh` memeriksa owner/mode direktori backup
+  TANPA sudo dan gagal jelas bila menyimpang (tidak mengoreksi
+  sendiri, agar permukaan sudo cron sel minimal).
+- Jalur pra-deploy/rollback milik workflow (SUDAH ADA sebelum temuan
+  ini) memakai sudo tambahan — inventaris aktual dari repo:
+  - sebagai root: `install -d -o deploy -g deploy -m 750
+    /var/backups/transcendence`; `grep` dan `sed -i` pada
+    `backend/.env`; `systemctl stop|restart
+    transcendence-backend.service`;
+  - sebagai postgres: `pg_dump transcendence`; `dropdb --if-exists`,
+    `createdb`, dan `psql` pada `transcendence` /
+    `transcendence_restore`.
+  Berikan entri setimpal (least-privilege, exact-match bila mungkin)
+  — pelengkapannya di luar lingkup perbaikan N7.
+- JANGAN pernah memberi `NOPASSWD: ALL` kepada deploy, dan direktori
+  backup TIDAK PERNAH 777 (tetap `deploy:deploy` 750, dump 600 —
+  §10.1).

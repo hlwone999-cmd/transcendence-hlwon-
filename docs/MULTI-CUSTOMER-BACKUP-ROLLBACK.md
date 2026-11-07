@@ -1,12 +1,41 @@
 # Backup & Rollback — Transcendence Multi-Customer
 
-## 1. Backup harian (cron di VPS)
+## 1. Backup harian (cron di VPS — temuan review N7)
+
+Model SATU USER: cron berjalan sebagai user **deploy** — user yang sama
+dengan jalur pra-deploy — menulis ke direktori yang sama
+(`/var/backups/transcendence`, `deploy:deploy` 750), memakai pola
+validasi yang sama dengan `backup_db.sh`. User `postgres` TIDAK PERNAH
+menulis ke direktori backup; dump dibaca via peer-auth
+`sudo -u postgres pg_dump` (tanpa kredensial di file cron). Cron lama
+(sebagai `postgres`, tanpa pipefail/validasi) gagal senyap pada dir 750
+milik deploy dan telah DIGANTI:
 
 ```bash
 # /etc/cron.d/transcendence-backup
-15 2 * * * postgres pg_dump transcendence | gzip > /var/backups/transcendence/daily-$(date +\%Y\%m\%d).sql.gz
-30 2 * * * find /var/backups/transcendence -name 'daily-*.sql.gz' -mtime +30 -delete
+SHELL=/bin/bash
+15 2 * * * deploy DB_NAME=transcendence BACKUP_DIR=/var/backups/transcendence RETENTION_DAYS=30 /opt/transcendence-hlwon-/backend/deploy/backup_daily.sh >> /var/backups/transcendence/daily-cron.log 2>&1
 ```
+
+- Skrip: `backend/deploy/backup_daily.sh` — `set -euo pipefail`, dump
+  ke `.part` (umask 077 → 600), validasi tiga lapis (`gzip -t` + tidak
+  kosong + header dump PostgreSQL), publikasi atomik `mv`, `chmod 600`.
+  Dites pytest: `backend/tests/test_backup_daily_script.py`.
+- GAGAL (pg_dump gagal/kosong/bukan-PG/gzip korup/dir tidak sesuai
+  owner-mode) → exit non-zero, TIDAK ada file final, `LAST_DAILY` tidak
+  berubah, `.part` dibersihkan, penyebab tertulis di `daily-cron.log`.
+- `LAST_DAILY` = stamp `daily-YYYYmmdd-HHMMSS` backup harian valid
+  terakhir — informasi operasi (pantau usianya; cron tidak mengirim
+  email bila MAILTO tidak dikonfigurasi).
+- Retensi: hanya `daily-*.sql.gz` lebih tua dari `RETENTION_DAYS`
+  (default 30) yang dihapus — `pre-deploy-*`, `manual-*`, dan file
+  kontrak stamp (`LAST_*`/`APPROVED_COMMIT`/`PREVIOUS_COMMIT`) tidak
+  pernah disentuh.
+- Prasyarat: direktori terprovisioning (§10.1 di
+  MULTI-CUSTOMER-INSTALASI-PROVISIONING.md) + sudoers minimal deploy
+  (§10.4 dokumen yang sama): hanya `sudo -u postgres pg_dump
+  transcendence`. Preflight izin dilakukan TANPA sudo dan gagal jelas
+  bila owner/mode menyimpang.
 
 ## 2. Backup pra-deploy (otomatis + TERNVALIDASI)
 
