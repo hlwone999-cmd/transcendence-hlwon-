@@ -1,32 +1,31 @@
-"""Blueprint API Jurnal MT5 (url_prefix /api/v1).
+"""Blueprint API Jurnal MT5 multi-customer (url_prefix /api/v1).
 
-Autentikasi: header X-API-Token dibandingkan (constant-time) dengan env
-API_TOKEN. Jika API_TOKEN kosong -> mode dev tanpa auth (diperingatkan
-di log; WAJIB diisi di produksi).
+AUTENTIKASI (brief §7): token sesi customer via 'Authorization: Bearer'
+ATAU header lama 'X-API-Token' (kompatibel klien Flutter yang sudah ada).
+Customer context SELALU diturunkan dari token yang diverifikasi server —
+customer_id/account_id dari URL/query/body TIDAK PERNAH dipercaya (§6).
+
+SEMANTIK FILTER TANGGAL (tidak berubah — lihat juga services/analytics.py
+dan docs/DATE-TIMEZONE-RECONCILIATION.md):
+- `from` : INKLUSIF. Format `YYYY-MM-DD` (00:00:00 UTC) atau ISO penuh.
+- `to`   : default INKLUSIF; `YYYY-MM-DD` diartikan akhir hari itu.
+- `to_exclusive` : `1/true/yes/on` → interval efektif [from, to).
+- Semua perbandingan memakai UTC; konversi zona tampilan di klien.
 
 Semua endpoint gagal-aman: kalau MT5/terminal tidak tersedia, tetap
 balas JSON status disconnected — tidak pernah crash.
-
-SEMANTIK FILTER TANGGAL (konsisten di semua endpoint — lihat juga
-services/analytics.py dan docs/DATE-TIMEZONE-RECONCILIATION.md):
-- `from` : INKLUSIF. Format `YYYY-MM-DD` (00:00:00 UTC) atau ISO penuh.
-- `to`   : default INKLUSIF; `YYYY-MM-DD` diartikan akhir hari itu
-  (23:59:59 UTC).
-- `to_exclusive` : `1/true/yes/on` → `to` jadi EKSKLUSIF, sehingga
-  interval efektif = [from, to). Klien (APK) memakai mode ini agar
-  trade tepat tengah malam tidak dobel/terbuang antar periode.
-- Semua perbandingan memakai UTC sebagai zona kanonik; konversi zona
-  tampilan (mis. Asia/Jakarta) dilakukan di klien sebelum mengirim.
 """
 from __future__ import annotations
 
 import hmac
 import logging
+import threading
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 from flask import Blueprint, abort, current_app, g, jsonify, request
 
+import db as dbmod
 from mt5client.provider import MT5Error
 from services import analytics
 
@@ -44,18 +43,69 @@ def get_db():
     return dbmod.get_db(cfg())
 
 
-def require_token(fn):
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _admin_token_ok() -> bool:
+    """Token bootstrap admin (env API_TOKEN) — hanya utk /admin/*."""
+    expected = cfg().api_token
+    got = request.headers.get("X-API-Token", "")
+    return bool(expected) and hmac.compare_digest(got, expected)
+
+
+# ------------------------------------------------------------ customer ctx
+def require_customer(fn):
+    """Wajib token sesi valid; set g.customer_id/g.user_id/g.token_id."""
     @wraps(fn)
     def wrapper(*a, **kw):
-        expected = cfg().api_token
-        if expected:
-            got = request.headers.get("X-API-Token", "")
-            if not got or not hmac.compare_digest(got, expected):
-                abort(401, description="Token API tidak valid atau kosong")
+        import auth as authmod
+        token = authmod._extract_token()
+        info = authmod.resolve_token(get_db(), token) if token else None
+        if info is None:
+            abort(401, description="Token sesi tidak valid / kedaluwarsa / "
+                                   "sudah logout")
+        g.customer_id = info["customer_id"]
+        g.user_id = info["user_id"]
+        g.token_id = info["token_id"]
+        # RLS defense-in-depth (audit #2): scope koneksi PostgreSQL ke
+        # customer hasil verifikasi token (SET LOCAL per transaksi).
+        # SQLite no-op. Bukan pengganti filter customer_id di query.
+        import db as dbmod
+        dbmod.set_customer_context(get_db(), g.customer_id)
         return fn(*a, **kw)
     return wrapper
 
 
+def require_rate_limit(action: str, limit: int, window_seconds: int):
+    """Dekorator rate-limit per IP+aksi (sliding window in-memory)."""
+    def deco(fn):
+        @wraps(fn)
+        def wrapper(*a, **kw):
+            import auth as authmod
+            ip = authmod.current_ip() or "?"
+            try:
+                authmod.register_rate_limit(f"{action}:{ip}", limit,
+                                            window_seconds)
+            except authmod.AuthError as e:
+                abort(e.code, description=e.message)
+            return fn(*a, **kw)
+        return wrapper
+    return deco
+
+
+def _own_account(conn):
+    """Akun MT5 milik customer pada g — SELALU dari DB, bukan request."""
+    row = conn.execute(
+        "SELECT * FROM mt5_accounts WHERE customer_id=?",
+        (g.customer_id,)).fetchone()
+    if row is None:
+        abort(404, description="Belum ada akun MT5 ter-bind. "
+                               "Bind dulu: POST /api/v1/accounts/bind")
+    return row
+
+
+# ------------------------------------------------------------- parse helper
 def _parse_date(name: str, value: str, end_of_day: bool = False) -> str:
     v = (value or "").strip()
     if not v:
@@ -84,18 +134,21 @@ def _parse_int(name: str, value, lo: int, hi: int) -> int:
 
 def _parse_enum(name: str, value: str, allowed: tuple) -> str:
     if value not in allowed:
-        abort(400, description=f"Parameter '{name}' harus salah satu: {', '.join(allowed)}")
+        abort(400, description=f"Parameter '{name}' harus salah satu: "
+                               f"{', '.join(allowed)}")
     return value
 
 
-def _json_filters(end_of_day_to: bool = True):
-    """Parse `from`/`to`/`symbol`/`to_exclusive` dari query string.
+def _bool_arg(name: str) -> bool:
+    v = (request.args.get(name) or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
 
-    Return (from, to, symbol, to_exclusive). from inkusif; to inkusif
-    (kecuali to_exclusive). Validasi: from tidak boleh > to.
-    """
+
+def _json_filters(end_of_day_to: bool = True):
+    """Parse `from`/`to`/`symbol`/`to_exclusive` dari query string."""
     args = request.args
-    f_from = _parse_date("from", args.get("from", "2000-01-01")) if "from" in args else None
+    f_from = _parse_date("from", args.get("from", "2000-01-01")) \
+        if "from" in args else None
     f_to = None
     if "to" in args:
         f_to = _parse_date("to", args["to"], end_of_day=end_of_day_to)
@@ -106,32 +159,344 @@ def _json_filters(end_of_day_to: bool = True):
     return f_from, f_to, symbol, to_exclusive
 
 
-def _bool_arg(name: str) -> bool:
-    v = (request.args.get(name) or "").strip().lower()
-    return v in ("1", "true", "yes", "on")
-
-
-def _account_id(conn) -> int:
-    row = conn.execute(
-        "SELECT id FROM mt5_accounts ORDER BY last_sync_at DESC LIMIT 1").fetchone()
-    if row is None:
-        abort(404, description="Belum ada akun MT5 tersinkron. Jalankan sync dulu.")
-    return int(row["id"])
+def _audit(action: str, **kw):
+    import audit as auditmod
+    auditmod.audit(get_db(), action, customer_id=getattr(g, "customer_id",
+                                                         None),
+                   user_id=getattr(g, "user_id", None), **kw)
 
 
 # ------------------------------------------------------------------ health
+# Tabel minimum yang WAJIB ada (brief §5) supaya backend benar-benar
+# siap melayani — bukan sekadar proses hidup.
+CORE_TABLES = ("customers", "users", "auth_tokens", "mt5_accounts",
+               "mt5_credentials", "mt5_terminals", "mt5_deals",
+               "mt5_orders")
+
+
+def _existing_tables(conn) -> set[str]:
+    """Nama tabel yang benar-benar ada (dipakai health readiness)."""
+    if dbmod.is_postgres(conn):
+        rows = conn.execute(
+            "SELECT tablename AS t FROM pg_tables"
+            " WHERE schemaname='public'").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT name AS t FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    return {str(r["t"]) for r in rows}
+
+
+def _database_readiness(conn) -> dict:
+    """Cek koneksi + skema minimum (audit round-3 #4).
+
+    Return dict laporan; key 'ok' = readiness penuh. TIDAK pernah
+    melempar exception — kegagalan dilaporkan sebagai status.
+    """
+    try:
+        engine = "postgresql" if dbmod.is_postgres(conn) else "sqlite"
+        conn.execute("SELECT 1")
+        tables = _existing_tables(conn)
+        missing = [t for t in CORE_TABLES if t not in tables]
+        report = {"ok": not missing, "engine": engine}
+        if missing:
+            report["missing_tables"] = missing
+        return report
+    except Exception as e:  # noqa: BLE001 — health tidak boleh 500 mentah
+        return {"ok": False, "engine": None,
+                "error": f"{type(e).__name__}: {str(e)[:120]}"}
+
+
+def _terminals_overview(conn) -> dict:
+    """Ringkasan status terminal MT5 (audit round-3 #4).
+
+    DILAPORKAN TERPISAH dan TIDAK pernah memengaruhi 200/503 health
+    backend: backend tetap 'ok' walau MT5/terminal mati. Pada
+    PostgreSQL tanpa scope customer hanya baris yang terlihat oleh
+    role aplikasi yang dihitung (RLS default-deny); probe per customer
+    tersedia di GET /api/v1/admin/health/terminals.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT customer_id, status, rpyc_port, last_health_at"
+            " FROM mt5_terminals ORDER BY customer_id").fetchall()
+        return {"reported": len(rows),
+                "probe_endpoint": "/api/v1/admin/health/terminals",
+                "note": "tidak dipakai untuk penentuan health backend"}
+    except Exception as e:  # noqa: BLE001
+        return {"reported": None,
+                "error": f"{type(e).__name__}: {str(e)[:120]}"}
+
+
 @api_bp.get("/health")
 def health():
-    return jsonify({"ok": True, "service": "jurnal-mt5", "time": _now_iso()})
+    """Readiness backend: database + skema minimum (audit round-3 #4).
+
+    - 200 : koneksi DB hidup DAN tabel inti ada.
+    - 503 : DB tidak terjangkau / skema belum dimigrasi.
+    Status terminal MT5 hanya DILAPORKAN (sub-objek `mt5_terminals`)
+    dan tidak pernah menurunkan health backend — tidak ada kewajiban
+    MT5 live untuk health (audit: jangan wajibkan MT5 untuk health).
+    """
+    # koneksi DB gagal pun harus tetap 503 terstruktur, bukan 500 mentah
+    try:
+        conn = get_db()
+    except Exception as e:  # noqa: BLE001
+        db_report = {"ok": False, "engine": None,
+                     "error": f"{type(e).__name__}: {str(e)[:120]}"}
+        terminals = {"reported": None, "error": "database tidak tersedia"}
+    else:
+        db_report = _database_readiness(conn)
+        # health hanya SELECT — akhiri transaksi agar tidak idle-in-tx;
+        # koneksi thread-local tetap dipakai request lain setelah ini.
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        terminals = _terminals_overview(conn)
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+    ok = bool(db_report.get("ok"))
+    body = {"ok": ok, "service": "jurnal-mt5", "time": _now_iso(),
+            "database": db_report, "mt5_terminals": terminals}
+    return jsonify(body), (200 if ok else 503)
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+@api_bp.get("/admin/health/terminals")
+def admin_health_terminals():
+    """Status terminal per customer — probe NYATA, terpisah dari health.
+
+    Bootstrap admin via env API_TOKEN. Untuk setiap customer aktif:
+    scope RLS ke customer itu, baca baris terminal, lalu probe TCP+
+    handshake RPyC (terminal_registry.health_check — mode deep MT5
+    HANYA bila ?deep=1). Kegagalan satu terminal tidak menggagalkan
+    endpoint; endpoint tetap 200 dengan status per customer (bila DB
+    sendiri mati, /api/v1/health yang sudah melapor 503).
+    """
+    if not _admin_token_ok():
+        abort(401, description="Token admin tidak valid")
+    conn = get_db()
+    deep = _bool_arg("deep")
+    ids = [int(r["id"]) for r in conn.execute(
+        "SELECT id FROM customers ORDER BY id").fetchall()]
+    items = []
+    registry = current_app.extensions.get("mt5_registry")
+    for cid in ids:
+        try:
+            dbmod.set_customer_context(conn, cid)
+            if registry is None:
+                items.append({"customer_id": cid, "status": "unknown",
+                              "error": "registry tidak tersedia"})
+                continue
+            items.append(registry.health_check(conn, cid, deep=deep,
+                                               timeout=2.0))
+        except Exception as e:  # noqa: BLE001 — 1 customer gagal ≠ semua
+            items.append({"customer_id": cid, "status": "error",
+                          "error": f"{type(e).__name__}: {str(e)[:120]}"})
+        finally:
+            dbmod.clear_customer_context(conn)
+    try:
+        conn.rollback()
+    except Exception:  # noqa: BLE001
+        pass
+    return jsonify({"ok": True, "checked_at": _now_iso(),
+                    "items": items})
+
+
+# ------------------------------------------------------------------- auth
+@api_bp.post("/auth/register")
+@require_rate_limit("register", 5, 3600)
+def auth_register():
+    import audit as auditmod
+    import auth as authmod
+    body = request.get_json(silent=True) or {}
+    email = str(body.get("email") or "")
+    password = str(body.get("password") or "")
+    display_name = str(body.get("display_name") or "") or None
+    conn = get_db()
+    try:
+        created = authmod.register_customer(conn, cfg(), email, password,
+                                            display_name)
+    except authmod.AuthError as e:
+        abort(e.code, description=e.message)
+    auditmod.audit(conn, "register", customer_id=created["customer_id"],
+                   user_id=created["user_id"],
+                   detail={"code": created["code"]})
+    return jsonify({"ok": True, "customer_code": created["code"],
+                    "email": created["email"]}), 201
+
+
+@api_bp.post("/auth/login")
+@require_rate_limit("login", 10, 300)
+def auth_login():
+    import audit as auditmod
+    import auth as authmod
+    body = request.get_json(silent=True) or {}
+    email = str(body.get("email") or "")
+    password = str(body.get("password") or "")
+    conn = get_db()
+    try:
+        result = authmod.login(conn, cfg(), email, password,
+                               authmod.current_ip())
+    except authmod.AuthError as e:
+        auditmod.audit(conn, "login_gagal",
+                       detail={"reason": e.message[:120]})
+        abort(e.code, description=e.message)
+    auditmod.audit(conn, "login", customer_id=result["customer_id"],
+                   user_id=result["user_id"])
+    return jsonify({"ok": True, "token": result["token"],
+                    "token_type": "bearer"})
+
+
+@api_bp.post("/auth/logout")
+@require_customer
+def auth_logout():
+    import auth as authmod
+    authmod.revoke_token(get_db(), g.token_id)
+    _audit("logout")
+    return jsonify({"ok": True})
+
+
+@api_bp.get("/auth/me")
+@require_customer
+def auth_me():
+    conn = get_db()
+    row = conn.execute(
+        """SELECT c.id AS customer_id, c.code, c.display_name, c.status,
+                  u.email, u.last_login_at
+           FROM customers c JOIN users u ON u.customer_id = c.id
+           WHERE c.id=?""", (g.customer_id,)).fetchone()
+    acc = conn.execute(
+        "SELECT id, login, server, currency, last_sync_at FROM mt5_accounts"
+        " WHERE customer_id=?", (g.customer_id,)).fetchone()
+    term = conn.execute(
+        "SELECT rpyc_port, service_name, status FROM mt5_terminals"
+        " WHERE customer_id=?", (g.customer_id,)).fetchone()
+    return jsonify({
+        "customer": dict(row) if row else None,
+        "account": dict(acc) if acc else None,
+        "terminal": dict(term) if term else None,
+    })
+
+
+# ----------------------------------------------------- akun MT5 (bind/unbind)
+@api_bp.get("/accounts")
+@require_customer
+def accounts_current():
+    conn = get_db()
+    acc = conn.execute(
+        "SELECT * FROM mt5_accounts WHERE customer_id=?",
+        (g.customer_id,)).fetchone()
+    return jsonify({"account": dict(acc) if acc else None})
+
+
+@api_bp.post("/accounts/bind")
+@require_customer
+def accounts_bind():
+    """Bind 1 akun MT5 (MVP: satu per customer; kredensial dienkripsi)."""
+    import audit as auditmod
+    from security import crypto
+    from services.terminals import TerminalError
+    body = request.get_json(silent=True) or {}
+    try:
+        login_val = int(body.get("login"))
+    except (TypeError, ValueError):
+        abort(400, description="'login' harus angka (login MT5)")
+    password = str(body.get("password") or "")
+    server = str(body.get("server") or "").strip()
+    if not login_val or not server or not password:
+        abort(400, description="'login', 'password', dan 'server' wajib")
+    if len(server) > 128 or len(password) > 256:
+        abort(400, description="'server'/'password' terlalu panjang")
+
+    conn = get_db()
+    if conn.execute("SELECT 1 FROM mt5_accounts WHERE customer_id=?",
+                    (g.customer_id,)).fetchone() is not None:
+        abort(409, description="Customer sudah punya akun MT5 (MVP: 1 akun "
+                               "per customer). Unbind dulu untuk mengganti.")
+    if conn.execute("SELECT 1 FROM mt5_accounts WHERE login=? AND server=?",
+                    (login_val, server)).fetchone() is not None:
+        abort(409, description="Akun MT5 itu sudah ter-bind ke customer lain")
+    try:
+        enc, key_version = crypto.encrypt_password(cfg(), password)
+    except crypto.CredentialCryptoError as e:
+        abort(503, description=str(e))
+    registry = current_app.extensions["mt5_registry"]
+    try:
+        term = registry.provision_terminal(conn, g.customer_id)
+    except TerminalError as e:
+        abort(409, description=str(e))
+    now = _now_iso()
+    try:
+        conn.execute(
+            """INSERT INTO mt5_accounts (customer_id, login, server,
+                 first_sync_at, last_sync_at) VALUES (?,?,?,?,?)""",
+            (g.customer_id, login_val, server, now, None))
+        acc_id = int(conn.execute(
+            "SELECT id FROM mt5_accounts WHERE customer_id=?",
+            (g.customer_id,)).fetchone()["id"])
+        conn.execute(
+            "INSERT INTO mt5_credentials (account_id, enc_password,"
+            " key_version) VALUES (?,?,?)", (acc_id, enc, key_version))
+        conn.commit()
+    except dbmod.INTEGRITY_ERRORS as e:
+        # balapan bind login/server sama antar customer (UNIQUE) —
+        # rollback melepas lock terminal juga; respons tetap 409.
+        conn.rollback()
+        log.warning("bind bentrok (UNIQUE) customer=%s login=%s: %s",
+                    g.customer_id, login_val, e)
+        abort(409, description="Akun MT5 itu sudah ter-bind ke customer "
+                               "lain (bentrok)")
+    auditmod.audit(conn, "bind", customer_id=g.customer_id, user_id=g.user_id,
+                   entity=f"mt5_account:{acc_id}",
+                   detail={"server": server, "rpyc_port": term["rpyc_port"]})
+
+    # sync awal di background — bind tidak diblokir riwayat 90 hari.
+    # Dimatikan bila provider di-inject (konteks test) agar deterministik.
+    if current_app.extensions.get("auto_initial_sync", True):
+        app_obj = current_app._get_current_object()
+
+        def _initial_sync(app=app_obj, acc=acc_id):
+            try:
+                svc = app.extensions["mt5_sync"]
+                with app.app_context():
+                    svc.sync_account(acc, mode="initial")
+            except Exception:  # noqa: BLE001
+                log.exception("sync awal akun %d gagal", acc)
+        threading.Thread(target=_initial_sync, daemon=True,
+                         name=f"initial-sync-{acc_id}").start()
+
+    acc = conn.execute("SELECT * FROM mt5_accounts WHERE id=?",
+                       (acc_id,)).fetchone()
+    out = dict(acc)
+    out["terminal"] = term
+    return jsonify(out), 201
+
+
+@api_bp.post("/accounts/unbind")
+@require_customer
+def accounts_unbind():
+    """Lepas akun: hapus akun+data (CASCADE), evict runtime & terminal."""
+    import audit as auditmod
+    conn = get_db()
+    acc = _own_account(conn)
+    acc_id = int(acc["id"])
+    registry = current_app.extensions["mt5_registry"]
+    registry.evict(acc_id)          # terminal lain TIDAK terpengaruh
+    conn.execute("DELETE FROM mt5_terminals WHERE customer_id=?",
+                 (g.customer_id,))
+    conn.execute("DELETE FROM mt5_accounts WHERE id=?", (acc_id,))
+    conn.commit()
+    auditmod.audit(conn, "unbind", customer_id=g.customer_id,
+                   user_id=g.user_id, entity=f"mt5_account:{acc_id}")
+    return jsonify({"ok": True, "removed_account_id": acc_id})
 
 
 # ------------------------------------------------------------------- MT5
 @api_bp.get("/mt5/status")
-@require_token
+@require_customer
 def mt5_status():
     c = cfg()
     conn = get_db()
@@ -142,48 +507,77 @@ def mt5_status():
         "reason": None if c.mt5_enabled else "disabled",
         "time": _now_iso(),
     }
-    if c.mt5_enabled:
+    acc = conn.execute(
+        "SELECT * FROM mt5_accounts WHERE customer_id=?",
+        (g.customer_id,)).fetchone()
+    term = conn.execute(
+        "SELECT * FROM mt5_terminals WHERE customer_id=?",
+        (g.customer_id,)).fetchone()
+    if acc is not None:
+        status["account_id"] = int(acc["id"])
+    if term is not None:
+        # additive (kompatibel): info terminal milik customer ini saja
+        status["terminal"] = {
+            "rpyc_port": term["rpyc_port"],
+            "service_name": term["service_name"],
+            "status": term["status"],
+        }
+    if c.mt5_enabled and acc is not None:
         try:
-            factory = current_app.extensions["mt5_provider_factory"]
-            p = factory()
-            p.connect()
-            acc = p.account_info()
-            p.disconnect()
+            registry = current_app.extensions["mt5_registry"]
+            rt = registry.runtime_for(conn, int(acc["id"]))
+            rt.provider.connect()
+            info = rt.provider.account_info()
+            rt.provider.disconnect()
             status["connected"] = True
             status["reason"] = None
             status["live_account"] = {
-                "login": acc.get("login"), "server": acc.get("server"),
-                "currency": acc.get("currency"), "balance": acc.get("balance"),
-                "equity": acc.get("equity"),
+                "login": info.get("login"), "server": info.get("server"),
+                "currency": info.get("currency"),
+                "balance": info.get("balance"), "equity": info.get("equity"),
             }
         except MT5Error as e:
             status["reason"] = str(e)
-    state = conn.execute(
-        "SELECT * FROM sync_state ORDER BY last_sync_finished_at DESC LIMIT 1"
-    ).fetchone()
-    last_log = conn.execute(
-        "SELECT * FROM sync_logs ORDER BY id DESC LIMIT 1").fetchone()
+        except Exception as e:  # noqa: BLE001 — status tidak boleh crash
+            status["reason"] = f"{type(e).__name__}"
+    state = None
+    if acc is not None:
+        state = conn.execute(
+            "SELECT * FROM sync_state WHERE account_id=?",
+            (acc["id"],)).fetchone()
+    last_log = None
+    if acc is not None:
+        last_log = conn.execute(
+            "SELECT * FROM sync_logs WHERE account_id=? ORDER BY id DESC"
+            " LIMIT 1", (acc["id"],)).fetchone()
+    counts = {"trades": 0, "deals": 0}
+    if acc is not None:
+        counts = conn.execute(
+            "SELECT (SELECT COUNT(*) FROM " + _trades_table() +
+            " WHERE account_id=?) AS trades,"
+            " (SELECT COUNT(*) FROM mt5_deals WHERE account_id=?) AS deals",
+            (acc["id"], acc["id"])).fetchone()
+        counts = {"trades": counts["trades"], "deals": counts["deals"]}
     status["last_sync"] = dict(state) if state else None
     status["last_run"] = dict(last_log) if last_log else None
-    counts = conn.execute(
-        "SELECT (SELECT COUNT(*) FROM trades) AS trades,"
-        " (SELECT COUNT(*) FROM mt5_deals) AS deals").fetchone()
-    status["stored"] = {"trades": counts["trades"], "deals": counts["deals"]}
+    status["stored"] = counts
     return jsonify(status)
 
 
+def _trades_table() -> str:
+    import db as dbmod
+    return dbmod.trades_table(get_db())
+
+
 @api_bp.get("/mt5/account")
-@require_token
+@require_customer
 def mt5_account():
-    row = get_db().execute(
-        "SELECT * FROM mt5_accounts ORDER BY last_sync_at DESC LIMIT 1").fetchone()
-    if row is None:
-        abort(404, description="Belum ada akun tersinkron")
+    row = _own_account(get_db())
     return jsonify(dict(row))
 
 
 @api_bp.post("/mt5/sync")
-@require_token
+@require_customer
 def mt5_sync():
     body = request.get_json(silent=True) or {}
     mode = body.get("mode", "incremental")
@@ -192,41 +586,49 @@ def mt5_sync():
     days = None
     if body.get("days") is not None:
         days = _parse_int("days", body.get("days"), 1, 3650)
+    conn = get_db()
+    acc = _own_account(conn)
     svc = current_app.extensions["mt5_sync"]
     try:
-        summary = svc.sync(mode=mode, full=full, days=days)
+        summary = svc.sync_account(int(acc["id"]), mode=mode, full=full,
+                                   days=days)
     except Exception as e:  # SyncLockBusy dari thread lain
-        if "berjalan" in str(e):
-            abort(409, description="Sync lain sedang berjalan, coba lagi nanti")
+        if "sedang berjalan" in str(e):
+            abort(409, description="Sync lain sedang berjalan, coba lagi "
+                                   "nanti")
         raise
+    _audit("sync_manual", entity=f"mt5_account:{acc['id']}",
+           detail={"mode": mode, "status": summary.get("status")})
     return jsonify(summary), 200
 
 
 @api_bp.get("/mt5/sync/status")
-@require_token
+@require_customer
 def mt5_sync_status():
     conn = get_db()
-    c = cfg()
+    acc = _own_account(conn)
     state = conn.execute(
-        "SELECT * FROM sync_state ORDER BY last_sync_finished_at DESC LIMIT 1"
-    ).fetchone()
+        "SELECT * FROM sync_state WHERE account_id=?",
+        (acc["id"],)).fetchone()
     logs = [dict(r) for r in conn.execute(
-        "SELECT * FROM sync_logs ORDER BY id DESC LIMIT 20")]
+        "SELECT * FROM sync_logs WHERE account_id=? ORDER BY id DESC"
+        " LIMIT 20", (acc["id"],))]
     sched = current_app.extensions.get("mt5_scheduler")
     return jsonify({
         "state": dict(state) if state else None,
         "recent_logs": logs,
         "scheduler": sched.state() if sched else None,
-        "interval_seconds": c.mt5_sync_interval_seconds,
+        "interval_seconds": cfg().mt5_sync_interval_seconds,
     })
 
 
 # ---------------------------------------------------------------- journal
 @api_bp.get("/journal/trades")
-@require_token
+@require_customer
 def journal_trades():
     conn = get_db()
-    account_id = _account_id(conn)
+    account_id = int(_own_account(conn)["id"])
+    tt = _trades_table()
     f_from, f_to, symbol, to_excl = _json_filters()
     status = request.args.get("status", "all")
     _parse_enum("status", status, ("all", "open", "closed"))
@@ -237,7 +639,8 @@ def journal_trades():
     order = request.args.get("order", "desc")
     _parse_enum("order", order, ("asc", "desc"))
     page = _parse_int("page", request.args.get("page", 1), 1, 10_000)
-    page_size = _parse_int("page_size", request.args.get("page_size", 50), 1, 200)
+    page_size = _parse_int("page_size",
+                           request.args.get("page_size", 50), 1, 200)
 
     where = "account_id=?"
     args: list = [account_id]
@@ -263,9 +666,10 @@ def journal_trades():
                  "net_profit": "net_profit"}[sort]
 
     total = conn.execute(
-        f"SELECT COUNT(*) AS n FROM trades WHERE {where}", args).fetchone()["n"]
+        f"SELECT COUNT(*) AS n FROM {tt} WHERE {where}",
+        args).fetchone()["n"]
     rows = conn.execute(
-        f"SELECT * FROM trades WHERE {where}"
+        f"SELECT * FROM {tt} WHERE {where}"
         f" ORDER BY {order_col} {order.upper()} LIMIT ? OFFSET ?",
         args + [page_size, (page - 1) * page_size],
     ).fetchall()
@@ -283,15 +687,17 @@ def journal_trades():
 
 
 @api_bp.get("/journal/trades/<int:position_id>")
-@require_token
+@require_customer
 def journal_trade_detail(position_id: int):
     conn = get_db()
-    account_id = _account_id(conn)
+    account_id = int(_own_account(conn)["id"])
+    tt = _trades_table()
     row = conn.execute(
-        "SELECT * FROM trades WHERE account_id=? AND position_id=?",
+        f"SELECT * FROM {tt} WHERE account_id=? AND position_id=?",
         (account_id, position_id)).fetchone()
     if row is None:
-        abort(404, description=f"Trade position_id={position_id} tidak ditemukan")
+        abort(404, description=f"Trade position_id={position_id} tidak "
+                               f"ditemukan")
     meta = analytics.load_symbol_meta(conn, account_id)
     trade = analytics.enrich_trade(dict(row), meta, cfg().symbol_config)
     deals = [dict(r) for r in conn.execute(
@@ -304,53 +710,88 @@ def journal_trade_detail(position_id: int):
 
 
 @api_bp.get("/journal/stats")
-@require_token
+@require_customer
 def journal_stats():
     conn = get_db()
-    account_id = _account_id(conn)
+    account_id = int(_own_account(conn)["id"])
     f_from, f_to, symbol, to_excl = _json_filters()
     stats = analytics.compute_stats(conn, account_id, cfg().symbol_config,
-                                    f_from, f_to, symbol, to_exclusive=to_excl)
+                                    f_from, f_to, symbol,
+                                    to_exclusive=to_excl)
     return jsonify(stats)
 
 
 @api_bp.get("/journal/equity-curve")
-@require_token
+@require_customer
 def journal_equity_curve():
     conn = get_db()
-    account_id = _account_id(conn)
+    account_id = int(_own_account(conn)["id"])
     f_from, f_to, symbol, to_excl = _json_filters()
     curve = analytics.equity_curve(conn, account_id, cfg().symbol_config,
-                                   f_from, f_to, symbol, to_exclusive=to_excl)
+                                   f_from, f_to, symbol,
+                                   to_exclusive=to_excl)
     return jsonify(curve)
 
 
 @api_bp.get("/journal/reconciliation")
-@require_token
+@require_customer
 def journal_reconciliation():
-    """Rekonsiliasi raw deals vs trades pada interval yang identik.
-
-    Query: from, to, to_exclusive, symbol — semantik sama dengan
-    /journal/stats. Berguna untuk membandingkan total dengan MT5
-    History -> Positions / History -> Deals.
-    """
+    """Rekonsiliasi raw deals vs trades pada interval yang identik."""
     conn = get_db()
-    account_id = _account_id(conn)
+    account_id = int(_own_account(conn)["id"])
     f_from, f_to, symbol, to_excl = _json_filters()
     rec = analytics.reconciliation(conn, account_id,
-                                   f_from, f_to, symbol, to_exclusive=to_excl)
+                                   f_from, f_to, symbol,
+                                   to_exclusive=to_excl)
     return jsonify(rec)
 
 
 @api_bp.get("/symbols")
-@require_token
+@require_customer
 def symbols():
     conn = get_db()
-    account_id = _account_id(conn)
+    account_id = int(_own_account(conn)["id"])
     rows = conn.execute(
         "SELECT symbol, point, digits, pip_size FROM mt5_symbols"
         " WHERE account_id=? ORDER BY symbol", (account_id,)).fetchall()
     return jsonify({"items": [dict(r) for r in rows]})
+
+
+# ------------------------------------------------------------------ admin
+@api_bp.get("/admin/customers")
+def admin_list_customers():
+    """Bootstrap admin via env API_TOKEN — untuk operasional VPS."""
+    if not _admin_token_ok():
+        abort(401, description="Token admin tidak valid")
+    rows = [dict(r) for r in get_db().execute(
+        """SELECT c.id, c.code, c.display_name, c.status, c.created_at,
+                  u.email,
+                  (SELECT login FROM mt5_accounts a WHERE a.customer_id=c.id)
+                    AS bound_login
+           FROM customers c LEFT JOIN users u ON u.customer_id=c.id
+           ORDER BY c.id""")]
+    return jsonify({"items": rows})
+
+
+@api_bp.post("/admin/customers")
+def admin_create_customer():
+    if not _admin_token_ok():
+        abort(401, description="Token admin tidak valid")
+    import audit as auditmod
+    import auth as authmod
+    body = request.get_json(silent=True) or {}
+    conn = get_db()
+    try:
+        created = authmod.register_customer(
+            conn, cfg(), str(body.get("email") or ""),
+            str(body.get("password") or ""),
+            str(body.get("display_name") or "") or None)
+    except authmod.AuthError as e:
+        abort(e.code, description=e.message)
+    auditmod.audit(conn, "admin_create_customer",
+                   customer_id=created["customer_id"],
+                   detail={"code": created["code"]})
+    return jsonify(created), 201
 
 
 # ------------------------------------------------------------- error json
@@ -365,9 +806,16 @@ def unauthorized(e):  # pragma: no cover
     return jsonify({"error": {"code": 401, "message": e.description}}), 401
 
 
+@api_bp.errorhandler(403)
+def forbidden(e):
+    return jsonify({"error": {"code": 403, "message": e.description}}), 403
+
+
 @api_bp.app_errorhandler(404)
 def not_found(e):
-    return jsonify({"error": {"code": 404, "message": getattr(e, "description", "tidak ditemukan")}}), 404
+    return jsonify({"error": {"code": 404,
+                              "message": getattr(e, "description",
+                                                 "tidak ditemukan")}}), 404
 
 
 @api_bp.app_errorhandler(409)
@@ -375,7 +823,18 @@ def conflict(e):
     return jsonify({"error": {"code": 409, "message": e.description}}), 409
 
 
+@api_bp.errorhandler(429)
+def too_many(e):
+    return jsonify({"error": {"code": 429, "message": e.description}}), 429
+
+
+@api_bp.errorhandler(503)
+def service_unavailable(e):
+    return jsonify({"error": {"code": 503, "message": e.description}}), 503
+
+
 @api_bp.app_errorhandler(500)
 def server_error(e):  # pragma: no cover
     log.exception("500 di %s", request.path)
-    return jsonify({"error": {"code": 500, "message": "kesalahan internal"}}), 500
+    return jsonify({"error": {"code": 500,
+                              "message": "kesalahan internal"}}), 500

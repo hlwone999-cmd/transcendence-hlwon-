@@ -4,13 +4,16 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:transcendence/mt5_api.dart';
+import 'package:transcendence/mt5_auth.dart';
 import 'package:transcendence/mt5_models.dart';
 import 'package:transcendence/mt5_page.dart';
+import 'package:transcendence/ui_kit.dart' show GhostButton;
 
 // ---------------------------------------------------------------------------
 // Fixture JSON — bentuk persis seperti balasan backend Flask.
@@ -284,6 +287,127 @@ void main() {
     });
   });
 
+  // ------------------------------------------------------- M-A (PR #4)
+  // Remediasi M-A: klien data Mt5Api dan jalur TOKEN MANUAL → SIMPAN
+  // kini memakai kebijakan URL M3 yang SAMA dengan klien auth
+  // (Mt5UrlPolicy — satu sumber, tidak ada jalur alternatif).
+  group('M-A — validasi URL klien data (kebijakan M3 bersama)', () {
+    test('HTTP ke host produksi DITOLAK di konstruktor Mt5Api', () {
+      Mt5ApiError? caught;
+      try {
+        Mt5Api(baseUrl: 'http://jurnal.domain.com', token: 'TOK');
+      } on Mt5ApiError catch (e) {
+        caught = e;
+      }
+      expect(caught, isNotNull);
+      expect(caught!.kind, Mt5ApiErrorKind.badResponse);
+      expect(caught.message, contains('HTTPS'));
+    });
+
+    test('HTTP localhost/loopback DITERIMA dan dipakai apa adanya', () async {
+      final seen = <String>[];
+      final api = Mt5Api(
+        baseUrl: 'http://localhost:8000',
+        token: 'TOK',
+        client: MockClient((r) async {
+          seen.add(r.url.toString());
+          return _json(fixtureStatus);
+        }),
+      );
+      await api.status();
+      expect(seen.single,
+          startsWith('http://localhost:8000/api/v1/')); // skema http utuh
+
+      // varian loopback lain diterima konstruktor
+      expect(
+        Mt5Api(baseUrl: 'http://127.0.0.1:5000', token: 't'),
+        isA<Mt5Api>(),
+      );
+      expect(
+        Mt5Api(baseUrl: 'http://[::1]:9000', token: 't'),
+        isA<Mt5Api>(),
+      );
+    });
+
+    test('HTTPS tetap berfungsi — eksplisit maupun host tanpa scheme',
+        () async {
+      final seen = <String>[];
+      final api = Mt5Api(
+        baseUrl: 'https://srv.test',
+        token: 'TOK',
+        client: MockClient((r) async {
+          seen.add(r.url.toString());
+          return _json(fixtureStatus);
+        }),
+      );
+      await api.status();
+      expect(seen.single, startsWith('https://srv.test/api/v1/'));
+
+      // host tanpa scheme tetap dianggap https (perilaku lama)
+      final api2 = Mt5Api(
+        baseUrl: 'srv.test',
+        token: 'TOK',
+        client: MockClient((r) async {
+          seen.add(r.url.toString());
+          return _json(fixtureStatus);
+        }),
+      );
+      await api2.status();
+      expect(seen.last, startsWith('https://'));
+    });
+
+    test('HTTP non-loopback diterima hanya dengan flag dev eksplisit', () {
+      expect(
+        Mt5Api(
+          baseUrl: 'http://192.168.1.10:8000',
+          token: 't',
+          allowInsecureHttp: true, // development eksplisit
+        ),
+        isA<Mt5Api>(),
+      );
+    });
+
+    test('baseUrl kosong tetap diterima (kontrak belum terkonfigurasi)', () {
+      // Halaman mengonstruksi Mt5Api dengan URL kosong saat boot sebelum
+      // user mengisi konfigurasi — kontrak ini TIDAK boleh pecah.
+      final api = Mt5Api(baseUrl: '', token: '');
+      expect(api.isConfigured, isFalse);
+    });
+
+    test('Mt5Api dan Mt5AuthApi memakai kebijakan URL yang SAMA', () {
+      const urls = [
+        'https://jurnal.domain.com', // https eksplisit — terima
+        'jurnal.domain.com', // tanpa scheme — terima (dianggap https)
+        'http://localhost:8000', // loopback — terima
+        'http://127.0.0.1:5000', // loopback — terima
+        'http://jurnal.domain.com', // http produksi — TOLAK
+        'http://10.20.30.40', // http LAN — TOLAK
+      ];
+      for (final u in urls) {
+        Object? viaData;
+        Object? viaAuth;
+        try {
+          Mt5Api(baseUrl: u, token: 't');
+        } catch (e) {
+          viaData = e;
+        }
+        try {
+          Mt5AuthApi(baseUrl: u);
+        } catch (e) {
+          viaAuth = e;
+        }
+        expect(
+          viaData == null,
+          viaAuth == null,
+          reason:
+              'kebijakan URL tidak sinkron untuk "$u": '
+              'data=${viaData == null ? "terima" : "tolak"} '
+              'auth=${viaAuth == null ? "terima" : "tolak"}',
+        );
+      }
+    });
+  });
+
   group('Mt5JournalPage (widget)', () {
     testWidgets('belum dikonfigurasi -> tampil ATUR SERVER, tanpa crash', (
       tester,
@@ -359,6 +483,139 @@ void main() {
       expect(find.text('GAGAL TERHUBUNG'), findsOneWidget);
       expect(find.textContaining('Token API ditolak'), findsOneWidget);
       expect(find.text('COBA LAGI'), findsOneWidget);
+    });
+  });
+
+  // ------------------------------------------------------- M-A (PR #4)
+  // Widget: jalur TOKEN MANUAL → SIMPAN di dialog ATUR SERVER kini
+  // memvalidasi URL dengan kebijakan M3 yang sama.
+  group('M-A — TOKEN MANUAL → SIMPAN divalidasi (widget)', () {
+    Future<void> bukaDialogServer(WidgetTester tester, Mt5Api api) async {
+      SharedPreferences.setMockInitialValues({});
+      // Mock secure storage di flutter_test_config dipakai bersama seluruh
+      // file test — bersihkan supaya asersi "tidak tersimpan" deterministik.
+      await const FlutterSecureStorage().deleteAll();
+      await tester.pumpWidget(
+        MaterialApp(home: Scaffold(body: Mt5JournalPage(api: api))),
+      );
+      await tester.pumpAndSettle();
+      // api diinjeksi -> halaman boot ke fase TERHUBUNG (kontrak injeksi);
+      // dialog server dibuka dari kartu status via tombol SERVER.
+      expect(find.text('TERHUBUNG'), findsOneWidget);
+      await tester.tap(find.widgetWithText(GhostButton, 'SERVER'));
+      await tester.pumpAndSettle();
+      expect(find.text('SIMPAN'), findsOneWidget);
+    }
+
+    /// Handler mock dengan fixture per-endpoint (untuk refreshAll sukses).
+    Mt5Api apiSiap() => _mockApi((u, r) async {
+          final p = u.path;
+          if (p.endsWith('/mt5/status')) return _json(fixtureStatus);
+          if (p.endsWith('/mt5/account')) return _json(fixtureAccount);
+          if (p.endsWith('/journal/stats')) return _json(fixtureStats);
+          if (p.endsWith('/journal/equity-curve')) return _json(fixtureEquity);
+          if (p.contains('/journal/trades')) return _json(fixtureTrades);
+          if (p.endsWith('/symbols')) {
+            return _json({
+              'items': [
+                {
+                  'symbol': 'XAUUSD',
+                  'point': 0.01,
+                  'digits': 2,
+                  'pip_size': 0.1
+                },
+              ],
+            });
+          }
+          return _json({'error': {'message': 'tak dikenal: $p'}}, 404);
+        });
+
+    testWidgets('URL HTTP produksi DITOLAK — sheet tetap terbuka, '
+        'URL & token TIDAK tersimpan', (tester) async {
+      await bukaDialogServer(tester, apiSiap());
+
+      // field urutan: 0=URL, 1=email, 2=password, 3=token sesi
+      await tester.enterText(
+          find.byType(TextField).at(0), 'http://jurnal.domain.com');
+      await tester.enterText(find.byType(TextField).at(3), 'TOK-MANUAL');
+      await tester.pump();
+
+      await tester.tap(find.text('SIMPAN'));
+      await tester.pumpAndSettle();
+
+      // sheet TETAP terbuka + pesan penolakan tampil
+      expect(find.text('SIMPAN'), findsOneWidget);
+      expect(find.textContaining('produksi wajib HTTPS'), findsOneWidget);
+
+      // M-A inti: TIDAK ADA yang tersimpan
+      final sp = await SharedPreferences.getInstance();
+      expect(sp.getString('mt5_base_url'), isNull);
+      expect(
+        await const FlutterSecureStorage().read(key: 'mt5_session_token'),
+        isNull,
+      );
+    });
+
+    testWidgets('URL HTTPS + token manual DITERIMA — tersimpan, '
+        'sheet tertutup, halaman terhubung', (tester) async {
+      await bukaDialogServer(tester, apiSiap());
+
+      await tester.enterText(
+          find.byType(TextField).at(0), 'https://jurnal.domain.com');
+      await tester.enterText(find.byType(TextField).at(3), 'TOK-MANUAL');
+      await tester.pump();
+
+      await tester.tap(find.text('SIMPAN'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('SIMPAN'), findsNothing); // sheet tertutup
+      final sp = await SharedPreferences.getInstance();
+      expect(sp.getString('mt5_base_url'), 'https://jurnal.domain.com');
+      expect(
+        await const FlutterSecureStorage().read(key: 'mt5_session_token'),
+        'TOK-MANUAL',
+      );
+      expect(find.text('TERHUBUNG'), findsOneWidget); // refreshAll sukses
+    });
+
+    testWidgets('URL HTTP localhost (loopback) DITERIMA — tersimpan',
+        (tester) async {
+      await bukaDialogServer(tester, apiSiap());
+
+      await tester.enterText(
+          find.byType(TextField).at(0), 'http://localhost:8000');
+      await tester.enterText(find.byType(TextField).at(3), 'TOK-DEV');
+      await tester.pump();
+
+      await tester.tap(find.text('SIMPAN'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('SIMPAN'), findsNothing); // sheet tertutup
+      final sp = await SharedPreferences.getInstance();
+      expect(sp.getString('mt5_base_url'), 'http://localhost:8000');
+      expect(
+        await const FlutterSecureStorage().read(key: 'mt5_session_token'),
+        'TOK-DEV',
+      );
+    });
+
+    testWidgets('URL tersimpan lama yang kini ilegal tidak crash saat boot — '
+        'kembali ke BELUM TERHUBUNG', (tester) async {
+      SharedPreferences.setMockInitialValues({
+        'mt5_base_url': 'http://10.20.30.40', // HTTP produksi — ilegal
+        'mt5_api_token': 'TOK-LAMA',
+      });
+      await const FlutterSecureStorage().deleteAll();
+      // TANPA api injeksi — persis jalur produksi: Mt5Api dibangun dari
+      // URL tersimpan lewat _buildApiSafe (gerbang M3).
+      await tester.pumpWidget(
+        const MaterialApp(home: Scaffold(body: Mt5JournalPage())),
+      );
+      await tester.pumpAndSettle();
+
+      // Tidak crash — tampil layar konfigurasi ulang.
+      expect(find.text('BELUM TERHUBUNG'), findsOneWidget);
+      expect(find.text('ATUR SERVER'), findsOneWidget);
     });
   });
 }

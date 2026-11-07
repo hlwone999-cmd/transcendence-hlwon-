@@ -46,6 +46,26 @@ class Config:
 
     # --- database ---
     db_path: str = str(BASE_DIR / "data" / "journal.db")
+    # PostgreSQL produksi (brief multi-customer §2/§5). Jika diisi
+    # (postgres://...) engine PG dipakai; selain itu SQLite (dev/test).
+    db_url: str = ""
+
+    # --- auth multi-customer (brief §7) ---
+    auth_token_ttl_hours: int = 168        # 7 hari
+    max_failed_logins: int = 5             # lockout per email
+    lockout_seconds: int = 900
+    max_customers: int = 4                 # kapasitas MVP (brief §12)
+
+    # --- enkripsi kredensial MT5 (brief §5/§7) ---
+    # Kunci Fernet. TIDAK boleh di repo/db; WAJIB env di produksi.
+    cred_key: str = ""
+    cred_key_old: str = ""                 # opsional, utk rotasi kunci
+
+    # --- terminal MT5 per customer (brief §4) ---
+    rpyc_port_base: int = 18812            # C001=18812 ... C004=18815
+    term_base_dir: str = "/var/lib/transcendence/terminals"
+    # "mock" = provisioning tanpa Wine/MT5 (dev/test); "real" = VPS.
+    terminal_provision_mode: str = "mock"
 
     # --- definisi pip per simbol (override), sisanya dari symbol_info ---
     symbol_config: dict = field(default_factory=dict)
@@ -100,6 +120,18 @@ def load_config(env_file: str | None = None) -> Config:
         api_bind=os.getenv("API_BIND", "127.0.0.1").strip(),
         api_port=int(os.getenv("API_PORT", "8000")),
         db_path=os.getenv("JOURNAL_DB_PATH", "data/journal.db"),
+        db_url=os.getenv("DATABASE_URL", os.getenv("JOURNAL_DB_URL", "")).strip(),
+        auth_token_ttl_hours=max(1, int(os.getenv("AUTH_TOKEN_TTL_HOURS", "168"))),
+        max_failed_logins=max(1, int(os.getenv("AUTH_MAX_FAILED_LOGINS", "5"))),
+        lockout_seconds=max(30, int(os.getenv("AUTH_LOCKOUT_SECONDS", "900"))),
+        max_customers=max(1, int(os.getenv("MAX_CUSTOMERS", "4"))),
+        cred_key=os.getenv("MT5_CRED_KEY", "").strip(),
+        cred_key_old=os.getenv("MT5_CRED_KEY_OLD", "").strip(),
+        rpyc_port_base=max(1024, int(os.getenv("RPYC_PORT_BASE", "18812"))),
+        term_base_dir=os.getenv("TERM_BASE_DIR",
+                                "/var/lib/transcendence/terminals"),
+        terminal_provision_mode=os.getenv("TERMINAL_PROVISION_MODE",
+                                          "mock").strip().lower(),
     )
 
     raw = os.getenv("SYMBOL_CONFIG", "").strip()
@@ -113,7 +145,13 @@ def load_config(env_file: str | None = None) -> Config:
 
     if not cfg.api_token:
         log.warning(
-            "API_TOKEN kosong: autentikasi API NONAKTIF (mode dev). "
-            "WAJIB diisi saat backend diakses selain localhost."
+            "API_TOKEN kosong: token bootstrap admin NONAKTIF. "
+            "Endpoint /admin/* tidak dapat dipakai (opsi: buat customer "
+            "pertama lewat /api/v1/auth/register)."
+        )
+    if cfg.db_url and not cfg.cred_key:
+        log.warning(
+            "MT5_CRED_KEY kosong: bind akun MT5 akan DITOLAK sampai kunci "
+            "enkripsi kredensial diisi (Fernet key 32-byte url-safe base64)."
         )
     return cfg

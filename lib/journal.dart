@@ -902,13 +902,19 @@ class _JournalPageState extends State<JournalPage> {
                 expanded: true,
                 onTap: () async {
                   try {
-                    final files = await FilePicker.pickFiles(
+                    // file_picker 10.x: FilePicker.platform.pickFiles
+                    // mengembalikan FilePickerResult? — .files berisi
+                    // PlatformFile dengan path; isi byte dibaca dari path
+                    // (sama dengan readAsBytes() milik 13.x).
+                    final picked = await FilePicker.platform.pickFiles(
                       type: FileType.custom,
                       allowedExtensions: ['xlsx'],
                     );
+                    final files = picked?.files ?? const [];
                     final f = files.isEmpty ? null : files.single;
-                    if (f == null || !ctx.mounted) return;
-                    final bytes = await f.readAsBytes();
+                    final path = f?.path;
+                    if (f == null || path == null || !ctx.mounted) return;
+                    final bytes = await File(path).readAsBytes();
                     if (bytes.isEmpty) return;
                     if (ctx.mounted) Navigator.pop(ctx, bytes);
                   } catch (_) {

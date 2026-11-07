@@ -35,11 +35,24 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
   shared_preferences: ^2.5.6
+  flutter_secure_storage: ^9.2.2  # token sesi multi-customer (brief §7)
   http: ^1.6.0
-  share_plus: ^13.3.1
+  # 12.0.2 = versi tertinggi yang masih pakai win32 ^5.5.3 — win32 6.x
+  # bentrok dengan flutter_secure_storage_windows 3.1.x (win32 ^5.0.0)
+  # milik flutter_secure_storage 9.2.2 yang terkunci (v9 API).
+  share_plus: ^12.0.2
   path_provider: ^2.1.6
   excel: ^4.0.6          # baca + tulis file .xlsx (pure Dart)
-  file_picker: ^13.1.0   # pilih file .xlsx saat impor
+  # 10.3.10 = rilis 10.x terakhir yang tidak di-retract (10.3.11
+  # diretract penerbitnya; pub menolaknya). win32 ^5.9.0, Kotlin Android
+  # diterapkan tanpa syarat — kompilasi aman dengan
+  # android.builtInKotlin=false. File_picker 11.x tidak menerapkan KGP
+  # pada AGP >= 9 dan mengandalkan built-in Kotlin yang dimatikan
+  # aplikasi ini -> kelas Android tak pernah terkompilasi (CI Build APK
+  # gagal: cannot find symbol FilePickerPlugin). 12/13.x memakai
+  # windows_file_picker (win32 ^6.3.0) — bentrok dengan rantai win32 ^5.
+  # API dipakai via FilePicker.platform (lihat journal.dart).
+  file_picker: ^10.3.10  # pilih file .xlsx saat impor
 
 dev_dependencies:
   flutter_test:

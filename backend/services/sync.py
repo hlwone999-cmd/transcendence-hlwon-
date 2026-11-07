@@ -1,7 +1,17 @@
 """Sinkronisasi riwayat MT5 -> database jurnal.
 
+Dua mode (brief §6 multi-customer):
+- sync()             LEGACY: satu akun global via provider_factory global
+                     (dipakai test lama & deploy lama; TIDAK dipakai
+                     produksi multi-customer).
+- sync_account(id)   MULTI-CUSTOMER: provider + lock + backoff per akun
+                     dari TerminalRegistry; kegagalan satu akun tidak
+                     menyentuh akun lain; state/log per akun.
+
 Alur setiap sync (READ-ONLY terhadap terminal):
 1. connect provider -> account_info -> upsert mt5_accounts
+   (multi: login/server provider WAJIB sama dgn akun ter- bind —
+    guard isolasi anti salah-terminal)
 2. tentukan rentang waktu:
    - initial  : now - MT5_HISTORY_INITIAL_DAYS .. now
    - increment: last_deal_time - MT5_SYNC_OVERLAP_SECONDS .. now  (overlap
@@ -93,30 +103,110 @@ class SyncLockBusy(Exception):
 
 
 class SyncService:
-    def __init__(self, config, provider_factory):
+    def __init__(self, config, provider_factory, registry=None):
         self._cfg = config
         self._factory = provider_factory
+        self._registry = registry
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------ API
     def sync(self, mode: str = "incremental", full: bool = False,
              days: int | None = None, conn=None) -> dict:
-        """Jalankan satu siklus sync. mode: initial|incremental|full|manual."""
+        """LEGACY: satu siklus sync akun global (test lama / deploy lama)."""
         if not self._lock.acquire(blocking=False):
             raise SyncLockBusy("sync lain sedang berjalan")
+        try:
+            return self._run_sync(mode=mode, full=full, days=days, conn=conn,
+                                  account_id=None,
+                                  provider_factory=self._factory,
+                                  runtime=None)
+        finally:
+            if self._lock.locked():
+                self._lock.release()
+
+    def sync_account(self, account_id: int, mode: str = "incremental",
+                     full: bool = False, days: int | None = None,
+                     conn=None) -> dict:
+        """MULTI-CUSTOMER: satu siklus sync utk 1 akun ter- bind.
+
+        - lock per akun (sync paralel antar customer aman)
+        - provider dari terminal customer tsb (port RPyC unik)
+        - backoff eksponensial dicatat di runtime saat gagal
+        """
+        if self._registry is None:
+            raise RuntimeError("sync_account butuh TerminalRegistry")
+        conn = conn or dbmod.get_db(self._cfg)
+        rt = self._registry.runtime_for(conn, account_id)
+        # AUDIT ROUND-4 #1: lock DULU, scope RLS kemudian. Urutan lama
+        # (set_customer_context -> lock) bocor: bila lock gagal,
+        # SyncLockBusy dilempar SEBELUM blok try/finally sehingga
+        # clear_customer_context tidak pernah berjalan — scope customer
+        # tertinggal di koneksi thread-local dan tugas/request berikutnya
+        # pada thread itu mewarisi scope akun sebelumnya. Sekarang:
+        #   - lock gagal -> SyncLockBusy DILEMPAR SEBELUM context dipasang
+        #     (tidak ada scope yang perlu dibersihkan);
+        #   - lock sukses -> context dipasang DI DALAM try, jadi setiap
+        #     kegagalan setelahnya (termasuk gagal pasang context) tetap
+        #     melewati finally: scope dibersihkan + lock dilepas.
+        if not rt.lock.acquire(blocking=False):
+            raise SyncLockBusy(f"sync akun {account_id} sedang berjalan")
+        try:
+            # RLS defense-in-depth (audit #2): scope koneksi thread ini ke
+            # customer pemilik akun SEBELUM menulis deals/orders/trades.
+            # (runtime_for mungkin cache hit — context harus dipasang
+            # eksplisit.)
+            dbmod.set_customer_context(conn, rt.customer_id)
+            summary = self._run_sync(
+                mode=mode, full=full, days=days, conn=conn,
+                account_id=account_id,
+                provider_factory=lambda: rt.provider, runtime=rt)
+            if summary.get("status") == "ok":
+                rt.consecutive_failures = 0
+                rt.next_allowed_ts = 0.0
+                rt.last_error = None
+            else:
+                rt.consecutive_failures += 1
+                rt.next_allowed_ts = _time.monotonic() + rt.backoff_penalty()
+                rt.last_error = summary.get("error")
+            return summary
+        except SyncLockBusy:
+            raise
+        except Exception as e:  # noqa: BLE001 — backoff tercatat di runtime
+            rt.consecutive_failures += 1
+            rt.next_allowed_ts = _time.monotonic() + rt.backoff_penalty()
+            rt.last_error = f"{type(e).__name__}: {e}"
+            raise
+        finally:
+            # Audit round-3: scope customer worker WAJIB lepas di akhir
+            # tugas sync — thread worker memakai koneksi thread-local
+            # jangka panjang; scope yang tertinggal akan membocorkan
+            # akses data akun sebelumnya ke tugas berikutnya yang
+            # membuka transaksi baru (sama seperti request HTTP).
+            try:
+                dbmod.clear_customer_context(conn)
+            except Exception:  # noqa: BLE001 - cleanup tak boleh meledak
+                pass
+            if rt.lock.locked():
+                rt.lock.release()
+
+    def _run_sync(self, *, mode, full, days, conn, account_id,
+                  provider_factory, runtime) -> dict:
         started = utcnow_iso()
         t0 = _time.monotonic()
         provider = None
         summary = {"status": "ok", "mode": mode, "started_at": started,
                    "deals_upserted": 0, "orders_upserted": 0,
                    "trades_updated": 0, "open_positions": 0}
+        if account_id is not None:
+            summary["account_id"] = account_id
         try:
             own_conn = conn is None
             conn = conn or dbmod.get_db(self._cfg)
-            provider = self._factory()
+            provider = provider_factory()
             provider.connect()
 
-            summary.update(self._do_sync(conn, provider, mode, full, days))
+            summary.update(self._do_sync(conn, provider, mode, full, days,
+                                         account_id=account_id))
             summary["duration_ms"] = int((_time.monotonic() - t0) * 1000)
             self._log_run(conn, summary, error=None)
             return summary
@@ -139,16 +229,28 @@ class SyncService:
                     provider.disconnect()
                 except Exception:  # pragma: no cover
                     pass
-            if self._lock.locked():
-                self._lock.release()
 
     # -------------------------------------------------------------- internal
-    def _do_sync(self, conn, provider, mode, full: bool, days: int | None) -> dict:
-        state = self._get_state(conn)
+    def _do_sync(self, conn, provider, mode, full: bool, days: int | None,
+                 account_id: int | None = None) -> dict:
+        state = self._get_state(conn, account_id)
         now = datetime.now(timezone.utc)
 
         acc = provider.account_info()
-        account_id = self._upsert_account(conn, acc, now)
+        customer_id = None
+        if account_id is not None:
+            brow = conn.execute(
+                "SELECT customer_id FROM mt5_accounts WHERE id=?",
+                (account_id,)).fetchone()
+            customer_id = int(brow["customer_id"]) if brow else None
+        resolved = self._upsert_account(conn, acc, now,
+                                        customer_id=customer_id)
+        if account_id is not None and resolved != account_id:
+            # Guard isolasi: terminal yg terhubung bukan akun ter- bind.
+            raise MT5Error(
+                f"Terminal menyajikan akun {resolved}, bukan akun "
+                f"ter-bind {account_id} — sync dibatalkan")
+        account_id = resolved
 
         if mode == "full" or full:
             range_from = datetime(2000, 1, 1, tzinfo=timezone.utc)
@@ -183,29 +285,38 @@ class SyncService:
             "open_positions": open_positions,
         }
 
-    def _get_state(self, conn):
+    def _get_state(self, conn, account_id: int | None = None):
+        st = dbmod.sync_state_table(conn)
+        if account_id is not None:
+            return conn.execute(
+                f"SELECT * FROM {st} WHERE account_id=?",
+                (account_id,)).fetchone()
         return conn.execute(
-            "SELECT * FROM sync_state WHERE account_id = ("
+            f"SELECT * FROM {st} WHERE account_id = ("
             "  SELECT id FROM mt5_accounts ORDER BY last_sync_at DESC LIMIT 1)"
         ).fetchone()
 
-    def _upsert_account(self, conn, acc: dict, now: str) -> int:
+    def _upsert_account(self, conn, acc: dict, now: str,
+                        customer_id: int | None = None) -> int:
         login = int(acc.get("login") or 0)
         server = str(acc.get("server") or "")
         if not login or not server:
             raise MT5Error("account_info tidak valid (login/server kosong)")
+        # customer_id ikut di-INSERT (PG mengecek NOT NULL sebelum ON
+        # CONFLICT); DO UPDATE tidak pernah mengubah pemilik baris.
         conn.execute(
-            """INSERT INTO mt5_accounts (login, server, company, currency,
-                 leverage, balance, equity, margin_free, first_sync_at, last_sync_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?)
+            f"""INSERT INTO mt5_accounts (customer_id, login, server, company,
+                 currency, leverage, balance, equity, margin_free,
+                 first_sync_at, last_sync_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(login, server) DO UPDATE SET
                  company=excluded.company, currency=excluded.currency,
                  leverage=excluded.leverage, balance=excluded.balance,
                  equity=excluded.equity, margin_free=excluded.margin_free,
                  last_sync_at=excluded.last_sync_at""",
-            (login, server, acc.get("company"), acc.get("currency"),
-             acc.get("leverage"), acc.get("balance"), acc.get("equity"),
-             acc.get("margin_free"), now, now),
+            (customer_id, login, server, acc.get("company"),
+             acc.get("currency"), acc.get("leverage"), acc.get("balance"),
+             acc.get("equity"), acc.get("margin_free"), now, now),
         )
         row = conn.execute(
             "SELECT id FROM mt5_accounts WHERE login=? AND server=?",
@@ -290,6 +401,7 @@ class SyncService:
 
     def _rebuild_trades(self, conn, account_id: int, provider) -> int:
         """Rekonstruksi penuh dari semua deals akun (idempoten, tanpa duplikat)."""
+        tt = dbmod.trades_table(conn)
         deals = [dict(r) for r in conn.execute(
             "SELECT * FROM mt5_deals WHERE account_id=?", (account_id,))]
         orders = [dict(r) for r in conn.execute(
@@ -309,7 +421,7 @@ class SyncService:
         for t in trades:
             kept_pids.add(t["position_id"])
             conn.execute(
-                """INSERT INTO trades (account_id, position_id, symbol,
+                f"""INSERT INTO {tt} (account_id, position_id, symbol,
                      direction, status, volume_in, volume_out, entry_price,
                      exit_price, open_time_utc, close_time_utc, profit,
                      commission, swap, fee, net_profit, sl_initial, tp_initial,
@@ -342,7 +454,7 @@ class SyncService:
             )
         # trade yang deals-nya lenyap total dari raw (harusnya jarang) -> bersihkan
         conn.execute(
-            "DELETE FROM trades WHERE account_id=? AND position_id NOT IN ("
+            f"DELETE FROM {tt} WHERE account_id=? AND position_id NOT IN ("
             " SELECT DISTINCT position_id FROM mt5_deals WHERE account_id=?"
             " AND deal_type IN (0,1))", (account_id, account_id))
         return len(trades)
@@ -360,7 +472,7 @@ class SyncService:
             if pid is None:
                 continue
             conn.execute(
-                """UPDATE trades SET sl_current=?, tp_current=?,
+                f"""UPDATE {dbmod.trades_table(conn)} SET sl_current=?, tp_current=?,
                      price_current=?, updated_at=?
                    WHERE account_id=? AND position_id=? AND status='open'""",
                 (p.get("sl"), p.get("tp"), p.get("price_current"), now,
@@ -397,12 +509,13 @@ class SyncService:
             )
 
     def _save_state(self, conn, account_id: int, now: datetime, status: str) -> None:
+        st = dbmod.sync_state_table(conn)
         row = conn.execute(
             "SELECT MAX(time_utc) AS m FROM mt5_deals WHERE account_id=?"
             " AND deal_type IN (0,1)", (account_id,)).fetchone()
         last_deal = row["m"] if row else None
         conn.execute(
-            """INSERT INTO sync_state (account_id, initial_done,
+            f"""INSERT INTO {st} (account_id, initial_done,
                  last_deal_time_utc, last_sync_started_at, last_sync_finished_at,
                  last_sync_status)
                VALUES (?,1,?,?,?,?)
