@@ -25,7 +25,10 @@
 #     pra-deploy (pre-deploy-*/LAST_*/APPROVED_COMMIT/PREVIOUS_COMMIT)
 #     dan manual-* tidak pernah dihapus;
 #   * tanpa izin 777; file 600 di dalam dir 750 — hanya user deploy yang
-#     berwenang membaca.
+#     berwenang membaca;
+#   * guard flock non-blocking (.backup_daily.lock): hanya SATU instance
+#     berjalan per BACKUP_DIR — lock dilepas otomatis kernel saat proses
+#     keluar (exit/gagal/trap/kill);
 #
 # Kontrak cron (/etc/cron.d, lihat docs/MULTI-CUSTOMER-BACKUP-ROLLBACK §1):
 #   DB_NAME         wajib — nama database PostgreSQL produksi
@@ -58,6 +61,24 @@ _dir_owner="$(stat -c '%U' "$BACKUP_DIR")"
 _dir_mode="$(stat -c '%a' "$BACKUP_DIR")"
 [ "$_dir_owner" = "$(id -un)" ] || fail "$BACKUP_DIR owner=$_dir_owner, bukan $(id -un) — cron wajib berjalan sebagai deploy dan dir wajib deploy:deploy (provisioning §10.1)"
 [ "$_dir_mode" = "750" ] || fail "$BACKUP_DIR mode=$_dir_mode, wajib 750 — perbaiki dengan: sudo install -d -o deploy -g deploy -m 750 $BACKUP_DIR"
+
+# --- guard instans tunggal (hardening konkurensi, flock non-blocking) ---
+# Hanya SATU instance boleh berjalan per BACKUP_DIR: dua instance yang
+# tumpang-tindih menimpa .part/.LAST_DAILY.part satu sama lain (dan pada
+# detik sama memakai PART yang sama — validasi menolak, backup malam itu
+# bolong). fd 9 dibuka dengan `exec` — BUKAN subshell — sehingga TETAP
+# TERBUKA sepanjang proses; flock dilepas OTOMATIS oleh kernel saat
+# proses keluar apa pun penyebabnya (exit/fail/trap/sinyal), tanpa
+# `flock -u`. File .backup_daily.lock (600 via umask 077) kecil dan tetap
+# ada di direktori yang sudah divalidasi preflight — kuncinya adalah
+# lock pada fd, bukan keberadaan file; retensi (pola daily-*.sql.gz)
+# tidak pernah menyentuhnya.
+# Evaluasi nama-sementara + PID: dengan guard ini instance kedua TIDAK
+# PERNAH berjalan, sehingga PART/PART_POINTER cukup bernama stamp tanpa
+# $$ — tabrakan nama file sementara tidak mungkin lagi, dan nama tetap
+# mudah dibersihkan trap.
+exec 9>"$BACKUP_DIR/.backup_daily.lock"
+flock -n 9 || fail "instance backup harian lain sedang berjalan ($BACKUP_DIR/.backup_daily.lock terkunci) — tunggu run selesai, atau periksa/hentikan proses bekas sebelum menjalankan ulang"
 
 # Stamp harian: daily-YYYYmmdd-HHMMSS — filename-safe; cadence harian
 # membuat tabrakan praktis mustahil (hanya dua panggilan pada detik sama,

@@ -41,10 +41,19 @@ Hardening pre-push (sesudah review sprint):
                   (weekly + maxsize 5M, rotate 12, compress,
                   copytruncate, su deploy deploy) dan runbook wajib
                   menunjuk file kebijakan + path instalasinya.
+6. FLOCK         — hardening konkurensi: hanya SATU instance
+                  backup_daily.sh per BACKUP_DIR — flock non-blocking
+                  pada fd `exec` (tetap terbuka, dilepas otomatis
+                  kernel saat exit/gagal/kill), posisi setelah
+                  preflight dan sebelum STAMP; instance kedua ditolak
+                  dengan pesan jelas, tidak menyentuh pg_dump, dan run
+                  berikutnya sukses setelah lock lepas.
 """
+import fcntl
 import gzip
 import os
 import re
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -247,6 +256,135 @@ def test_logrotate_kebijakan_daily_cron_log():
     assert "/etc/logrotate.d/transcendence-backup" in doc, \
         "runbook wajib memuat path pemasangan /etc/logrotate.d"
     assert "daily-cron.log" in doc, "runbook wajib membahas log cron"
+
+
+# -------------------------------------------------- 6. hardening flock
+def test_flock_guard_satu_instance():
+    """REGRESI hardening konkurensi: hanya SATU instance backup_daily.sh
+    boleh berjalan — flock NON-blocking pada fd yang dibuka `exec`
+    (tetap terbuka sepanjang proses; dilepas otomatis kernel saat proses
+    keluar). Posisi wajib: SETELAH preflight izin (dir tervalidasi) dan
+    SEBELUM STAMP/dump — instance yang ditolak tidak boleh sampai
+    menyentuh pg_dump."""
+    raw = DAILY_SH.read_text(encoding="utf-8")
+    lines = raw.splitlines()
+    # kode eksekusi = baris non-komentar (larangan berlaku untuk perintah,
+    # bukan dokumentasi di komentar)
+    kode = "\n".join(ln for ln in lines if not ln.strip().startswith("#"))
+    assert "exec 9>" in raw, "wajib buka fd lock dengan exec (tetap terbuka)"
+    assert "flock -n 9" in kode, "wajib flock NON-blocking"
+    assert "flock -u" not in kode, \
+        "lepas lock otomatis oleh kernel saat exit — tanpa flock -u di kode"
+    assert "$$" not in kode, \
+        "nama file sementara tetap ber-stamp tanpa PID — guard flock " \
+        "sudah menutup race antar-instance"
+    assert re.search(r'exec 9>"\$BACKUP_DIR/\.backup_daily\.lock"', raw), \
+        "lock file wajib .backup_daily.lock di dalam BACKUP_DIR"
+    assert "sedang berjalan" in raw, "penolakan wajib dengan pesan jelas"
+    # urutan wajib: preflight mode 750 -> flock -> STAMP
+    idx_preflight = [i for i, ln in enumerate(lines)
+                     if '_dir_mode" = "750"' in ln]
+    idx_flock = [i for i, ln in enumerate(lines)
+                 if ln.strip().startswith("flock -n 9")]
+    idx_stamp = [i for i, ln in enumerate(lines) if ln.startswith("STAMP=")]
+    assert idx_preflight and idx_flock and idx_stamp, "urutan tidak lengkap"
+    assert min(idx_preflight) < min(idx_flock) < min(idx_stamp), \
+        "flock wajib SETELAH preflight dan SEBELUM STAMP/dump"
+
+
+def test_flock_instance_kedua_ditolak_lalu_berhasil_setelah_lock_lepas(tmp_path):
+    """Simulasi dua proses bersamaan: lock dipegang 'instance pertama'
+    (fd python pada lock file yang sama) — instance kedua WAJIB ditolak
+    dengan pesan jelas, tanpa dump terbit, pointer tidak berubah, dan
+    pg_dump tidak pernah dijalankan; setelah lock dilepas, run
+    berikutnya sukses dan LAST_DAILY menunjuk dump yang benar-benar
+    sudah terbit (tidak korup)."""
+    bk, bin_dir, log, env = _dunia(tmp_path)
+    _stub_sudo(bin_dir, log)
+    _stub_pg_dump_ok(bin_dir, log)
+    lockfile = bk / ".backup_daily.lock"
+    fd = os.open(str(lockfile), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)   # 'instance pertama'
+    (bk / "LAST_DAILY").write_text("daily-20260101-020000\n")
+
+    r1 = _run(env, tmp_path)                          # instance kedua
+    assert r1.returncode != 0, "instance kedua wajib ditolak flock"
+    assert "sedang berjalan" in r1.stdout, "pesan penolakan wajib jelas"
+    assert not list(bk.glob("daily-*.sql.gz")), \
+        "tidak boleh ada dump terbit saat ditolak"
+    assert (bk / "LAST_DAILY").read_text().strip() == "daily-20260101-020000", \
+        "pointer wajib tidak berubah saat ditolak"
+    calls = log.read_text() if log.exists() else ""
+    assert "pg_dump" not in calls, \
+        "dump wajib TIDAK dijalankan setelah ditolak lock"
+
+    os.close(fd)                                      # lock dilepas
+    r2 = _run(env, tmp_path)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    final = _final(bk)
+    assert (bk / "LAST_DAILY").read_text().strip() == final.name[:-len(".sql.gz")], \
+        "pointer wajib menunjuk dump yang BENAR-BENAR sudah terbit"
+    assert gzip.decompress(final.read_bytes()).startswith(b"--\n-- PostgreSQL"), \
+        "dump yang terbit wajib valid (tidak korup)"
+    assert not list(bk.glob(".*part")), "tanpa file sementara tersisa"
+
+
+def test_flock_lepas_otomatis_setelah_gagal_dan_setelah_proses_dibunuh(tmp_path):
+    """Lock wajib TERLEPAS OTOMATIS: (a) proses gagal exit — tanpa
+    flock -u; (b) proses DIBUNUH kill -9 — kernel melepas lock pemiliknya
+    (trap tidak berjalan pada SIGKILL, lock tetap lepas karena fd tertutup
+    kernel). Setelah itu run berikutnya wajib dapat berjalan dan
+    menerbitkan dump valid; pointer tidak pernah menunjuk file yang
+    belum terbit."""
+    bk, bin_dir, log, env = _dunia(tmp_path)
+    _stub_sudo(bin_dir, log)
+    lockfile = bk / ".backup_daily.lock"
+
+    # (a) proses gagal (pg_dump exit 1) — lock wajib lepas saat exit
+    _stub(bin_dir, "pg_dump", log, "exit 1")
+    r1 = _run(env, tmp_path)
+    assert r1.returncode != 0
+    fd = os.open(str(lockfile), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)    # sukses = lock lepas
+    os.close(fd)
+
+    # (b) proses nyata di latar, dibunuh SAAT MEMEGANG lock.
+    # Marker dari stub pg_dump = bukti deterministik lock sudah terpegang:
+    # stub hanya berjalan SETELAH flock sukses (guard ada sebelum STAMP).
+    marker = tmp_path / "pg_dump_mulai"
+    _stub(bin_dir, "pg_dump", log, f"touch {marker}; sleep 30")
+    proc = subprocess.Popen(["bash", str(DAILY_SH)],
+                            env={**os.environ, **env},
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            cwd=str(tmp_path),
+                            start_new_session=True)  # grup proses sendiri
+    deadline = time.time() + 10
+    while time.time() < deadline and not marker.exists():
+        time.sleep(0.05)
+    assert marker.exists(), \
+        "stub pg_dump wajib sempat mulai (skrip memegang lock)"
+
+    (bk / "LAST_DAILY").write_text("daily-20260101-020000\n")  # kondisi awal
+    # Bunuh SELURUH grup proses (bash + anak pipeline pewaris fd 9) —
+    # cara operator mematikan job yang kabur; SIGKILL = trap tak berjalan.
+    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    proc.wait()
+    fd = os.open(str(lockfile), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)    # sukses = kernel lepas
+    os.close(fd)
+    # kill terjadi sebelum publikasi: pointer tidak boleh menunjuk dump baru
+    assert (bk / "LAST_DAILY").read_text().strip() == "daily-20260101-020000"
+    assert not list(bk.glob("daily-*.sql.gz")), \
+        "tidak boleh ada dump terbit dari run yang dibunuh"
+
+    # (c) run berikutnya berjalan normal setelah lock lepas
+    _stub_pg_dump_ok(bin_dir, log)
+    r2 = _run(env, tmp_path)
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    final = _final(bk)          # tepat 1 dump harian final — tak ada korup
+    assert gzip.decompress(final.read_bytes()).startswith(b"--\n-- PostgreSQL")
+    assert (bk / "LAST_DAILY").read_text().strip() == final.name[:-len(".sql.gz")]
 
 
 # ------------------------------------------------------------- 3. simulasi
