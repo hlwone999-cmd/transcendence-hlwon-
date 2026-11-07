@@ -390,4 +390,105 @@ void main() {
       expect(seen.single, 'http://192.168.1.10:8000/api/v1/auth/login');
     });
   });
+
+  // --------------------------------------------------- redesign D1/D3
+  // connectAccount (self-link /mt5/connect) & disconnect (/mt5/disconnect)
+  group('connectAccount & disconnect (redesign Jurnal MT5)', () {
+    test('connectAccount kirim login/server/password ke /mt5/connect dan '
+        'simpan token sesi', () async {
+      final store = _FakeStore();
+      String? path;
+      String? body;
+      final client = MockClient((req) async {
+        path = req.url.path;
+        body = req.body;
+        return http.Response(
+            jsonEncode({
+              'ok': true,
+              'mode': 'self_link',
+              'token': 'SESI-CONNECT-1',
+            }),
+            201,
+            headers: {'content-type': 'application/json'});
+      });
+      final api = Mt5AuthApi(
+          baseUrl: 'https://jurnal.domain.com', client: client, store: store);
+      final res = await api.connectAccount(
+          login: 12345678,
+          server: 'Exness-MT5Real',
+          password: 'investor-pw');
+      expect(res['mode'], 'self_link');
+      expect(path, '/api/v1/mt5/connect'); // prefix /api/v1 konsisten
+      final j = jsonDecode(body!) as Map<String, dynamic>;
+      expect(j['login'], 12345678);
+      expect(j['server'], 'Exness-MT5Real');
+      expect(j['password'], 'investor-pw'); // ke server via HTTPS
+      expect(store.token, 'SESI-CONNECT-1'); // token disimpan aman
+    });
+
+    test('connectAccount 401 (password salah) -> error, store TIDAK '
+        'tertimpa/terhapus', () async {
+      final store = _FakeStore();
+      store.token = 'SESI-LAMA';
+      final client = MockClient((req) async => http.Response(
+          jsonEncode({
+            'error': {
+              'code': 401,
+              'message': 'Verifikasi gagal — periksa nomor akun, server, '
+                  'dan password investor'
+            }
+          }), 401));
+      final api = Mt5AuthApi(
+          baseUrl: 'https://x.id', client: client, store: store);
+      await expectLater(
+          api.connectAccount(
+              login: 1, server: 'S', password: 'p'),
+          throwsA(isA<Mt5ApiError>()));
+      expect(store.token, 'SESI-LAMA'); // tidak tersentuh (bukan sesi basi)
+    });
+
+    test('401 tanpa pesan server -> friendly fallback teks generik',
+        () async {
+      final store = _FakeStore();
+      final client = MockClient(
+          (req) async => http.Response(jsonEncode({'error': {}}), 401));
+      final api = Mt5AuthApi(
+          baseUrl: 'https://x.id', client: client, store: store);
+      try {
+        await api.connectAccount(login: 1, server: 'S', password: 'p');
+        fail('harusnya lempar');
+      } on Mt5ApiError catch (e) {
+        expect(e.friendly, contains('Token API ditolak'));
+      }
+    });
+
+    test('disconnect memanggil /mt5/disconnect; token lokal dihapus',
+        () async {
+      final store = _FakeStore();
+      store.token = 'SESI-AKTIF';
+      final seen = <String>[];
+      final client = MockClient((req) async {
+        seen.add(req.url.toString());
+        return http.Response(jsonEncode({'ok': true}), 200,
+            headers: {'content-type': 'application/json'});
+      });
+      final api = Mt5AuthApi(
+          baseUrl: 'https://x.id', client: client, store: store);
+      await api.disconnect('SESI-AKTIF');
+      expect(seen.single, 'https://x.id/api/v1/mt5/disconnect');
+      expect(store.token, isNull); // sesi lokal dibersihkan
+    });
+
+    test('disconnect: token tetap dihapus walau revoke server gagal',
+        () async {
+      final store = _FakeStore();
+      store.token = 'SESI-AKTIF';
+      final client = MockClient((req) async => http.Response('x', 500));
+      final api = Mt5AuthApi(
+          baseUrl: 'https://x.id', client: client, store: store);
+      await expectLater(
+          api.disconnect('SESI-AKTIF'), throwsA(isA<Mt5ApiError>()));
+      expect(store.token, isNull); // finally tetap membersihkan
+    });
+  });
 }

@@ -1,31 +1,44 @@
 // Transcendence — mt5_page.dart
-// Tab "Jurnal MT5": jurnal trading OTOMATIS dari akun MT5 Exness lewat
-// backend Flask (mt5linux) di VPS. Backend read-only — halaman ini tidak
-// pernah mengirim order.
+// Tab "Jurnal MT5": jurnal trading OTOMATIS dari akun MT5 lewat backend
+// Flask (mt5linux) di VPS. Backend read-only — halaman ini tidak pernah
+// mengirim order.
+//
+// REDESIGN UI/UX (keputusan D1-D4):
+//  - HANYA 3 input: nomor akun MT5, server broker (dropdown Exness +
+//    Lainnya manual), password investor (tombol lihat/sembunyi).
+//  - TIDAK ADA input URL server / email customer / password customer /
+//    token manual — URL backend ditentukan konfigurasi aplikasi
+//    (AppConfig, --dart-define TRANSCENDENCE_API_URL).
+//  - HUBUNGKAN AKUN MT5 -> POST /mt5/connect (self-link otomatis).
+//  - Status koneksi selalu tampil; PUTUSKAN KONEKSI -> POST
+//    /mt5/disconnect yang HANYA mencabut token sesi — riwayat jurnal
+//    tidak dihapus (D3); unbind tetap hanya via API/admin.
+//  - Password investor hanya hidup di memori (controller) selama proses
+//    koneksi dan dibersihkan setelahnya; tidak pernah disimpan lokal.
 //
 // Gaya UI: Obsidian Precision (ui_kit.dart) — konsisten dengan tab lain.
 // Fitur halaman ini TIDAK menyentuh kalkulator/engine sama sekali.
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
+import 'app_config.dart';
 import 'engine.dart' show fmtLots, fmtMoney, one, two;
 import 'mt5_api.dart';
 import 'mt5_auth.dart';
 import 'mt5_filters.dart';
 import 'mt5_models.dart';
+import 'mt5_servers.dart';
 import 'ui_kit.dart';
 
-const _kPrefUrl = 'mt5_base_url';
-
 class Mt5JournalPage extends StatefulWidget {
-  final Mt5Api? api; // injeksi untuk test
-  const Mt5JournalPage({super.key, this.api});
+  final Mt5Api? api; // injeksi untuk test (data)
+  final Mt5AuthApi? authApi; // injeksi untuk test (auth/connect)
+  const Mt5JournalPage({super.key, this.api, this.authApi});
 
   @override
   State<Mt5JournalPage> createState() => _Mt5JournalPageState();
 }
 
-enum _Phase { boot, unconfigured, loading, ready, invalidRange, error }
+enum _Phase { boot, connectForm, loading, ready, invalidRange, error }
 
 class _Mt5JournalPageState extends State<Mt5JournalPage> {
   _Phase _phase = _Phase.boot;
@@ -34,6 +47,16 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
   Mt5Api? _api;
   String _baseUrl = '';
   String _token = '';
+
+  // ---- form koneksi (D1): tiga input saja ------------------------------
+  final TextEditingController _loginC = TextEditingController();
+  final TextEditingController _serverManualC = TextEditingController();
+  final TextEditingController _passC = TextEditingController();
+  String _serverSel = kExnessServers.first.value;
+  bool _obscurePass = true;
+  bool _connecting = false;
+  String? _formError;
+  bool _disconnecting = false;
 
   Mt5Status? _status;
   Mt5Account? _account;
@@ -68,31 +91,39 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
     _boot();
   }
 
+  @override
+  void dispose() {
+    _loginC.dispose();
+    _serverManualC.dispose();
+    // password investor tidak boleh tertinggal di memori lebih lama dari
+    // halaman itu sendiri (syarat implementasi #2)
+    _passC.dispose();
+    super.dispose();
+  }
+
   Future<void> _boot() async {
-    // Token sesi multi-customer: secure storage dulu, fallback/migrasi
-    // dari SharedPreferences lama (brief §7/§9).
+    // D1: URL backend dari KONFIGURASI APLIKASI — bukan input user.
+    _baseUrl = AppConfig.apiBaseUrl.trim();
+    // Token sesi multi-customer: secure storage (fallback/migrasi dari
+    // SharedPreferences lama — brief §7/§9).
     final tok = await SessionStore().readToken();
-    final sp = await SharedPreferences.getInstance();
     if (!mounted) return;
     setState(() {
-      _baseUrl = sp.getString(_kPrefUrl) ?? '';
       _token = tok ?? '';
-      // M-A: URL tersimpan lama bisa melanggar kebijakan M3 (mis. HTTP
-      // produksi dari konfigurasi versi sebelumnya) — jangan crash saat
-      // boot; perlakukan sebagai belum terkonfigurasi.
+      // M-A/M3: URL konfigurasi yang ilegal (mis. HTTP produksi dari
+      // build lama) tidak membuat halaman crash — tampilkan form koneksi.
       _api = widget.api ?? _buildApiSafe(_baseUrl, _token);
     });
-    if (!(_api?.isConfigured ?? false)) {
-      setState(() => _phase = _Phase.unconfigured);
+    if (_api == null || !(_api?.isConfigured ?? false)) {
+      setState(() => _phase = _Phase.connectForm);
       return;
     }
     await refreshAll();
   }
 
   /// M-A: konstruksi Mt5Api dengan gerbang kebijakan M3 (Mt5UrlPolicy).
-  /// URL tersimpan yang kini ilegal TIDAK membuat halaman crash — halaman
-  /// kembali ke status "belum terkonfigurasi" dan URL baru divalidasi
-  /// lewat dialog ATUR SERVER.
+  /// URL yang kini ilegal TIDAK membuat halaman crash — halaman kembali
+  /// ke form koneksi.
   Mt5Api? _buildApiSafe(String base, String token) {
     try {
       return Mt5Api(baseUrl: base, token: token);
@@ -101,20 +132,9 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
     }
   }
 
-  /// M-A: validasi URL jalur simpan manual memakai kebijakan M3 yang SAMA
-  /// dengan klien auth/data (Mt5UrlPolicy) — tidak ada jalur alternatif.
-  /// Null = valid. String kosong diterima (berarti menghapus konfigurasi
-  /// — perilaku lama dipertahankan).
-  String? _urlPolicyError(String rawUrl) {
-    final base = rawUrl.trim();
-    if (base.isEmpty) return null;
-    try {
-      Mt5UrlPolicy.validatedBase(base);
-      return null;
-    } on Mt5ApiError catch (e) {
-      return e.message;
-    }
-  }
+  /// Klien auth/connect memakai URL konfigurasi yang sama (M3 satu sumber).
+  Mt5AuthApi _authApi() =>
+      widget.authApi ?? Mt5AuthApi(baseUrl: _baseUrl);
 
   /// Rentang aktif dari preset + zona waktu. Null hanya jika preset
   /// custom belum lengkap/invalid — pemanggil menampilkan pesan.
@@ -202,6 +222,20 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
       });
     } on Mt5ApiError catch (e) {
       if (!mounted || epoch != _epoch) return;
+      if (e.kind == Mt5ApiErrorKind.auth) {
+        // M2 + redesign: token ditolak server (kedaluwarsa/dicabut oleh
+        // PUTUSKAN KONEKSI di perangkat lain) -> sesi lokal dibersihkan
+        // dan halaman kembali ke FORM KONEKSI, bukan layar error.
+        await SessionStore().clear();
+        if (!mounted) return;
+        setState(() {
+          _token = '';
+          _api = widget.api ?? _buildApiSafe(_baseUrl, '');
+          _phase = _Phase.connectForm;
+          _error = null;
+        });
+        return;
+      }
       setState(() {
         _phase = _Phase.error;
         _error = e.friendly;
@@ -292,180 +326,356 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
     );
   }
 
-  // ------------------------------------------------------------- setting
-  Future<void> _openSettings() async {
-    final urlC = TextEditingController(text: _baseUrl);
-    final tokC = TextEditingController(text: _token);
-    // L2 (audit PR #4): snapshot isi awal field token manual. tokC hanya bisa
-    // berubah setelah titik ini bila user benar-benar mengetik — satu-satunya
-    // sinyal niat simpan token manual yang valid. Tanpa ini, blok persist di
-    // bawah menimpa token hasil login dengan snapshot basi.
-    final tokInitial = tokC.text.trim();
-    final emailC = TextEditingController();
-    final passC = TextEditingController();
-    // M-A: pesan galat validasi URL (kebijakan M3) untuk tombol SIMPAN —
-    // ditampilkan di dalam sheet supaya penolakan terlihat jelas.
-    final sheetUrlError = ValueNotifier<String?>(null);
-    final ok = await showModalBottomSheet<bool>(
+  // -------------------------------------------------- koneksi (D1/D3)
+  String _selectedServer() => _serverSel == kServerLainnya
+      ? _serverManualC.text.trim()
+      : _serverSel;
+
+  /// Validasi ringan form koneksi. Return pesan galat atau null.
+  String? _validateForm() {
+    final login = int.tryParse(_loginC.text.trim());
+    if (login == null || login <= 0) {
+      return 'Nomor akun MT5 wajib angka yang valid';
+    }
+    final serverErr = validateManualServer(_selectedServer());
+    if (serverErr != null) return serverErr;
+    final pass = _passC.text;
+    if (pass.isEmpty) return 'Password investor wajib diisi';
+    if (pass.length > 256) return 'Password terlalu panjang (maks 256)';
+    return null;
+  }
+
+  /// HUBUNGKAN AKUN MT5 (D1): self-link otomatis via POST /mt5/connect.
+  /// Password investor hanya hidup di memori selama proses ini —
+  /// controller dibersihkan di SEMUA jalur keluar (sukses/gagal).
+  Future<void> _connectAccount() async {
+    if (_connecting) return;
+    final err = _validateForm();
+    if (err != null) {
+      setState(() => _formError = err);
+      return;
+    }
+    if (_baseUrl.isEmpty) {
+      setState(() {
+        _formError = 'URL backend belum dikonfigurasi pada build aplikasi '
+            '(--dart-define TRANSCENDENCE_API_URL).';
+      });
+      return;
+    }
+    final login = int.parse(_loginC.text.trim());
+    final server = _selectedServer();
+    final pass = _passC.text; // hanya di memori selama proses koneksi
+    setState(() {
+      _connecting = true;
+      _formError = null;
+    });
+    try {
+      final res = await _authApi().connectAccount(
+        login: login,
+        server: server,
+        password: pass,
+      );
+      _passC.clear(); // password keluar dari memori segera
+      final tok = res['token'] as String;
+      if (!mounted) return;
+      setState(() {
+        _token = tok;
+        _api = widget.api ?? _buildApiSafe(_baseUrl, tok);
+        _connecting = false;
+      });
+      await refreshAll();
+    } on Mt5ApiError catch (e) {
+      _passC.clear();
+      if (!mounted) return;
+      setState(() {
+        _connecting = false;
+        _formError = e.friendly;
+      });
+    } catch (_) {
+      _passC.clear();
+      if (!mounted) return;
+      setState(() {
+        _connecting = false;
+        _formError =
+            'Gagal menghubungkan — periksa data akun dan koneksi internet.';
+      });
+    }
+  }
+
+  /// PUTUSKAN KONEKSI (D3): konfirmasi eksplisit sebelum logout.
+  Future<void> _confirmDisconnect() async {
+    final p = Palette.of(context);
+    final ok = await showDialog<bool>(
       context: context,
-      isScrollControlled: true,
-      builder: (ctx) {
-        final p = Palette.of(ctx);
-        return Padding(
-          padding: EdgeInsets.only(
-            left: 16,
-            right: 16,
-            top: 16,
-            bottom: MediaQuery.of(ctx).viewInsets.bottom + 24,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: p.surface1,
+        title: Text('PUTUSKAN KONEKSI?',
+            style: txt(ctx, 15, w: FontWeight.w600)),
+        content: Text(
+          'Sesi akan ditutup dan token dicabut. Riwayat jurnal TETAP '
+          'tersimpan dan tersedia lagi setelah terhubung kembali.',
+          style: txt(ctx, 13, color: p.muted, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text('BATAL',
+                style: mono(ctx, 12, color: p.muted, w: FontWeight.w600)),
           ),
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text('PUTUSKAN',
+                style: mono(ctx, 12, color: p.red, w: FontWeight.w600)),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await _disconnectNow();
+  }
+
+  /// Eksekusi PUTUSKAN KONEKSI (D3): POST /mt5/disconnect HANYA mencabut
+  /// token sesi. Tidak ada pemanggilan unbind — riwayat jurnal, akun
+  /// ter-bind, dan kredensial tidak disentuh.
+  Future<void> _disconnectNow() async {
+    if (_disconnecting) return;
+    final tok = _token;
+    setState(() => _disconnecting = true);
+    bool serverRevoked = false;
+    try {
+      if (tok.isNotEmpty) {
+        await _authApi().disconnect(tok);
+        serverRevoked = true;
+      }
+    } on Mt5ApiError {
+      // revoke server gagal (mis. offline) — token lokal tetap dibuang;
+      // token basi akan ditolak server saat dipakai (M2) dan halaman
+      // kembali ke form koneksi.
+    } finally {
+      if (mounted) {
+        setState(() {
+          _disconnecting = false;
+          _token = '';
+          _api = widget.api ?? _buildApiSafe(_baseUrl, '');
+          _status = null;
+          _account = null;
+          _trades = [];
+          _phase = _Phase.connectForm;
+        });
+        _toast(serverRevoked
+            ? 'Koneksi diputus — riwayat jurnal tetap tersimpan.'
+            : 'Sesi lokal dibersihkan.');
+      }
+    }
+  }
+
+  // ------------------------------------------------------------ form UI
+  Widget _serverDropdown(Palette p) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('SERVER BROKER', style: labelSm(context, color: p.dim)),
+        const SizedBox(height: 6),
+        Container(
+          decoration: BoxDecoration(
+            color: p.surface1,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(width: 1, color: p.line),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: DropdownButtonHideUnderline(
+            child: DropdownButton<String>(
+              value: _serverSel,
+              isExpanded: true,
+              icon: Icon(Icons.expand_more, size: 18, color: p.dim),
+              dropdownColor: p.surface1,
+              items: kServerOptions
+                  .map((o) => DropdownMenuItem<String>(
+                        value: o.value,
+                        child: Text(
+                          o.label,
+                          style: mono(context, 14, w: FontWeight.w600),
+                        ),
+                      ))
+                  .toList(),
+              onChanged: (v) {
+                if (v == null || v == _serverSel) return;
+                setState(() {
+                  _serverSel = v;
+                  _formError = null;
+                });
+              },
+            ),
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          'Daftar server Exness di atas tidak lengkap dan bisa berbeda '
+          'per akun — pilih "Lainnya (isi manual)" bila server Anda tidak '
+          'ada di daftar.',
+          style: txt(context, 10.5, color: p.dim),
+        ),
+      ],
+    );
+  }
+
+  /// Password investor dengan tombol lihat/sembunyi (D1).
+  Widget _passwordField(Palette p) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('PASSWORD INVESTOR', style: labelSm(context, color: p.dim)),
+        const SizedBox(height: 6),
+        Container(
+          decoration: BoxDecoration(
+            color: p.surface1,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(width: 1, color: p.line),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          child: TextField(
+            controller: _passC,
+            obscureText: _obscurePass,
+            autocorrect: false,
+            enableSuggestions: false,
+            style: mono(context, 14, w: FontWeight.w600),
+            decoration: InputDecoration(
+              isDense: true,
+              border: InputBorder.none,
+              hintText: 'password investor (bukan password master)',
+              hintStyle: mono(context, 13, color: p.dim),
+              suffixIcon: IconButton(
+                padding: EdgeInsets.zero,
+                constraints:
+                    const BoxConstraints(minWidth: 32, minHeight: 32),
+                icon: Icon(
+                  _obscurePass
+                      ? Icons.visibility_outlined
+                      : Icons.visibility_off_outlined,
+                  size: 18,
+                  color: p.dim,
+                ),
+                onPressed: () =>
+                    setState(() => _obscurePass = !_obscurePass),
+              ),
+            ),
+            cursorColor: p.goldSolid,
+            onSubmitted: (_) => _connectAccount(),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// Layar/form koneksi — pengganti layar "BELUM TERHUBUNG" + dialog
+  /// ATUR SERVER lama. Hanya tiga input (D1); tidak ada URL/email/
+  /// password customer/token manual.
+  Widget _connectForm(Palette p) {
+    final backendMissing = !AppConfig.hasApiBaseUrl;
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SectionHead(Icons.cloud_sync_outlined, 'Jurnal MT5 Otomatis'),
+          const SizedBox(height: 4),
+          Text(
+            'Hubungkan akun MT5 untuk memuat riwayat trade otomatis dari '
+            'backend — read-only, tanpa eksekusi order.',
+            style: txt(context, 12, color: p.muted),
+          ),
+          const SizedBox(height: 14),
+          ObsCard(
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.link, size: 17, color: p.gold),
+                  const SizedBox(width: 8),
+                  Text(
+                    'HUBUNGKAN AKUN MT5',
+                    style: labelSm(context, color: p.muted),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              _textField(
+                context,
+                'Nomor akun MT5',
+                '12345678',
+                _loginC,
+                false,
+                keyboardType: TextInputType.number,
+              ),
+              const SizedBox(height: 10),
+              _serverDropdown(p),
+              if (_serverSel == kServerLainnya) ...[
+                const SizedBox(height: 10),
+                _textField(
+                  context,
+                  'Nama server (manual)',
+                  'mis. Exness-MT5Real5',
+                  _serverManualC,
+                  false,
+                ),
+              ],
+              const SizedBox(height: 10),
+              _passwordField(p),
+              const SizedBox(height: 6),
+              Text(
+                'Gunakan password INVESTOR (read-only) — backend hanya '
+                'membaca riwayat trade, tidak bisa mengirim/mengubah/'
+                'menutup order. Password hanya dipakai saat proses '
+                'koneksi ini dan tidak pernah disimpan di perangkat.',
+                style: txt(context, 11, color: p.dim, height: 1.5),
+              ),
+              if (backendMissing) ...[
+                const SizedBox(height: 12),
                 Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Icon(Icons.dns, size: 17, color: p.gold),
-                    const SizedBox(width: 8),
-                    Text(
-                      'Server Jurnal MT5',
-                      style: txt(ctx, 15, w: FontWeight.w600),
+                    Icon(Icons.report, size: 15, color: p.warm),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        'URL backend belum dikonfigurasi pada build ini — '
+                        'atur lewat --dart-define '
+                        'TRANSCENDENCE_API_URL saat membangun aplikasi.',
+                        style: txt(context, 11.5, color: p.warm, height: 1.4),
+                      ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 4),
-                Text(
-                  'Alamat backend Flask di VPS (HTTPS). Masuk pakai akun '
-                  'customer — token sesi disimpan di secure storage.',
-                  style: txt(ctx, 12, color: p.muted),
-                ),
-                const SizedBox(height: 14),
-                _textField(
-                  ctx,
-                  'URL server',
-                  'https://jurnal.domain.com',
-                  urlC,
-                  false,
-                ),
-                const SizedBox(height: 10),
-                _textField(ctx, 'Email customer', 'nama@email.com', emailC,
-                    false),
-                const SizedBox(height: 10),
-                _textField(ctx, 'Password', '********', passC, true),
+              ],
+              if (_formError != null) ...[
                 const SizedBox(height: 12),
-                GoldButton(
-                  'MASUK',
-                  icon: Icons.login,
-                  onTap: () async {
-                    try {
-                      final base = urlC.text.trim();
-                      final auth = Mt5AuthApi(baseUrl: base);
-                      final tok = await auth.login(
-                        emailC.text.trim(),
-                        passC.text,
-                      );
-                      if (!ctx.mounted) return;
-                      Navigator.pop(ctx, true);
-                      if (!mounted) return;
-                      setState(() {
-                        _baseUrl = base;
-                        _token = tok;
-                        _api = widget.api ??
-                            Mt5Api(baseUrl: base, token: tok);
-                      });
-                      await refreshAll();
-                      return;
-                    } on Mt5ApiError catch (e) {
-                      _toast(e.friendly, err: true);
-                    } catch (_) {
-                      _toast('Login gagal — cek URL/email/password',
-                          err: true);
-                    }
-                  },
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  'TOKEN MANUAL (LANJUTAN) — token sesi dari server',
-                  style: labelSm(ctx, color: p.dim),
-                ),
-                const SizedBox(height: 8),
-                _textField(ctx, 'Token sesi', 'xxxxxxxx...', tokC, true),
-                const SizedBox(height: 16),
-                ValueListenableBuilder<String?>(
-                  valueListenable: sheetUrlError,
-                  builder: (ctx, err, _) => err == null
-                      ? const SizedBox.shrink()
-                      : Padding(
-                          padding: const EdgeInsets.only(bottom: 12),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Icon(Icons.report, size: 15, color: p.redSolid),
-                              const SizedBox(width: 6),
-                              Expanded(
-                                child: Text(
-                                  err,
-                                  style: txt(ctx, 12, color: p.redSolid),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                ),
-                GoldButton(
-                  'SIMPAN',
-                  icon: Icons.save_outlined,
-                  // M-A: validasi M3 sebelum sheet ditutup — URL HTTP
-                  // non-loopback DITOLAK di sini; sheet tetap terbuka
-                  // dan pesan galat ditampilkan.
-                  onTap: () {
-                    final err = _urlPolicyError(urlC.text);
-                    sheetUrlError.value = err;
-                    if (err != null) return;
-                    Navigator.pop(ctx, true);
-                  },
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.error_outline, size: 15, color: p.red),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        _formError!,
+                        style: txt(context, 12.5, color: p.red, height: 1.4),
+                      ),
+                    ),
+                  ],
                 ),
               ],
-            ),
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: GoldButton(
+                  _connecting ? 'MENGHUBUNGKAN…' : 'HUBUNGKAN AKUN MT5',
+                  icon: Icons.link,
+                  onTap: _connecting ? null : _connectAccount,
+                ),
+              ),
+            ],
           ),
-        );
-      },
+        ],
+      ),
     );
-    if (ok != true) return;
-    final newBase = urlC.text.trim();
-    // M-A: gerbang persist — validasi M3 yang sama dengan klien auth/data.
-    // Tidak ada jalur alternatif: URL ilegal TIDAK tersimpan sama sekali
-    // (URL maupun token tidak disentuh) dan user melihat pesan galat.
-    final urlErr = _urlPolicyError(newBase);
-    if (urlErr != null) {
-      _toast(urlErr, err: true);
-      return;
-    }
-    final sp = await SharedPreferences.getInstance();
-    await sp.setString(_kPrefUrl, newBase);
-    // L2 fix: tulis token HANYA bila field manual diedit eksplisit. Sebelumnya
-    // baris ini selalu menulis tokC.text (snapshot token LAMA/kosong dari saat
-    // sheet DIBUKA) — menimpa token BARU yang baru saja disimpan
-    // Mt5AuthApi.login (mt5_auth.dart:190):
-    //  * login pertama, field kosong -> store berisi '' -> sesi hilang tiap
-    //    restart aplikasi (readToken -> null -> unconfigured);
-    //  * login ulang, field pre-fill -> token lama menimpa token baru;
-    //    rotasi sesi tidak pernah terjadi, token baru jadi yatim di
-    //    auth_tokens server sampai TTL.
-    final manualTok = tokC.text.trim();
-    final manualChanged = manualTok != tokInitial;
-    if (manualChanged) {
-      await SessionStore().saveToken(manualTok);
-    }
-    if (!mounted) return;
-    setState(() {
-      _baseUrl = newBase;
-      // L2 fix: tanpa edit manual, biarkan _token dari jalur MASUK (baris
-      // 367) — memori dan store harus selalu sepakat.
-      if (manualChanged) _token = manualTok;
-      _api = widget.api ?? Mt5Api(baseUrl: _baseUrl, token: _token);
-    });
-    await refreshAll();
   }
 
   Widget _textField(
@@ -473,8 +683,9 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
     String label,
     String hint,
     TextEditingController c,
-    bool obscure,
-  ) {
+    bool obscure, {
+    TextInputType? keyboardType,
+  }) {
     final p = Palette.of(ctx);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -493,6 +704,7 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
             obscureText: obscure,
             autocorrect: false,
             enableSuggestions: false,
+            keyboardType: keyboardType,
             style: mono(ctx, 14, w: FontWeight.w600),
             decoration: InputDecoration(
               isDense: true,
@@ -515,8 +727,8 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
       case _Phase.boot:
       case _Phase.loading:
         return const Center(child: CircularProgressIndicator(strokeWidth: 2));
-      case _Phase.unconfigured:
-        return _unconfigured(p);
+      case _Phase.connectForm:
+        return _connectForm(p);
       case _Phase.error:
         return _errorView(p);
       case _Phase.invalidRange:
@@ -636,52 +848,6 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
     );
   }
 
-  Widget _unconfigured(Palette p) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          SectionHead(Icons.cloud_sync_outlined, 'Jurnal MT5 Otomatis'),
-          const SizedBox(height: 4),
-          Text(
-            'Riwayat trade akun MT5 Exness, tersinkron otomatis dari VPS.',
-            style: txt(context, 12, color: p.muted),
-          ),
-          const SizedBox(height: 14),
-          ObsCard(
-            children: [
-              Row(
-                children: [
-                  Icon(Icons.dns, size: 17, color: p.gold),
-                  const SizedBox(width: 8),
-                  Text(
-                    'BELUM TERHUBUNG',
-                    style: labelSm(context, color: p.muted),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              Text(
-                'Isi alamat backend dan API token untuk mulai memuat jurnal. '
-                'Backend berjalan di VPS Ubuntu dengan Wine + mt5linux '
-                '(lihat docs/MT5-UBUNTU-NO-DOCKER.md).',
-                style: txt(context, 13, color: p.muted),
-              ),
-              const SizedBox(height: 14),
-              GhostButton(
-                'ATUR SERVER',
-                icon: Icons.settings_outlined,
-                expanded: true,
-                onTap: _openSettings,
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
   Widget _errorView(Palette p) {
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
@@ -718,10 +884,10 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
                   const SizedBox(width: 8),
                   Expanded(
                     child: GhostButton(
-                      'SERVER',
-                      icon: Icons.dns,
+                      'PUTUSKAN KONEKSI',
+                      icon: Icons.link_off,
                       expanded: true,
-                      onTap: _openSettings,
+                      onTap: _disconnecting ? null : _confirmDisconnect,
                     ),
                   ),
                 ],
@@ -778,17 +944,17 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
           children: [
             Expanded(
               child: GhostButton(
-                'SERVER',
-                icon: Icons.dns,
-                onTap: _openSettings,
+                'SINKRON PENUH',
+                icon: Icons.history,
+                onTap: _syncing ? null : () => _syncNow(full: true),
               ),
             ),
             const SizedBox(width: 8),
             Expanded(
               child: GhostButton(
-                'SINKRON PENUH',
-                icon: Icons.history,
-                onTap: _syncing ? null : () => _syncNow(full: true),
+                _disconnecting ? 'MEMUTUSKAN…' : 'PUTUSKAN KONEKSI',
+                icon: Icons.link_off,
+                onTap: _disconnecting ? null : _confirmDisconnect,
               ),
             ),
           ],

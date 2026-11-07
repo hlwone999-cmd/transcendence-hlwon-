@@ -26,7 +26,12 @@ class Mt5ApiError implements Exception {
       case Mt5ApiErrorKind.network:
         return 'Tidak bisa menyambung ke server — cek URL/internet.';
       case Mt5ApiErrorKind.auth:
-        return 'Token API ditolak (401) — periksa pengaturan server.';
+        // Redesign D1: pesan dari server (mis. "Verifikasi gagal — periksa
+        // nomor akun, server, dan password investor") lebih berguna; teks
+        // generik hanya bila server tidak mengirim pesan.
+        return message.isEmpty
+            ? 'Token API ditolak (401) — periksa pengaturan server.'
+            : message;
       case Mt5ApiErrorKind.server:
         return message.isEmpty ? 'Server bermasalah (5xx).' : message;
       case Mt5ApiErrorKind.badResponse:

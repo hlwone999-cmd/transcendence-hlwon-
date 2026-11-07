@@ -56,6 +56,14 @@ class Config:
     lockout_seconds: int = 900
     max_customers: int = 4                 # kapasitas MVP (brief §12)
 
+    # --- self-link akun MT5 (redesign UI Jurnal MT5, keputusan D2) ---
+    # Customer boleh self-link mandiri via POST /api/v1/mt5/connect
+    # (identitas = nomor akun MT5 + server + password investor).
+    # Admin dapat menonaktifkan lewat env MT5_SELF_LINK_ENABLED=false —
+    # saat itu provisioning customer hanya via /auth/register (admin/API).
+    # Kapasitas tetap dibatasi max_customers (default 4 customer aktif).
+    mt5_self_link_enabled: bool = True
+
     # --- enkripsi kredensial MT5 (brief §5/§7) ---
     # Kunci Fernet. TIDAK boleh di repo/db; WAJIB env di produksi.
     cred_key: str = ""
@@ -125,6 +133,7 @@ def load_config(env_file: str | None = None) -> Config:
         max_failed_logins=max(1, int(os.getenv("AUTH_MAX_FAILED_LOGINS", "5"))),
         lockout_seconds=max(30, int(os.getenv("AUTH_LOCKOUT_SECONDS", "900"))),
         max_customers=max(1, int(os.getenv("MAX_CUSTOMERS", "4"))),
+        mt5_self_link_enabled=_bool(os.getenv("MT5_SELF_LINK_ENABLED", "1")),
         cred_key=os.getenv("MT5_CRED_KEY", "").strip(),
         cred_key_old=os.getenv("MT5_CRED_KEY_OLD", "").strip(),
         rpyc_port_base=max(1024, int(os.getenv("RPYC_PORT_BASE", "18812"))),

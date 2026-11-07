@@ -1,6 +1,13 @@
 // Transcendence — mt5_auth.dart
-// Autentikasi multi-customer (brief §9): register/login/logout/me,
-// bind/unbind akun MT5, dan penyimpanan token sesi.
+// Autentikasi multi-customer (brief §9): connect/logout/me, bind/unbind
+// akun MT5, dan penyimpanan token sesi.
+//
+// REDESIGN JURNAL MT5 (D1/D3): jalur utama customer adalah self-link —
+// [connectAccount] (POST /mt5/connect) dengan identitas nomor akun MT5 +
+// server broker + password INVESTOR. Email/password portal/token manual
+// tidak ada di UI; [login]/[register] tetap dipertahankan untuk API/admin.
+// [disconnect] (POST /mt5/disconnect) HANYA mencabut token sesi (D3) —
+// riwayat jurnal tidak dihapus; unbind tetap hanya via API/admin.
 //
 // Token sesi disimpan di flutter_secure_storage (encrypted keystore).
 // Fallback SharedPreferences hanya untuk perangkat sangat lama —
@@ -159,9 +166,22 @@ class Mt5AuthApi {
     }
     if (r.statusCode == 401) {
       // M2: token ditolak server -> bersihkan token/sesi lokal supaya
-      // token basi tidak terus dipakai ulang.
+      // token basi tidak terus dipakai ulang (HANYA bila pemanggil
+      // memintanya — panggilan kredensial tidak membersihkan).
       if (clearSessionOn401) await store.clear();
-      throw Mt5ApiError(Mt5ApiErrorKind.auth, '');
+      // Redesign D1: 401 pada /mt5/connect berarti verifikasi kredensial
+      // gagal — pesan seragam dari server jauh lebih bermanfaat daripada
+      // teks generik "Token API ditolak". Bila server tidak mengirim
+      // pesan, fallback teks lama tetap dipakai.
+      String msg = '';
+      try {
+        final jj = jsonDecode(utf8.decode(r.bodyBytes));
+        if (jj is Map && jj['error'] is Map && jj['error']['message'] is String) {
+          msg = jj['error']['message'] as String;
+        }
+      } catch (_) {// body bukan JSON — pakai fallback
+      }
+      throw Mt5ApiError(Mt5ApiErrorKind.auth, msg);
     }
     // M2: 5xx / respons rusak di bawah — sesi lokal TIDAK disentuh.
     dynamic j;
@@ -189,6 +209,52 @@ class Mt5AuthApi {
     final token = (j as Map)['token'] as String;
     await store.saveToken(token);
     return token;
+  }
+
+  /// HUBUNGKAN AKUN MT5 (D1) — self-link via POST /mt5/connect.
+  ///
+  /// Identitas = [login] (nomor akun MT5) + [server] + [password]
+  /// (password INVESTOR, sesi read-only). Password TIDAK PERNAH
+  /// disimpan lokal — hanya dikirim sekali ke server via HTTPS lalu
+  /// dibiarkan keluar dari memori (pemanggil mebersihkan controller).
+  /// Token sesi hasil server disimpan aman dan di-return.
+  ///
+  /// Server menjawab:
+  ///  - 201 mode=self_link : akun baru (customer dibuat otomatis,
+  ///    dibatasi kapasitas max_customers + guard anti-balapan).
+  ///  - 200 mode=login     : akun sudah dikenal, sesi diterbitkan lagi.
+  ///  - 401/403/409/429    : Mt5ApiError dengan pesan seragam dari server.
+  Future<Map<String, dynamic>> connectAccount(
+      {required int login,
+      required String server,
+      required String password}) async {
+    final j = await _send(
+        () => _http.post(_uri('/mt5/connect'),
+            headers: _headers(),
+            body: jsonEncode(
+                {'login': login, 'server': server, 'password': password})),
+        clearSessionOn401: false); // 401 di sini = password salah, bukan
+    // sesi basi — jangan bersihkan store (tak ada sesi lama yang sah).
+    final map = j as Map<String, dynamic>;
+    final token = map['token'] as String;
+    await store.saveToken(token);
+    return map;
+  }
+
+  /// PUTUSKAN KONEKSI (D3) — POST /mt5/disconnect.
+  ///
+  /// HANYA mencabut token sesi di server + menghapus token lokal.
+  /// Riwayat jurnal, akun ter-bind, dan kredensial TIDAK disentuh
+  /// (tidak ada pemanggilan unbind di jalur ini).
+  Future<void> disconnect(String token) async {
+    try {
+      await _send(
+          () => _http.post(_uri('/mt5/disconnect'),
+              headers: _headers(token), body: '{}'),
+          clearSessionOn401: true);
+    } finally {
+      await store.clear();
+    }
   }
 
   Future<void> register(String email, String password,

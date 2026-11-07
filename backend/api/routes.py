@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import secrets
 import threading
 from datetime import datetime, timedelta, timezone
 from functools import wraps
@@ -492,6 +493,294 @@ def accounts_unbind():
     auditmod.audit(conn, "unbind", customer_id=g.customer_id,
                    user_id=g.user_id, entity=f"mt5_account:{acc_id}")
     return jsonify({"ok": True, "removed_account_id": acc_id})
+
+
+# ------------------------------------------------- self-link akun MT5 (D1/D2)
+def _server_slug(server: str) -> str:
+    """Slug server utk email sintetis internal (TIDAK pernah ditampilkan
+    di UI): karakter non [a-z0-9] -> '-'; kosong -> 'srv'."""
+    s = "".join(ch if ch.isalnum() else "-" for ch in server.lower())
+    s = s.strip("-")[:48] or "srv"
+    return s
+
+
+@api_bp.post("/mt5/connect")
+@require_rate_limit("mt5_connect", 10, 300)
+def mt5_connect():
+    """Self-link otomatis akun MT5 — redesign UI Jurnal MT5 (D1/D2).
+
+    Identitas customer = nomor akun MT5 + server broker + password
+    INVESTOR (sesi MT5 read-only). UI tidak punya input URL/email/
+    password customer/token manual — URL backend ditentukan konfigurasi
+    aplikasi, dan endpoint ini membuat (atau mengenali) customer + akun
+    dalam satu langkah lalu mengeluarkan token sesi.
+
+    Keamanan:
+    - Password investor HANYA di memori proses selama request; tersimpan
+      TERENKRIPSI (Fernet) di mt5_credentials; TIDAK pernah di-log dan
+      TIDAK masuk audit_logs.
+    - Kapasitas: maks cfg.max_customers (default 4) customer aktif —
+      cek-dan-tulis diserialisasi capacity_guard (aman pendaftaran
+      bersamaan, audit #4); alokasi terminal juga ter-guard + UNIQUE port.
+    - UNIQUE(login, server) mt5_accounts — balapan menjadi 409 rapi.
+    - Rate limit per IP (10/5 menit) + lockout per (login, server)
+      setelah verifikasi password gagal.
+    - Pesan gagal seragam (tidak membocorkan keberadaan akun); alasan
+      sebenarnya hanya di audit_logs.
+    - Dapat dinonaktifkan admin: MT5_SELF_LINK_ENABLED=false -> 403.
+
+    PUTUSKAN KONEKSI (D3) = POST /mt5/disconnect — hanya mencabut token
+    sesi; riwayat jurnal tidak dihapus; unbind tetap hanya via
+    POST /api/v1/accounts/unbind (API/admin).
+    """
+    import audit as auditmod
+    import auth as authmod
+    from security import crypto
+    from services.terminals import TerminalError
+
+    c = cfg()
+    if not getattr(c, "mt5_self_link_enabled", True):
+        abort(403, description="Pendaftaran mandiri (self-link) sedang "
+                               "dinonaktifkan admin. Hubungi admin untuk "
+                               "provisioning akun.")
+
+    body = request.get_json(silent=True) or {}
+    try:
+        login_val = int(body.get("login"))
+    except (TypeError, ValueError):
+        abort(400, description="'login' harus angka (nomor akun MT5)")
+    password = str(body.get("password") or "")
+    server = str(body.get("server") or "").strip()
+    if not login_val or login_val < 0 or not server or not password:
+        abort(400, description="'login', 'server', dan "
+                               "'password investor' wajib diisi")
+    if len(server) > 128 or len(password) > 256:
+        abort(400, description="'server'/'password' terlalu panjang")
+
+    lock = authmod._lockout_for(c)
+    lock_key = f"mt5-connect:{login_val}:{server}"
+    if lock.is_locked(lock_key):
+        abort(429, description="Terlalu banyak percobaan gagal — coba lagi "
+                               "nanti")
+
+    conn = get_db()
+    existing = conn.execute(
+        "SELECT * FROM mt5_accounts WHERE login=? AND server=?",
+        (login_val, server)).fetchone()
+
+    # ---- akun sudah terdaftar: verifikasi password vs kredensial
+    # terenkripsi (plaintext hanya di memori; perbandingan konstanta-
+    # waktu), lalu keluarkan token sesi customer pemiliknya.
+    if existing is not None:
+        try:
+            cred = conn.execute(
+                "SELECT enc_password, key_version FROM mt5_credentials"
+                " WHERE account_id=?", (int(existing["id"]),)).fetchone()
+            if cred is None:
+                abort(503, description="Kredensial akun tidak lengkap — "
+                                       "hubungi admin")
+            stored = crypto.decrypt_password(c, cred["enc_password"],
+                                             cred["key_version"])
+            matched = hmac.compare_digest(stored, password)
+        except crypto.CredentialCryptoError:
+            abort(503, description="Kredensial akun tidak bisa diverifikasi "
+                                   "— hubungi admin")
+        if not matched:
+            lock.record_failure(lock_key)
+            auditmod.audit(conn, "mt5_connect_gagal",
+                           detail={"login": login_val, "server": server,
+                                   "reason": "password_salah"})
+            abort(401, description="Verifikasi gagal — periksa nomor akun, "
+                                   "server, dan password investor")
+        crow = conn.execute(
+            "SELECT status FROM customers WHERE id=?",
+            (int(existing["customer_id"]),)).fetchone()
+        if crow is None or crow["status"] != "active":
+            abort(403, description="Customer dinonaktifkan — hubungi admin")
+        urow = conn.execute(
+            "SELECT id FROM users WHERE customer_id=?",
+            (int(existing["customer_id"]),)).fetchone()
+        if urow is None:
+            abort(503, description="Identitas customer tidak lengkap — "
+                                   "hubungi admin")
+        lock.clear(lock_key)
+        token = authmod.issue_token(conn, c,
+                                    user_id=int(urow["id"]),
+                                    customer_id=int(existing["customer_id"]),
+                                    ip=authmod.current_ip())
+        conn.execute("UPDATE users SET last_login_at=? WHERE id=?",
+                     (_now_iso(), int(urow["id"])))
+        conn.commit()
+        auditmod.audit(conn, "mt5_connect",
+                       customer_id=int(existing["customer_id"]),
+                       user_id=int(urow["id"]),
+                       entity=f"mt5_account:{int(existing['id'])}",
+                       detail={"mode": "login", "server": server})
+        return jsonify({"ok": True, "mode": "login", "token": token,
+                        "token_type": "bearer",
+                        "account": {"login": int(existing["login"]),
+                                    "server": existing["server"],
+                                    "currency": existing["currency"]}}), 200
+
+    # ---- akun baru: daftarkan customer (capacity-guard, D2) + akun +
+    # kredensial terenkripsi + terminal, lalu keluarkan token sesi.
+    try:
+        enc, key_version = crypto.encrypt_password(c, password)
+    except crypto.CredentialCryptoError as e:
+        abort(503, description=str(e))
+
+    # Password user internal = secret acak yang tidak pernah dikirim ke
+    # siapa pun: login customer self-link SELALU lewat /mt5/connect
+    # (verifikasi password investor), bukan /auth/login.
+    internal_secret = secrets.token_urlsafe(32)
+    synthetic_email = f"{login_val}.{_server_slug(server)}@mt5.link"
+
+    # Identitas (login, server) bisa saja SUDAH pernah terdaftar tanpa
+    # akun aktif — mis. setelah unbind via API/admin (yang sengaja tidak
+    # menghapus customer). Pakai ulang customer yang sama; kapasitas
+    # tidak bertambah karena slot itu memang sudah terpakai.
+    idrow = conn.execute(
+        """SELECT u.id AS user_id, u.customer_id, c.code AS code,
+                  c.status AS customer_status,
+                  (SELECT COUNT(*) FROM mt5_accounts a
+                     WHERE a.customer_id = u.customer_id) AS bound_accounts
+           FROM users u JOIN customers c ON c.id = u.customer_id
+           WHERE u.email=?""", (synthetic_email,)).fetchone()
+    reuse = idrow is not None
+    if reuse:
+        if idrow["customer_status"] != "active":
+            abort(403, description="Customer dinonaktifkan — hubungi admin")
+        if int(idrow["bound_accounts"]) > 0:
+            abort(409, description="Customer sudah punya akun MT5 "
+                                   "ter-bind. Unbind dulu untuk mengganti.")
+        created = {"customer_id": int(idrow["customer_id"]),
+                   "user_id": int(idrow["user_id"]),
+                   "code": idrow["code"]}
+    else:
+        created = None
+        try:
+            created = authmod.register_customer(
+                conn, c, synthetic_email, internal_secret, None,
+                skip_password_validation=True)
+            conn.commit()  # persist customer+user SEBELUM provisioning
+        except authmod.AuthError as e:
+            if e.code == 403:  # kapasitas penuh (max_customers)
+                auditmod.audit(conn, "mt5_connect_gagal",
+                               detail={"login": login_val, "server": server,
+                                       "reason": "kapasitas_penuh"})
+            abort(e.code, description=e.message)
+
+    try:
+        term = registry_provision(current_app, conn,
+                                  created["customer_id"])
+    except TerminalError:
+        if not reuse:  # customer baru gagal provisioning -> buang
+            _discard_orphan_customer(conn, created["customer_id"])
+        abort(409, description="Provisioning terminal MT5 gagal — kapasitas "
+                               "terminal penuh atau alokasi port bentrok")
+    now = _now_iso()
+    try:
+        conn.execute(
+            """INSERT INTO mt5_accounts (customer_id, login, server,
+                 first_sync_at, last_sync_at) VALUES (?,?,?,?,?)""",
+            (created["customer_id"], login_val, server, now, None))
+        acc_id = int(conn.execute(
+            "SELECT id FROM mt5_accounts WHERE customer_id=?",
+            (created["customer_id"],)).fetchone()["id"])
+        conn.execute(
+            "INSERT INTO mt5_credentials (account_id, enc_password,"
+            " key_version) VALUES (?,?,?)", (acc_id, enc, key_version))
+        conn.commit()
+    except dbmod.INTEGRITY_ERRORS as e:
+        # balapan UNIQUE(login, server) antar request bersamaan —
+        # customer BARU dibuang agar slot kapasitas tidak bocor;
+        # customer hasil pakai-ulang tidak disentuh (bukan yatim).
+        conn.rollback()
+        if not reuse:
+            _discard_orphan_customer(conn, created["customer_id"])
+        log.warning("mt5_connect bentrok (UNIQUE) login=%s: %s",
+                    login_val, e)
+        abort(409, description="Akun MT5 itu baru saja terdaftar — "
+                               "coba hubungkan lagi dengan password "
+                               "investor yang benar")
+    except Exception:
+        conn.rollback()
+        if not reuse:
+            _discard_orphan_customer(conn, created["customer_id"])
+        raise
+
+    auditmod.audit(conn, "mt5_connect",
+                   customer_id=created["customer_id"],
+                   user_id=created["user_id"],
+                   entity=f"mt5_account:{acc_id}",
+                   detail={"mode": "self_link", "server": server,
+                           "rpyc_port": term["rpyc_port"]})
+
+    # sync awal di background — sama seperti bind; tidak memblokir request.
+    if current_app.extensions.get("auto_initial_sync", True):
+        app_obj = current_app._get_current_object()
+
+        def _initial_sync(app=app_obj, acc=acc_id):
+            try:
+                svc = app.extensions["mt5_sync"]
+                with app.app_context():
+                    svc.sync_account(acc, mode="initial")
+            except Exception:  # noqa: BLE001
+                log.exception("sync awal akun %d gagal", acc)
+        threading.Thread(target=_initial_sync, daemon=True,
+                         name=f"initial-sync-{acc_id}").start()
+
+    token = authmod.issue_token(conn, c,
+                                user_id=created["user_id"],
+                                customer_id=created["customer_id"],
+                                ip=authmod.current_ip())
+    acc = conn.execute("SELECT * FROM mt5_accounts WHERE id=?",
+                       (acc_id,)).fetchone()
+    return jsonify({"ok": True, "mode": "self_link", "token": token,
+                    "token_type": "bearer",
+                    "customer_code": created["code"],
+                    "account": {"login": int(acc["login"]),
+                                "server": acc["server"],
+                                "currency": acc["currency"]},
+                    "terminal": {"rpyc_port": term["rpyc_port"],
+                                 "status": term["status"]}}), 201
+
+
+def registry_provision(app, conn, customer_id: int) -> dict:
+    """Provision terminal via registry (pemisahan kecil utk keterbacaan)."""
+    return app.extensions["mt5_registry"].provision_terminal(conn,
+                                                             customer_id)
+
+
+def _discard_orphan_customer(conn, customer_id: int) -> None:
+    """Hapus customer yang BARU dibuat tapi provisioningnya gagal —
+    agar slot kapasitas max_customers tidak bocor. HANYA untuk customer
+    tanpa akun MT5 (guard: tidak ada baris mt5_accounts)."""
+    try:
+        if conn.execute(
+                "SELECT 1 FROM mt5_accounts WHERE customer_id=?",
+                (customer_id,)).fetchone() is None:
+            conn.execute("DELETE FROM customers WHERE id=?",
+                         (customer_id,))
+            conn.commit()
+    except Exception:  # noqa: BLE001 — pembersihan tak boleh menutupi
+        conn.rollback()
+        log.exception("gagal membersihkan customer yatim %d", customer_id)
+
+
+@api_bp.post("/mt5/disconnect")
+@require_customer
+def mt5_disconnect():
+    """PUTUSKAN KONEKSI (D3): logout + cabut token sesi INI saja.
+
+    Riwayat jurnal, akun ter-bind, kredensial, dan terminal TIDAK
+    disentuh. Unbind (menghapus data) tetap hanya melalui
+    POST /api/v1/accounts/unbind yang tidak diekspos di UI.
+    """
+    import auth as authmod
+    authmod.revoke_token(get_db(), g.token_id)
+    _audit("mt5_disconnect")
+    return jsonify({"ok": True})
 
 
 # ------------------------------------------------------------------- MT5

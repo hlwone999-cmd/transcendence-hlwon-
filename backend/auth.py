@@ -208,7 +208,8 @@ def revoke_all_for_customer(conn, customer_id: int) -> None:
 
 # ---------------------------------------------------------------- register
 def register_customer(conn, config, email: str, password: str,
-                      display_name: str | None = None) -> dict:
+                      display_name: str | None = None, *,
+                      skip_password_validation: bool = False) -> dict:
     """Buat customer + user. Batas kapasitas MVP: max_customers aktif.
 
     Race condition (audit #4): cek kapasitas + INSERT diserialisasi
@@ -216,9 +217,17 @@ def register_customer(conn, config, email: str, password: str,
     IMMEDIATE — sehingga dua registrasi bersamaan pada slot terakhir
     tidak bisa lolos keduanya (TOCTOU tertutup). Pelanggaran UNIQUE
     (email/kode) diubah menjadi AuthError(409), bukan 500.
+
+    [skip_password_validation] dipakai jalur self-link /mt5/connect:
+    password yang diterima bukan password portal customer melainkan
+    SECRET INTERNAL ACAK (token_urlsafe 32) untuk user sintetis —
+    kebijakan panjang password portal (min 8) tidak relevan untuk
+    secret acak tersebut dan password investor MT5 tidak pernah
+    melewati fungsi ini. Default False = perilaku lama utuh.
     """
     email = normalize_email(email)
-    validate_password(password)
+    if not skip_password_validation:
+        validate_password(password)
     try:
         with dbmod.capacity_guard(conn, CAPACITY_LOCK_REGISTER):
             n_active = conn.execute(
