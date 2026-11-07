@@ -20,6 +20,11 @@ SHELL=/bin/bash
 - Skrip: `backend/deploy/backup_daily.sh` — `set -euo pipefail`, dump
   ke `.part` (umask 077 → 600), validasi tiga lapis (`gzip -t` + tidak
   kosong + header dump PostgreSQL), publikasi atomik `mv`, `chmod 600`.
+  Pointer `LAST_DAILY` juga ditulis atomik: `printf` ke
+  `.LAST_DAILY.part` di direktori yang sama (satu filesystem) lalu
+  `mv` — rename POSIX atomik; kegagalan di tengah penulisan tidak
+  pernah meninggalkan pointer kosong/terpotong (pembaca selalu
+  melihat isi lama ATAU baru yang utuh).
   Dites pytest: `backend/tests/test_backup_daily_script.py`.
 - GAGAL (pg_dump gagal/kosong/bukan-PG/gzip korup/dir tidak sesuai
   owner-mode) → exit non-zero, TIDAK ada file final, `LAST_DAILY` tidak
@@ -31,6 +36,21 @@ SHELL=/bin/bash
   (default 30) yang dihapus — `pre-deploy-*`, `manual-*`, dan file
   kontrak stamp (`LAST_*`/`APPROVED_COMMIT`/`PREVIOUS_COMMIT`) tidak
   pernah disentuh.
+- Log cron `daily-cron.log` dirotasi dengan logrotate — JANGAN
+  dibiarkan tumbuh tanpa batas di direktori backup 750 (kehabisan
+  disk ikut mematikan backup berikutnya). Pasang kebijakan bawaan
+  repo sebagai `/etc/logrotate.d/transcendence-backup`:
+  ```bash
+  install -o root -g root -m 644 \
+    /opt/transcendence-hlwon-/backend/deploy/logrotate-transcendence-backup \
+    /etc/logrotate.d/transcendence-backup
+  logrotate --debug /etc/logrotate.d/transcendence-backup   # uji kering
+  ```
+  Kebijakan: `weekly` + `maxsize 5M`, `rotate 12`, `dateext`,
+  `compress`, `copytruncate` (cron menulis via `>>` pada tiap run,
+  tidak ada daemon pemegang fd — tanpa postrotate), `missingok`,
+  `notifempty`, `su deploy deploy` (arsip ikut milik deploy, bukan
+  root). File: `backend/deploy/logrotate-transcendence-backup`.
 - Prasyarat: direktori terprovisioning (§10.1 di
   MULTI-CUSTOMER-INSTALASI-PROVISIONING.md) + sudoers minimal deploy
   (§10.4 dokumen yang sama): hanya `sudo -u postgres pg_dump

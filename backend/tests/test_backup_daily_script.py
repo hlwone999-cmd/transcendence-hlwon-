@@ -29,6 +29,18 @@ Tiga lapis pengujian:
                   tak tersentuh + retensi selektif), pg_dump gagal,
                   dump kosong, bukan-PG, gzip korup, dir mode salah,
                   dir tidak ada, RETENTION_DAYS non-numerik.
+
+Hardening pre-push (sesudah review sprint):
+4. ATOMISITAS   — LAST_DAILY wajib ditulis ATOMIK: printf ke
+                  .LAST_DAILY.part di direktori yang sama lalu mv
+                  (rename POSIX) — bukan redirect in-place yang
+                  truncate-then-write; bukti simulasi: inode pointer
+                  BERUBAH setelah sukses (rename), tidak ada .part
+                  tersisa, isi selalu stamp valid terbaru.
+5. LOGROTATE    — kebijakan logrotate daily-cron.log wajib ada
+                  (weekly + maxsize 5M, rotate 12, compress,
+                  copytruncate, su deploy deploy) dan runbook wajib
+                  menunjuk file kebijakan + path instalasinya.
 """
 import gzip
 import os
@@ -41,6 +53,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 DAILY_SH = REPO / "backend" / "deploy" / "backup_daily.sh"
+LOGROTATE_CONF = REPO / "backend" / "deploy" / "logrotate-transcendence-backup"
 BACKUP_DOC = REPO / "docs" / "MULTI-CUSTOMER-BACKUP-ROLLBACK.md"
 PROV_DOC = REPO / "docs" / "MULTI-CUSTOMER-INSTALASI-PROVISIONING.md"
 
@@ -80,8 +93,9 @@ def test_daily_tidak_menyentuh_kontrak_pra_deploy():
         "jalur harian tidak boleh menyentuh LAST_PRE_DEPLOY"
     lines = raw.splitlines()
     idx_mv = [i for i, ln in enumerate(lines) if re.search(r"mv .*TARGET", ln)]
+    # publikasi pointer final = mv .LAST_DAILY.part ke LAST_DAILY
     idx_last = [i for i, ln in enumerate(lines)
-                if "LAST_DAILY" in ln and ">" in ln]
+                if re.search(r"mv \"\$PART_POINTER\" \"\$BACKUP_DIR/LAST_DAILY\"", ln)]
     assert idx_mv and idx_last, "mv/LAST_DAILY tidak ditemukan"
     assert min(idx_mv) < min(idx_last), \
         "LAST_DAILY wajib ditulis SETELAH backup tervalidasi (mv)"
@@ -141,6 +155,98 @@ def test_provisioning_sudoers_minimal_dan_larangan_777():
     # §10.1 tetap menuntut deploy:deploy 750
     assert re.search(r"-o deploy -g deploy -m 750 /var/backups/transcendence",
                      raw), "model ownership deploy:deploy 750 wajib tetap ada"
+
+
+# --------------------------------------------------- 4. hardening atomik
+def test_last_daily_ditulis_atomik_tmp_lalu_mv():
+    """REGRESI hardening pre-push: penulisan LAST_DAILY wajib ATOMIK —
+    printf ke .LAST_DAILY.part di DIREKTORI YANG SAMA (syarat rename
+    POSIX: satu filesystem) lalu mv ke tempat final. Redirect in-place
+    (truncate-then-write) DILARANG: kill/crash/habisnya disk di tengah
+    penulisan meninggalkan pointer kosong yang bisa disalahbaca
+    operasional sebagai 'belum pernah backup'."""
+    raw = DAILY_SH.read_text(encoding="utf-8")
+    assert ".LAST_DAILY.part" in raw, "wajib file sementara .LAST_DAILY.part"
+    # tidak ada lagi redirect in-place langsung ke pointer final
+    assert not re.search(r">\s*\"\$BACKUP_DIR/LAST_DAILY\"", raw), \
+        "redirect in-place ke LAST_DAILY dilarang — wajib tmp + mv"
+    # file sementara wajib di direktori yang SAMA (satu filesystem)
+    m = re.search(r'PART_POINTER="(\$BACKUP_DIR/[^"]+)"', raw)
+    assert m, "PART_POINTER wajib didefinisikan di bawah $BACKUP_DIR"
+    # urutan wajib: mv dump -> printf ke part -> mv pointer final
+    lines = raw.splitlines()
+    idx_mv_dump = [i for i, ln in enumerate(lines) if re.search(r"mv .*TARGET", ln)]
+    idx_print = [i for i, ln in enumerate(lines)
+                 if re.search(r"printf .*\$STAMP.*PART_POINTER", ln)]
+    idx_mv_ptr = [i for i, ln in enumerate(lines)
+                  if re.search(r"mv \"\$PART_POINTER\"", ln)]
+    assert idx_mv_dump and idx_print and idx_mv_ptr, "urutan atomik tidak lengkap"
+    assert min(idx_mv_dump) < min(idx_print) < min(idx_mv_ptr), \
+        "urutan wajib: mv dump -> printf .LAST_DAILY.part -> mv pointer"
+    # trap EXIT wajib membersihkan .LAST_DAILY.part juga (bukan cuma dump .part)
+    m_trap = re.search(r"^trap '(.+)' EXIT$", raw, re.M)
+    assert m_trap and "PART_POINTER" in m_trap.group(1), \
+        "trap EXIT wajib membersihkan .LAST_DAILY.part"
+    # pointer sementara wajib 600 (umask 077 + chmod eksplisit)
+    assert 'chmod 600 "$PART_POINTER"' in raw
+
+
+def test_last_daily_pointer_diganti_atomik_bukan_truncate_inplace(tmp_path):
+    """Simulasi atomisitas: LAST_DAILY LAMA wajib DIGANTI lewat rename —
+    inode pointer BERUBAH setelah run sukses (bukti bukan
+    truncate-then-write di tempat yang mempertahankan inode), isi baru
+    utuh, mode tetap 600, dan tidak ada file sementara tersisa."""
+    bk, bin_dir, log, env = _dunia(tmp_path)
+    _stub_sudo(bin_dir, log)
+    _stub_pg_dump_ok(bin_dir, log)
+    pointer = bk / "LAST_DAILY"
+    pointer.write_text("daily-20260101-020000\n")
+    pointer.chmod(0o600)
+    ino_lama = os.stat(pointer).st_ino
+
+    r = _run(env, tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    stamp_baru = _final(bk).name[:-len(".sql.gz")]
+    assert pointer.read_text().strip() == stamp_baru, \
+        "isi pointer wajib stamp valid terbaru (terganti, bukan rusak)"
+    assert oct(os.stat(pointer).st_mode)[-3:] == "600", "pointer wajib 600"
+    assert os.stat(pointer).st_ino != ino_lama, \
+        "inode wajib berubah (rename tmp+mv) — bukan truncate in-place"
+    assert not list(bk.glob(".*part")), \
+        "file sementara (dump .part / .LAST_DAILY.part) wajib bersih"
+
+
+# ------------------------------------------------- 5. hardening logrotate
+def test_logrotate_kebijakan_daily_cron_log():
+    """REGRESI hardening pre-push: log cron daily-cron.log tumbuh tiap
+    run — TANPA rotasi ia menghabiskan disk direktori backup 750 dan
+    ikut mematikan backup berikutnya. Kebijakan wajib ada di repo,
+    memuat opsi pengaman, dan runbook wajib menunjuk file + path
+    pemasangannya (/etc/logrotate.d)."""
+    assert LOGROTATE_CONF.is_file(), "file kebijakan logrotate wajib ada"
+    raw = LOGROTATE_CONF.read_text(encoding="utf-8")
+    assert re.search(r"^/var/backups/transcendence/daily-cron\.log\s*\{$", raw, re.M), \
+        "blok logrotate wajib menyasar daily-cron.log"
+    for opt in ("weekly", "maxsize", "rotate", "dateext", "compress",
+                "copytruncate", "missingok", "notifempty", "su deploy deploy"):
+        assert re.search(rf"^\s*{re.escape(opt)}\b", raw, re.M), \
+            f"kebijakan wajib memuat opsi '{opt}'"
+    # bila 'create' dipakai, modenya wajib ketat (tanpa bit group/other)
+    m_create = re.search(r"^\s*create\s+(\d{3})", raw, re.M)
+    if m_create:
+        assert int(m_create.group(1), 8) & 0o077 == 0, \
+            "create mode logrotate wajib ketat (tanpa akses group/other)"
+    # copytruncate WAJIB: cron menulis via '>>' tiap run tanpa daemon
+    # pemegang fd — tanpa copytruncate butuh postrotate yang tidak ada
+    # jalurnya memutar log yang sedang ditulis cron berikutnya.
+    assert re.search(r"^\s*copytruncate\s*$", raw, re.M)
+    # konsistensi runbook: menunjuk file kebijakan + path instalasi
+    doc = BACKUP_DOC.read_text(encoding="utf-8")
+    assert "logrotate-transcendence-backup" in doc, \
+        "runbook wajib menunjuk file kebijakan logrotate"
+    assert "/etc/logrotate.d/transcendence-backup" in doc, \
+        "runbook wajib memuat path pemasangan /etc/logrotate.d"
+    assert "daily-cron.log" in doc, "runbook wajib membahas log cron"
 
 
 # ------------------------------------------------------------- 3. simulasi

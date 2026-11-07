@@ -16,7 +16,11 @@
 #   * validasi identik backup_db.sh: set -euo pipefail, dump ke file
 #     sementara .part (umask 077 -> 600), gzip -t + tidak-kosong + marker
 #     "PostgreSQL database dump", publikasi atomik mv, chmod 600;
-#   * LAST_DAILY (informasi operasi) HANYA ditulis setelah tervalidasi;
+#   * LAST_DAILY (informasi operasi) HANYA ditulis setelah tervalidasi,
+#     dan ditulis ATOMIK: printf ke file sementara .LAST_DAILY.part
+#     (direktori sama, filesystem sama) lalu mv — rename POSIX atomik;
+#     kill/crash di tengah penulisan tidak pernah meninggalkan pointer
+#     kosong/terpotong, pembaca selalu melihat isi lama ATAU baru utuh;
 #   * retensi HANYA menyentuh daily-*.sql.gz — artefak kontrak stamp
 #     pra-deploy (pre-deploy-*/LAST_*/APPROVED_COMMIT/PREVIOUS_COMMIT)
 #     dan manual-* tidak pernah dihapus;
@@ -65,7 +69,8 @@ esac
 
 TARGET="$BACKUP_DIR/$STAMP.sql.gz"
 PART="$BACKUP_DIR/.$STAMP.sql.gz.part"
-trap 'rm -f "$PART"' EXIT
+PART_POINTER="$BACKUP_DIR/.LAST_DAILY.part"
+trap 'rm -f "$PART" "$PART_POINTER"' EXIT
 
 # 1) dump | gzip -> FILE SEMENTARA. pipefail: pg_dump yang gagal membuat
 #    step gagal WALAU gzip "sukses" mengompres stdin kosong/terpotong.
@@ -82,10 +87,18 @@ if ! gzip -dc "$PART" | grep "PostgreSQL database dump" > /dev/null; then
 fi
 
 # 3) publikasi atomik + 600; pointer LAST_DAILY hanya SETELAH tervalidasi.
+#    Penulisan pointer juga atomik — tulis ke .LAST_DAILY.part di
+#    DIREKTORI YANG SAMA (syarat rename atomik: satu filesystem), lalu
+#    mv ke tempat final. Redirect langsung (truncate-then-write) pada
+#    pointer: kill/crash/habisnya disk di antara truncate dan tulis
+#    meninggalkan pointer kosong yang bisa disalahbaca operasional
+#    sebagai "belum pernah backup". mv (rename) mengganti isi pointer
+#    dalam satu operasi atomik — isi lama utuh atau isi baru utuh.
 mv "$PART" "$TARGET"
 chmod 600 "$TARGET"
-printf '%s\n' "$STAMP" > "$BACKUP_DIR/LAST_DAILY"
-chmod 600 "$BACKUP_DIR/LAST_DAILY"
+printf '%s\n' "$STAMP" > "$PART_POINTER"
+chmod 600 "$PART_POINTER"
+mv "$PART_POINTER" "$BACKUP_DIR/LAST_DAILY"
 log "OK: $TARGET tervalidasi (stamp $STAMP)"
 
 # 4) retensi: HANYA daily-*.sql.gz milik skrip ini yang boleh dihapus.
