@@ -296,6 +296,11 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
   Future<void> _openSettings() async {
     final urlC = TextEditingController(text: _baseUrl);
     final tokC = TextEditingController(text: _token);
+    // L2 (audit PR #4): snapshot isi awal field token manual. tokC hanya bisa
+    // berubah setelah titik ini bila user benar-benar mengetik — satu-satunya
+    // sinyal niat simpan token manual yang valid. Tanpa ini, blok persist di
+    // bawah menimpa token hasil login dengan snapshot basi.
+    final tokInitial = tokC.text.trim();
     final emailC = TextEditingController();
     final passC = TextEditingController();
     // M-A: pesan galat validasi URL (kebijakan M3) untuk tombol SIMPAN —
@@ -438,11 +443,26 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
     }
     final sp = await SharedPreferences.getInstance();
     await sp.setString(_kPrefUrl, newBase);
-    await SessionStore().saveToken(tokC.text.trim());
+    // L2 fix: tulis token HANYA bila field manual diedit eksplisit. Sebelumnya
+    // baris ini selalu menulis tokC.text (snapshot token LAMA/kosong dari saat
+    // sheet DIBUKA) — menimpa token BARU yang baru saja disimpan
+    // Mt5AuthApi.login (mt5_auth.dart:190):
+    //  * login pertama, field kosong -> store berisi '' -> sesi hilang tiap
+    //    restart aplikasi (readToken -> null -> unconfigured);
+    //  * login ulang, field pre-fill -> token lama menimpa token baru;
+    //    rotasi sesi tidak pernah terjadi, token baru jadi yatim di
+    //    auth_tokens server sampai TTL.
+    final manualTok = tokC.text.trim();
+    final manualChanged = manualTok != tokInitial;
+    if (manualChanged) {
+      await SessionStore().saveToken(manualTok);
+    }
     if (!mounted) return;
     setState(() {
       _baseUrl = newBase;
-      _token = tokC.text.trim();
+      // L2 fix: tanpa edit manual, biarkan _token dari jalur MASUK (baris
+      // 367) — memori dan store harus selalu sepakat.
+      if (manualChanged) _token = manualTok;
       _api = widget.api ?? Mt5Api(baseUrl: _baseUrl, token: _token);
     });
     await refreshAll();
