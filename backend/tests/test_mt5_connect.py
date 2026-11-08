@@ -13,6 +13,20 @@ Cakupan (syarat implementasi #10): seluruh alur login (connect), logout
 - Keamanan: password investor tidak pernah plaintext di DB/audit/log;
   kredensial tersimpan terenkripsi Fernet.
 
+VERIFIKASI LIVE (hardening post-redesign, requirement 1-8):
+- Akun tidak dinyatakan TERHUBUNG sebelum kredensial terverifikasi
+  terminal MT5 (login nyata via provider read-only, berbatas waktu).
+- Akun BARU: verifikasi live SEBELUM aktivasi; kegagalan (password
+  salah, server tidak cocok, terminal/broker mati, timeout, password
+  master terdeteksi) membersihkan SEMUA jejak — slot customer bebas
+  kembali, tanpa baris yatim.
+- Koneksi ulang akun lama tidak cukup membandingkan password
+  terenkripsi: broker ikut dikonsultasikan; broker menolak -> 401
+  tanpa token; terminal mati -> sesi terbit tapi status
+  terminal_pending (BIARKAN riwayat tetap terbaca — D3).
+- Password master terdeteksi via account_info().trade_allowed —
+  MetaTrader5 tidak membedakan master vs investor secara eksplisit.
+
 Semua test memakai MockMT5Client (read-only provider) tanpa MT5 nyata.
 """
 import json
@@ -35,9 +49,12 @@ PW_INVESTOR = "inv-secret-9"
 
 
 def _acc(login, server, currency="USD"):
+    # trade_allowed=False = sesi INVESTOR read-only (semestinya). Sesi
+    # password master akan trade_allowed=True — diuji eksplisit lewat knob
+    # master_mode pada _client (deteksi password master).
     return AccountInfo(
         login=login, trade_mode=0, leverage=100, limit_orders=200,
-        margin_so_mode=0, trade_allowed=True, trade_expert=False,
+        margin_so_mode=0, trade_allowed=False, trade_expert=False,
         margin_mode=0, currency_digits=2, fifo_close=False,
         balance=1000.0, credit=0.0, profit=0.0, equity=1000.0,
         margin=0.0, margin_free=1000.0, margin_level=0.0,
@@ -65,24 +82,61 @@ def _ds_trades(login, server, symbol, point, digits, pid, profit):
                 trade_contract_size=100.0, description=symbol)}}
 
 
-def _client(datasets=None, max_customers=4, self_link=True):
-    """App test client dengan mock provider per login akun."""
+def _make_cfg(max_customers=4, self_link=True, db_path=None,
+              verify_timeout=1.0, cred_key=None):
+    """Config test; [db_path] memungkinkan DUA app berbagi satu DB
+    (dipakai test reconnect: app pertama terminal hidup, kedua mati).
+    [cred_key] wajib dibagi antar app yang berbagi DB — tanpa itu app
+    kedua tidak bisa mendekripsi kredensial yang ditulis app pertama."""
     cfg = Config()
     import tempfile
     tmp = tempfile.mkdtemp(prefix="connect-")
-    cfg.db_path = f"{tmp}/journal.db"
+    cfg.db_path = db_path or f"{tmp}/journal.db"
     cfg.api_token = "TESTTOKEN"
     cfg.mt5_enabled = True
-    cfg.cred_key = Fernet.generate_key().decode("ascii")
+    cfg.cred_key = cred_key or Fernet.generate_key().decode("ascii")
     cfg.term_base_dir = f"{tmp}/terminals"
     cfg.terminal_provision_mode = "mock"
     cfg.max_customers = max_customers
     cfg.mt5_self_link_enabled = self_link
-    app = create_app(cfg, provider_factory=lambda acc_cfg=None:
-                     MockMT5Client(datasets[str(acc_cfg.mt5_login)]
-                                   if acc_cfg else None))
+    # verifikasi live cepat di test (produksi: 12s via env)
+    cfg.mt5_verify_timeout_seconds = verify_timeout
+    return cfg
+
+
+def _client(datasets=None, max_customers=4, self_link=True, cfg=None,
+            fail_connect=False, fail_auth=False, master_mode=False,
+            connect_delay=0.0):
+    """App test client dengan mock provider per login akun.
+
+    Knob verifikasi live: fail_connect (terminal/broker mati), fail_auth
+    (broker menolak kredensial), master_mode (sesi trade-capable —
+    password master), connect_delay (provider lambat -> timeout).
+    [cfg] dari _make_cfg memungkinkan berbagi DB antar app.
+    """
+    if cfg is None:
+        cfg = _make_cfg(max_customers=max_customers, self_link=self_link)
+
+    def factory(acc_cfg=None):
+        ds = None
+        if datasets is not None and acc_cfg is not None:
+            ds = datasets.get(str(acc_cfg.mt5_login))
+        return MockMT5Client(
+            ds,
+            fail_connect=fail_connect,
+            fail_auth=fail_auth,
+            trade_allowed=True if master_mode else False,
+            connect_delay=connect_delay)
+
+    app = create_app(cfg, provider_factory=factory)
     app.config["TESTING"] = True
     return app.test_client()
+
+
+def _db_conn(app):
+    """Koneksi DB test dari thread pytest (path sama dengan app)."""
+    import db as dbmod
+    return dbmod.get_db(app.config["APP_CFG"])
 
 
 def _connect(c, login=LOGIN_A, server=SERVER_A, password=PW_INVESTOR):
@@ -359,6 +413,248 @@ def test_source_connect_tanpa_method_tulis_mt5():
     src = (Path(__file__).resolve().parent.parent / "api" /
            "routes.py").read_text(encoding="utf-8")
     block = src[src.index("def mt5_connect"):src.index("def registry_provision")]
+    for forbidden in ("order_send", "order_check", "positions_close",
+                      "positions_modify", "order_modify", "order_delete",
+                      ".login("):
+        assert forbidden not in block, forbidden
+
+
+# =============================== verifikasi live kredensial (hardening) ====
+def test_connect_akun_baru_broker_menolak_kredensial_cleanup_penuh():
+    """Requirement 1/2/4/6: broker menolak password investor yang salah ->
+    401 dengan pesan jelas TANPA membocorkan kredensial; SEMUA jejak
+    dibersihkan (slot customer bebas, tanpa baris akun/kredensial/terminal
+    yatim), dan alasan sebenarnya hanya di audit_logs."""
+    c = _client(fail_auth=True)
+    r = _connect(c, password="inv-salah-benar")
+    assert r.status_code == 401, r.get_json()
+    msg = r.get_json()["error"]["message"]
+    assert "Verifikasi ke server broker gagal" in msg
+    assert "Exness-Real" in msg          # panduan umum server
+    assert "inv-salah-benar" not in msg  # kredensial tidak bocor
+    assert PW_INVESTOR not in msg
+    conn = _db_conn(c.application)
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM customers").fetchone()["n"] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM mt5_accounts").fetchone()["n"] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM mt5_credentials").fetchone()["n"] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM mt5_terminals").fetchone()["n"] == 0
+    dets = " ".join(r["detail"] or "" for r in
+                    conn.execute("SELECT detail FROM audit_logs").fetchall())
+    assert "live_auth_failed" in dets
+    assert "inv-salah-benar" not in dets and PW_INVESTOR not in dets
+
+
+def test_connect_akun_baru_master_password_ditolak_tidak_tersimpan():
+    """Requirement 8: API MetaTrader5 menerima password master ATAU investor
+    tanpa parameter pembeda. Kredensial yang menghasilkan sesi berhak trade
+    (account_info().trade_allowed=True) DITOLAK — tidak pernah tersimpan,
+    customer baru dibuang, alasan tercatat di audit."""
+    c = _client(master_mode=True)
+    r = _connect(c, password="master-password-1")
+    assert r.status_code == 401, r.get_json()
+    msg = r.get_json()["error"]["message"]
+    assert "MASTER" in msg and "INVESTOR" in msg
+    assert "master-password-1" not in msg
+    conn = _db_conn(c.application)
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM mt5_credentials").fetchone()["n"] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM customers").fetchone()["n"] == 0
+    dets = " ".join(r["detail"] or "" for r in
+                    conn.execute("SELECT detail FROM audit_logs").fetchall())
+    assert "master_password_ditolak" in dets
+
+
+def test_master_password_berulang_memicu_lockout():
+    """Kegagalan verifikasi live (termasuk master password) terhitung ke
+    lockout per (login, server) — probing berulang tidak tak terbatas."""
+    c = _client(master_mode=True)
+    for i in range(5):
+        assert _connect(c, password=f"master-{i}").status_code == 401
+    r = _connect(c, password="master-lain")
+    assert r.status_code == 429, r.get_json()
+
+
+def test_connect_akun_baru_broker_unreachable_slot_bebas_lalu_bisa_dipakai():
+    """Requirement 2/6: terminal/broker tidak terjangkau -> 503, akun TIDAK
+    diaktifkan, slot TIDAK terpakai; app berikutnya (terminal hidup, DB
+    sama) masih bisa memakai slot kapasitas yang sama (max_customers=1)."""
+    import tempfile
+    db_path = f"{tempfile.mkdtemp(prefix='vfy-')}/journal.db"
+    cfg1 = _make_cfg(max_customers=1, db_path=db_path)
+    c1 = _client(cfg=cfg1, fail_connect=True)
+    r = _connect(c1)
+    assert r.status_code == 503, r.get_json()
+    msg = r.get_json()["error"]["message"]
+    assert "BELUM diaktifkan" in msg and "tidak terpakai" in msg
+    conn = _db_conn(c1.application)
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM customers").fetchone()["n"] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM mt5_terminals").fetchone()["n"] == 0
+    # slot bebas: app kedua (terminal hidup) pada DB yang sama berhasil
+    c2 = _client(cfg=_make_cfg(max_customers=1, db_path=db_path),
+                 datasets={str(LOGIN_A): _ds_trades(LOGIN_A, SERVER_A,
+                                                    "XAUUSD", 0.01, 2, 11,
+                                                    100.0)})
+    r2 = _connect(c2)
+    assert r2.status_code == 201, r2.get_json()
+    assert r2.get_json()["connection_state"] == "connected"
+    assert r2.get_json()["live_verified"] is True
+
+
+def test_connect_akun_baru_timeout_broker_resource_dibersihkan():
+    """Requirement 6: verifikasi melewati batas waktu (provider lambat) ->
+    503 + SEMUA resource dibersihkan (tidak ada baris yatim)."""
+    c = _client(connect_delay=0.8, cfg=_make_cfg(verify_timeout=0.3))
+    r = _connect(c)
+    assert r.status_code == 503, r.get_json()
+    assert "batas waktu" in r.get_json()["error"]["message"]
+    conn = _db_conn(c.application)
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM customers").fetchone()["n"] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM mt5_accounts").fetchone()["n"] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM mt5_credentials").fetchone()["n"] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM mt5_terminals").fetchone()["n"] == 0
+
+
+def test_reconnect_password_cocok_tapi_broker_menolak_401_tanpa_token():
+    """Requirement 5: koneksi ulang TIDAK cukup membandingkan password
+    terenkripsi bila broker menolak (password diubah di broker) -> 401
+    dengan pesan jelas, TANPA token baru. Sesi lama yang masih sah tidak
+    dicabut oleh kegagalan connect."""
+    import tempfile
+    db_path = f"{tempfile.mkdtemp(prefix='rec-')}/journal.db"
+    key = Fernet.generate_key().decode("ascii")  # SATU kunci utk dua app
+    c1 = _client(cfg=_make_cfg(db_path=db_path, cred_key=key),
+                 datasets={str(LOGIN_A): _ds_trades(LOGIN_A, SERVER_A,
+                                                    "XAUUSD", 0.01, 2, 11,
+                                                    100.0)})
+    b1 = _connect(c1).get_json()
+    assert b1["connection_state"] == "connected"
+    # broker sekarang menolak kredensial tersimpan
+    c2 = _client(cfg=_make_cfg(db_path=db_path, cred_key=key),
+                 fail_auth=True)
+    r = _connect(c2)  # password tersimpan yang benar dikirim ulang
+    assert r.status_code == 401, r.get_json()
+    msg = r.get_json()["error"]["message"]
+    assert "tidak lagi diterima" in msg
+    assert "sudah diubah" in msg
+    assert PW_INVESTOR not in msg
+    # token lama tetap sah — connect gagal tidak mencabut sesi sah
+    h = {"Authorization": f"Bearer {b1['token']}"}
+    assert c2.get("/api/v1/auth/me", headers=h).status_code == 200
+
+
+def test_reconnect_terminal_mati_sesi_terbit_status_terminal_pending():
+    """Requirement 1/3/5: terminal mati saat reconnect -> sesi tetap
+    diterbitkan agar riwayat jurnal bisa dibuka (D3), TAPI status BUKAN
+    TERHUBUNG: connection_state='terminal_pending', live_verified=False.
+    /mt5/status pun jujur: connected=False dengan alasan."""
+    import tempfile
+    db_path = f"{tempfile.mkdtemp(prefix='pend-')}/journal.db"
+    key = Fernet.generate_key().decode("ascii")  # SATU kunci utk dua app
+    c1 = _client(cfg=_make_cfg(db_path=db_path, cred_key=key),
+                 datasets={str(LOGIN_A): _ds_trades(LOGIN_A, SERVER_A,
+                                                    "XAUUSD", 0.01, 2, 11,
+                                                    100.0)})
+    assert _connect(c1).status_code == 201
+    c2 = _client(cfg=_make_cfg(db_path=db_path, cred_key=key),
+                 fail_connect=True)
+    r = _connect(c2)
+    assert r.status_code == 200, r.get_json()
+    b = r.get_json()
+    assert b["mode"] == "login"
+    assert b["connection_state"] == "terminal_pending"
+    assert b["live_verified"] is False
+    # riwayat jurnal tetap terbaca dengan sesi ini (D3)
+    h = {"Authorization": f"Bearer {b['token']}"}
+    assert c2.get("/api/v1/journal/trades", headers=h).status_code == 200
+    # status endpoint TIDAK mengklaim terhubung saat terminal mati
+    st = c2.get("/api/v1/mt5/status", headers=h).get_json()
+    assert st["connected"] is False
+    assert st["reason"]
+
+
+def test_provisioning_gagal_tidak_meninggalkan_customer_yatim():
+    """Requirement 6: provisioning terminal gagal (kapasitas terminal
+    penuh) -> 409 rapi, customer baru hasil percobaan DIBUANG, tidak ada
+    terminal yatim, slot customer tetap terpakai hanya oleh yang sah."""
+    import tempfile
+    db_path = f"{tempfile.mkdtemp(prefix='prov-')}/journal.db"
+    cfg = _make_cfg(max_customers=2, db_path=db_path)
+    c1 = _client(cfg=cfg)
+    assert _connect(c1, login=LOGIN_A, server=SERVER_A).status_code == 201
+    conn = _db_conn(c1.application)
+    # customer kedua (tanpa akun) + baris terminal "hantu" miliknya ->
+    # kapasitas terminal (2) penuh sedangkan slot customer masih bebas 1
+    assert c1.post("/api/v1/auth/register",
+                   json={"email": "ghost@test.id",
+                         "password": "ghostpass1"}).status_code == 201
+    cid2 = int(conn.execute(
+        "SELECT customer_id FROM users WHERE email='ghost@test.id'"
+    ).fetchone()["customer_id"])
+    conn.execute(
+        """INSERT INTO mt5_terminals (customer_id, rpyc_port, wine_prefix,
+             terminal_dir, data_dir, service_name, status)
+           VALUES (?, 18813, '/tmp/x1', '/tmp/x1', '/tmp/x1', 'ghost',
+                   'ready')""", (cid2,))
+    # customer hantu dinonaktifkan agar slot customer AKTIF tersisa 1
+    conn.execute("UPDATE customers SET status='disabled' WHERE id=?",
+                 (cid2,))
+    conn.commit()
+    r = _connect(c1, login=LOGIN_B, server=SERVER_B)
+    assert r.status_code == 409, r.get_json()
+    # customer percobaan dibuang — tidak ada yatim (tetap 2 baris: A + hantu)
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM customers").fetchone()["n"] == 2
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM mt5_accounts").fetchone()["n"] == 1
+    # slot terminal bebas: percobaan berikutnya berhasil
+    conn.execute("DELETE FROM mt5_terminals WHERE customer_id=?", (cid2,))
+    conn.commit()
+    r2 = _connect(c1, login=LOGIN_B, server=SERVER_B)
+    assert r2.status_code == 201, r2.get_json()
+
+
+def test_live_verify_unit_klasifikasi_provider():
+    """Unit _live_verify_account: klasifikasi ok/auth/unreachable pada
+    provider mock + guard marker pesan otorisasi broker."""
+    from api.routes import (_live_verify_account,
+                            _looks_like_broker_auth_error)
+    assert _looks_like_broker_auth_error(
+        "MT5 initialize gagal (-6, 'Terminal: Invalid login or password')")
+    assert _looks_like_broker_auth_error("authorization failed")
+    assert not _looks_like_broker_auth_error(
+        "Tidak bisa terhubung ke mt5server 127.0.0.1:18813: refused")
+
+    c = _client()
+    assert _connect(c).status_code == 201
+    conn = _db_conn(c.application)
+    reg = c.application.extensions["mt5_registry"]
+    acc = conn.execute("SELECT id FROM mt5_accounts").fetchone()
+    ver = _live_verify_account(conn, reg, int(acc["id"]), timeout=2.0)
+    assert ver["class"] == "ok"
+    assert ver["account_info"]["trade_allowed"] is False
+    # akun tidak ada -> unreachable (bukan crash)
+    ver2 = _live_verify_account(conn, reg, 999999, timeout=1.0)
+    assert ver2["class"] == "unreachable"
+
+
+def test_source_live_verify_tanpa_method_tulis_mt5():
+    """Static guard: helper verifikasi live juga bebas method MT5 tulis."""
+    from pathlib import Path
+    src = (Path(__file__).resolve().parent.parent / "api" /
+           "routes.py").read_text(encoding="utf-8")
+    block = src[src.index("def _live_verify_account"):
+                src.index("def _cleanup_failed_activation")]
     for forbidden in ("order_send", "order_check", "positions_close",
                       "positions_modify", "order_modify", "order_delete",
                       ".login("):

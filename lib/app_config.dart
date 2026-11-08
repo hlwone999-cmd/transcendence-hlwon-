@@ -14,13 +14,24 @@
 class AppConfig {
   AppConfig._();
 
-  /// Base URL backend Jurnal MT5 (tanpa path /api/v1).
-  /// Kosong = belum dikonfigurasi -> halaman jurnal menampilkan form
-  /// koneksi dengan pesan bahwa backend belum diatur pada build ini.
-  static const String apiBaseUrl = String.fromEnvironment(
+  /// Base URL ENV asli dari --dart-define (tidak pernah bisa di-set
+  /// runtime) — lihat [apiBaseUrl].
+  static const String _envApiBaseUrl = String.fromEnvironment(
     'TRANSCENDENCE_API_URL',
     defaultValue: '',
   );
+
+  /// TEST-ONLY override base URL. Produksi TIDAK PERNAH menyentuh ini
+  /// (tidak ada jalur UI yang menulisnya); hanya widget test yang set
+  /// lalu mengosongkannya kembali. Dengan ini perilaku halaman pada
+  /// build produksi tidak berubah sedikit pun.
+  static String? debugOverrideBaseUrl;
+
+  /// Base URL backend Jurnal MT5 (tanpa path /api/v1).
+  /// Kosong = belum dikonfigurasi -> halaman jurnal menampilkan form
+  /// koneksi dengan pesan bahwa backend belum diatur pada build ini.
+  static String get apiBaseUrl =>
+      (debugOverrideBaseUrl ?? _envApiBaseUrl).trim();
 
   /// True bila build ini sudah memiliki URL backend terkonfigurasi.
   static bool get hasApiBaseUrl => apiBaseUrl.trim().isNotEmpty;

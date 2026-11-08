@@ -15,6 +15,11 @@ class Mt5Status {
   final int storedTrades;
   final int storedDeals;
 
+  /// Status provisioning terminal customer ini dari backend
+  /// (mt5_terminals.status): 'ready' | 'provisioning' | null.
+  /// Dipakai UI utk membedakan "MENYIAPKAN TERMINAL" dari "TERPUTUS".
+  final String? terminalStatus;
+
   const Mt5Status({
     required this.provider,
     required this.enabled,
@@ -24,6 +29,7 @@ class Mt5Status {
     this.lastRun,
     required this.storedTrades,
     required this.storedDeals,
+    this.terminalStatus,
   });
 
   factory Mt5Status.fromJson(Map<String, dynamic> j) => Mt5Status(
@@ -35,6 +41,9 @@ class Mt5Status {
     lastRun: j['last_run'] as Map<String, dynamic>?,
     storedTrades: _d2(j['stored']?['trades']).toInt(),
     storedDeals: _d2(j['stored']?['deals']).toInt(),
+    terminalStatus: j['terminal'] is Map
+        ? (j['terminal']['status'] as String?)
+        : null,
   );
 }
 

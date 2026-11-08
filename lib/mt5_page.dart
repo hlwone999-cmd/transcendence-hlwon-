@@ -40,6 +40,16 @@ class Mt5JournalPage extends StatefulWidget {
 
 enum _Phase { boot, connectForm, loading, ready, invalidRange, error }
 
+/// Status mesin koneksi (hardening post-redesign, requirement 3):
+/// - none      : netral (belum/telah selesai)
+/// - verifying : MEMVERIFIKASI — POST /mt5/connect berjalan, server
+///               sedang memverifikasi kredensial + login nyata ke broker
+/// - preparing : MENYIAPKAN TERMINAL — sesi diterima, menunggu /mt5/status
+///               membuktikan koneksi live (sumber kebenaran TERHUBUNG)
+/// - failed    : GAGAL — verifikasi live tidak berhasil dalam batas waktu
+///               (sesi tetap ada; riwayat jurnal tetap bisa dibuka)
+enum _ConnectStage { none, verifying, preparing, failed }
+
 class _Mt5JournalPageState extends State<Mt5JournalPage> {
   _Phase _phase = _Phase.boot;
   String? _error;
@@ -54,8 +64,9 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
   final TextEditingController _passC = TextEditingController();
   String _serverSel = kExnessServers.first.value;
   bool _obscurePass = true;
-  bool _connecting = false;
+  _ConnectStage _stage = _ConnectStage.none;
   String? _formError;
+  String? _connectNote; // alasan GAGAL verifikasi live (tanpa kredensial)
   bool _disconnecting = false;
 
   Mt5Status? _status;
@@ -114,7 +125,13 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
       // build lama) tidak membuat halaman crash — tampilkan form koneksi.
       _api = widget.api ?? _buildApiSafe(_baseUrl, _token);
     });
-    if (_api == null || !(_api?.isConfigured ?? false)) {
+    // D1 + M2: TANPA SESI -> selalu FORM KONEKSI, apa pun kondisi URL —
+    // semua endpoint jurnal butuh token sesi, jadi refresh tanpa sesi
+    // hanya menghasilkan 401 yang mengembalikan halaman ke form lagi.
+    // (Perbaikan boot: kini form langsung, tanpa round-trip 401.)
+    if (_token.isEmpty ||
+        _api == null ||
+        !(_api?.isConfigured ?? false)) {
       setState(() => _phase = _Phase.connectForm);
       return;
     }
@@ -348,8 +365,13 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
   /// HUBUNGKAN AKUN MT5 (D1): self-link otomatis via POST /mt5/connect.
   /// Password investor hanya hidup di memori selama proses ini —
   /// controller dibersihkan di SEMUA jalur keluar (sukses/gagal).
+  ///
+  /// Status (requirement 1/3): MEMVERIFIKASI selama request berjalan;
+  /// setelah sesi diterima status menjadi MENYIAPKAN TERMINAL sampai
+  /// /mt5/status (probe live backend) membuktikan TERHUBUNG. TERHUBUNG
+  /// tidak pernah dinyatakan hanya karena POST sukses.
   Future<void> _connectAccount() async {
-    if (_connecting) return;
+    if (_stage == _ConnectStage.verifying) return;
     final err = _validateForm();
     if (err != null) {
       setState(() => _formError = err);
@@ -366,7 +388,7 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
     final server = _selectedServer();
     final pass = _passC.text; // hanya di memori selama proses koneksi
     setState(() {
-      _connecting = true;
+      _stage = _ConnectStage.verifying; // MEMVERIFIKASI…
       _formError = null;
     });
     try {
@@ -381,23 +403,101 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
       setState(() {
         _token = tok;
         _api = widget.api ?? _buildApiSafe(_baseUrl, tok);
-        _connecting = false;
+        _stage = _ConnectStage.preparing; // MENYIAPKAN TERMINAL…
       });
       await refreshAll();
+      if (!mounted) return;
+      if (_status?.connected == true) {
+        // probe live backend membuktikan koneksi — baru boleh TERHUBUNG
+        setState(() => _stage = _ConnectStage.none);
+      } else {
+        // terminal belum terbukti live (mis. backend melaporkan
+        // terminal_pending) — tunggu konfirmasi /mt5/status
+        await _awaitTerminalConfirmation();
+      }
     } on Mt5ApiError catch (e) {
       _passC.clear();
       if (!mounted) return;
       setState(() {
-        _connecting = false;
+        _stage = _ConnectStage.none; // GAGAL tampil via _formError
         _formError = e.friendly;
       });
     } catch (_) {
       _passC.clear();
       if (!mounted) return;
       setState(() {
-        _connecting = false;
+        _stage = _ConnectStage.none;
         _formError =
             'Gagal menghubungkan — periksa data akun dan koneksi internet.';
+      });
+    }
+  }
+
+  /// MENYIAPKAN TERMINAL -> TERHUBUNG / GAGAL: poll /mt5/status (probe
+  /// live backend) sampai terbukti terhubung atau batas siklus habis.
+  /// Sumber kebenaran status adalah probe NYATA backend, bukan asumsi.
+  Future<void> _awaitTerminalConfirmation() async {
+    final api = _api;
+    if (api == null) return;
+    for (var i = 0; i < 4; i++) {
+      await Future<void>.delayed(const Duration(seconds: 2));
+      if (!mounted) return;
+      try {
+        final st = await api.status();
+        if (!mounted) return;
+        if (st.connected) {
+          setState(() {
+            _status = st;
+            _stage = _ConnectStage.none; // TERHUBUNG terbukti
+          });
+          _toast('TERHUBUNG — kredensial terverifikasi terminal MT5.');
+          return;
+        }
+        setState(() => _status = st);
+      } on Mt5ApiError {
+        // probe gagal (jaringan) — ulangi pada siklus berikutnya
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _stage = _ConnectStage.failed; // GAGAL — sesi tetap, riwayat terbuka
+      _connectNote = _status?.reason ??
+          'Terminal MT5 belum terverifikasi ke server broker dalam batas '
+              'waktu. Riwayat jurnal tetap bisa dibuka — coba verifikasi '
+              'ulang atau hubungi admin.';
+    });
+  }
+
+  /// COBA VERIFIKASI ULANG (banner GAGAL): probe /mt5/status sekali —
+  /// probe live backend mencoba login nyata ke broker.
+  Future<void> _reverify() async {
+    if (_stage == _ConnectStage.preparing) return;
+    setState(() {
+      _stage = _ConnectStage.preparing;
+      _connectNote = null;
+    });
+    try {
+      final st = await _api?.status();
+      if (!mounted) return;
+      if (st != null && st.connected) {
+        setState(() {
+          _status = st;
+          _stage = _ConnectStage.none;
+        });
+        _toast('TERHUBUNG — kredensial terverifikasi terminal MT5.');
+      } else {
+        if (st != null) _status = st;
+        setState(() {
+          _stage = _ConnectStage.failed;
+          _connectNote = _status?.reason ??
+              'Terminal MT5 belum terverifikasi ke server broker.';
+        });
+      }
+    } on Mt5ApiError catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _stage = _ConnectStage.failed;
+        _connectNote = e.friendly;
       });
     }
   }
@@ -460,6 +560,8 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
           _status = null;
           _account = null;
           _trades = [];
+          _stage = _ConnectStage.none;
+          _connectNote = null;
           _phase = _Phase.connectForm;
         });
         _toast(serverRevoked
@@ -666,11 +768,36 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
               SizedBox(
                 width: double.infinity,
                 child: GoldButton(
-                  _connecting ? 'MENGHUBUNGKAN…' : 'HUBUNGKAN AKUN MT5',
+                  _stage == _ConnectStage.verifying
+                      ? 'MEMVERIFIKASI…'
+                      : 'HUBUNGKAN AKUN MT5',
                   icon: Icons.link,
-                  onTap: _connecting ? null : _connectAccount,
+                  onTap: _stage == _ConnectStage.verifying
+                      ? null
+                      : _connectAccount,
                 ),
               ),
+              if (_stage == _ConnectStage.verifying) ...[
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'MEMVERIFIKASI — backend sedang memverifikasi '
+                            'kredensial dan mencoba login read-only ke '
+                            'server broker…',
+                        style: txt(context, 11.5, color: p.muted),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ],
           ),
         ],
@@ -755,6 +882,7 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
                   style: txt(context, 12, color: p.muted),
                 ),
                 const SizedBox(height: 14),
+                _verificationBanner(p),
                 _statusCard(p),
                 const SizedBox(height: 10),
                 _accountCard(p),
@@ -900,25 +1028,70 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
   }
 
   // -------------------------------------------------------------- kartu
-  Widget _statusCard(Palette p) {
-    final st = _status;
-    final conn = st?.connected ?? false;
-    final last = st?.lastSync?['last_sync_finished_at'] as String?;
-    final reason = st?.reason;
+  /// Banner GAGAL verifikasi live (requirement 1/3/4): sesi tetap ada dan
+  /// riwayat jurnal tetap bisa dibuka, tapi status TIDAK BOLEH TERHUBUNG
+  /// sampai probe live backend membuktikan. Tampilkan alasan (tanpa
+  /// kredensial) + tombol verifikasi ulang.
+  Widget _verificationBanner(Palette p) {
+    if (_stage != _ConnectStage.failed) return const SizedBox.shrink();
     return ObsCard(
       children: [
         Row(
           children: [
-            PulseDot(conn ? p.mint : p.red, size: 8),
+            Icon(Icons.report, size: 17, color: p.red),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text('GAGAL — VERIFIKASI BROKER BELUM BERHASIL',
+                  style: txt(context, 13,
+                      w: FontWeight.w600, color: p.red)),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Text(
+          _connectNote ?? 'Terminal MT5 belum terverifikasi.',
+          style: txt(context, 12, color: p.muted, height: 1.5),
+        ),
+        const SizedBox(height: 10),
+        GhostButton(
+          _stage == _ConnectStage.preparing ? 'MEMERIKSA…' : 'COBA VERIFIKASI ULANG',
+          icon: Icons.sync,
+          onTap: _stage == _ConnectStage.preparing ? null : _reverify,
+        ),
+      ],
+    );
+  }
+
+  Widget _statusCard(Palette p) {
+    final st = _status;
+    final conn = st?.connected ?? false;
+    // Hardening requirement 3: empat status terpisah dan jelas —
+    // TERHUBUNG hanya saat probe live backend sukses (st.connected),
+    // MENYIAPKAN TERMINAL saat sesi menunggu bukti live, TERPUTUS bila
+    // probe gagal di luar alur koneksi, GAGAL via banner verifikasi.
+    final preparing = !conn && _stage == _ConnectStage.preparing;
+    final last = st?.lastSync?['last_sync_finished_at'] as String?;
+    final reason = st?.reason;
+    final label = conn
+        ? 'TERHUBUNG'
+        : preparing
+            ? 'MENYIAPKAN TERMINAL'
+            : 'TERPUTUS';
+    final stateColor = conn ? p.mint : (preparing ? p.warm : p.red);
+    return ObsCard(
+      children: [
+        Row(
+          children: [
+            PulseDot(stateColor, size: 8),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                conn ? 'TERHUBUNG' : 'TERPUTUS',
+                label,
                 style: txt(
                   context,
                   14,
                   w: FontWeight.w600,
-                  color: conn ? p.mint : p.red,
+                  color: stateColor,
                 ),
               ),
             ),
@@ -936,7 +1109,13 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
               : conn
               ? 'Provider ${st?.provider ?? '-'} · sinkron terakhir: '
                     '${_fmtIso(last) ?? 'belum ada'}'
-              : (reason ?? 'Status belum diketahui.'),
+              : (st?.terminalStatus == 'provisioning'
+                  ? 'Terminal MT5 sedang disiapkan di server '
+                      '(provisioning) — status akan diperbarui otomatis.'
+                  : (reason ??
+                      (preparing
+                          ? 'Menunggu verifikasi live ke server broker…'
+                          : 'Status belum diketahui.'))),
           style: txt(context, 12, color: p.muted),
         ),
         const SizedBox(height: 10),

@@ -13,6 +13,7 @@ import 'package:transcendence/mt5_api.dart';
 import 'package:transcendence/mt5_auth.dart';
 import 'package:transcendence/mt5_models.dart';
 import 'package:transcendence/mt5_page.dart';
+import 'package:transcendence/ui_kit.dart';
 
 // ---------------------------------------------------------------------------
 // Fixture JSON — bentuk persis seperti balasan backend Flask.
@@ -415,7 +416,8 @@ void main() {
         const MaterialApp(home: Scaffold(body: Mt5JournalPage())),
       );
       await tester.pumpAndSettle();
-      expect(find.text('HUBUNGKAN AKUN MT5'), findsOneWidget);
+      expect(find.widgetWithText(GoldButton, 'HUBUNGKAN AKUN MT5'),
+          findsOneWidget);
       expect(find.text('NOMOR AKUN MT5'), findsOneWidget);
       expect(find.text('SERVER BROKER'), findsOneWidget);
       expect(find.text('PASSWORD INVESTOR'), findsOneWidget);
@@ -488,7 +490,8 @@ void main() {
       await tester.pumpAndSettle();
       // token basi ditolak server -> M2 membersihkan sesi lokal dan
       // halaman kembali ke FORM KONEKSI (bukan layar error mati).
-      expect(find.text('HUBUNGKAN AKUN MT5'), findsOneWidget);
+      expect(find.widgetWithText(GoldButton, 'HUBUNGKAN AKUN MT5'),
+          findsOneWidget);
       expect(find.text('GAGAL TERHUBUNG'), findsNothing);
       expect(
         await const FlutterSecureStorage().read(key: 'mt5_session_token'),
@@ -517,7 +520,8 @@ void main() {
     testWidgets('form tampil: 3 input saja, tanpa URL/email/token manual',
         (tester) async {
       await pumpForm(tester);
-      expect(find.text('HUBUNGKAN AKUN MT5'), findsOneWidget);
+      expect(find.widgetWithText(GoldButton, 'HUBUNGKAN AKUN MT5'),
+          findsOneWidget);
       expect(find.text('NOMOR AKUN MT5'), findsOneWidget);
       expect(find.text('SERVER BROKER'), findsOneWidget);
       expect(find.text('PASSWORD INVESTOR'), findsOneWidget);
@@ -580,12 +584,14 @@ void main() {
     testWidgets('submit kosong -> validasi lokal, tidak ada crash',
         (tester) async {
       await pumpForm(tester);
-      await tester.tap(find.text('HUBUNGKAN AKUN MT5'));
+      await tester.tap(find.widgetWithText(
+          GoldButton, 'HUBUNGKAN AKUN MT5'));
       await tester.pump();
       // pesan galat lokal (tanpa jaringan — flutter_test mem-blok HTTP)
       expect(find.textContaining('wajib'), findsWidgets);
       // form tetap tampil
-      expect(find.text('HUBUNGKAN AKUN MT5'), findsOneWidget);
+      expect(find.widgetWithText(GoldButton, 'HUBUNGKAN AKUN MT5'),
+          findsOneWidget);
     });
   });
 }

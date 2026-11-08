@@ -192,3 +192,103 @@ Flutter (`flutter test`, dijalankan CI — sandbox tanpa Flutter SDK):
 - `test/mt5_connect_flow_test.dart` (15), `test/mt5_test.dart` (disesuaikan),
   `test/mt5_auth_test.dart` (+5), plus seluruh test lama yang tidak
   tersentuh desain.
+
+---
+
+## 9. HARDENING VERIFIKASI LIVE (pasca-audit commit d4f714f)
+
+### 9.1 Masalah yang diperbaiki
+
+1. Akun baru sebelumnya dianggap "terhubung" begitu POST /mt5/connect
+   sukses — kredensial BELUM pernah diuji ke terminal/broker. Password
+   salah, server tidak cocok, atau terminal mati tetap menghabiskan slot
+   customer.
+2. Koneksi ulang akun lama hanya membandingkan password dengan
+   ciphertext tersimpan — jika password diubah di broker atau server
+   tidak cocok, sesi tetap diterbitkan dan UI bisa menampilkan status
+   seolah aktif.
+3. API MetaTrader5 (`initialize`) menerima password MASTER dan password
+   INVESTOR tanpa parameter pembeda — kredensial master-capable bisa
+   tersimpan di database.
+
+### 9.2 Desain verifikasi live (satu POST, sinkron, berbatas waktu)
+
+`POST /api/v1/mt5/connect` kini SELALU menjalankan login nyata ke broker
+via provider read-only (`_live_verify_account`) dengan batas waktu
+`MT5_VERIFY_TIMEOUT_SECONDS` (default 12s, wajib < timeout HTTP klien
+25s). Klasifikasi hasil:
+
+| Klasifikasi     | Makna                                    | Akun baru                          | Akun lama (reconnect)                          |
+|-----------------|------------------------------------------|------------------------------------|------------------------------------------------|
+| `ok`            | Login nyata sukses, sesi investor        | Diaktifkan + token, `connected`    | Token, `connected`                             |
+| `auth_failed`   | Broker menolak kredensial                | 401 + SEMUA jejak dibersihkan      | 401 tanpa token (pesan: password broker mungkin diubah) |
+| `master_password` | Sesi berhak trade (`trade_allowed=true`) | 401 + cleanup (kredensial tidak disimpan) | 401 tanpa token (admin perlu reset kredensial) |
+| `unreachable` / `timeout` / `busy` | Terminal/broker tidak terjangkau dalam batas waktu | 503 + cleanup — slot TIDAK terpakai | Token tetap terbit (riwayat tetap terbaca, D3) + `terminal_pending` |
+
+Cleanup (`_cleanup_failed_activation`) membuang: runtime provider,
+kredensial, baris akun, baris terminal, customer BARU hasil request,
+dan direktori terminal — slot kapasitas bebas kembali, tanpa baris
+yatim. Idempoten dan best-effort; pesan error asli tidak pernah
+tertutup pembersihan.
+
+### 9.3 Deteksi password master (audit risiko #8)
+
+MetaTrader5 tidak membedakan master vs investor di API — satu-satunya
+sinyal adalah `account_info().trade_allowed`: sesi investor (read-only)
+selalu `false`, sesi password master `true`. Backend menolak kredensial
+yang menghasilkan sesi trade-capable dan TIDAK PERNAH menyimpannya.
+Kebijakan dapat dilonggarkan admin via
+`MT5_ENFORCE_INVESTOR_READONLY=false` (tidak disarankan). Risiko sisa:
+broker yang menandai `trade_allowed=true` untuk sesi investor
+(non-standar) akan selalu ditolak — pesan mengarahkan ke admin; dan
+password investor yang kebetulan identik dengan master tetap terdeteksi
+sebagai master (sifat, bukan bug: kredensial itu memang trade-capable).
+
+### 9.4 Status UI (empat keadaan terpisah)
+
+- `MEMVERIFIKASI…` — POST /mt5/connect berjalan; server memverifikasi
+  kredensial + login read-only ke broker.
+- `MENYIAPKAN TERMINAL` — sesi diterima tapi probe live belum
+  membuktikan; UI mem-poll `GET /mt5/status` (sumber kebenaran = probe
+  nyata backend, maks 4 siklus).
+- `TERHUBUNG` — HANYA setelah `/mt5/status` melaporkan `connected=true`
+  (hasil probe live), bukan karena POST sukses.
+- `GAGAL — VERIFIKASI BROKER BELUM BERHASIL` — banner + alasan tanpa
+  kredensial + tombol COBA VERIFIKASI ULANG; sesi tetap ada dan riwayat
+  jurnal tetap terbuka (D3).
+
+Perbaikan boot: tanpa sesi tersimpan, halaman langsung menampilkan form
+koneksi (tanpa round-trip 401) — semua endpoint jurnal memang butuh
+token sesi.
+
+### 9.5 Batasan pengujian tanpa terminal MT5 aktif
+
+- Semua test memakai `MockMT5Client`; klasifikasi auth/unreachable/
+  timeout/master disimulasikan lewat knob `fail_auth`, `fail_connect`,
+  `connect_delay`, `trade_allowed`. Kejujuran jalur sukses terhadap
+  broker NYATA hanya bisa dipastikan saat deployment VPS (terminal
+  menyala).
+- Pesan otorisasi broker dikenali dari teks `last_error` terminal
+  (marker: "invalid login", "password", "authorization", dst.). Broker
+  dengan pesan non-standar dapat terklasifikasi `unreachable` — akibat
+  hanya pesan lebih lunak + tanpa lockout, bukan lubang keamanan.
+- Waktu start terminal Wine (mode "real") bervariasi; admin dapat
+  menaikkan `MT5_VERIFY_TIMEOUT_SECONDS`. Self-link butuh terminal
+  unit sudah `enable --now` sebelum verifikasi bisa berhasil.
+
+### 9.6 Konfigurasi tambahan
+
+| Env | Default | Arti |
+|-----|---------|------|
+| `MT5_VERIFY_TIMEOUT_SECONDS` | `12` | Batas waktu verifikasi live per connect (detik). |
+| `MT5_ENFORCE_INVESTOR_READONLY` | `1` | Tolak kredensial yang menghasilkan sesi trade-capable (deteksi password master). |
+
+Test verifikasi live: `test_mt5_connect.py` kini 24 test (10 baru:
+cleanup kredensial ditolak broker, master password + lockout, broker
+unreachable slot bebas, timeout broker + cleanup, reconnect broker
+menolak 401 tanpa token, reconnect terminal mati terminal_pending,
+provisioning gagal tanpa yatim, unit klasifikasi, static guard).
+Flutter: `mt5_connect_flow_test.dart` kini 18 test (W9 MENYIAPKAN
+TERMINAL → TERHUBUNG hanya setelah probe; W10 banner GAGAL + sesi
+tetap); perbaikan finder ambigu (judul kartu vs tombol) yang membuat
+7 test widget + 4 test lain gagal sejak d4f714f.

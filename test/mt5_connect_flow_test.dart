@@ -21,6 +21,11 @@
 //     W7  PUTUSKAN KONEKSI (D3): konfirmasi -> /mt5/disconnect dipanggil,
 //         kembali ke form koneksi, store bersih
 //     W8  regresi D1: label input lama (URL/email/token) TIDAK ADA
+//     W9  verifikasi live (hardening): connect terminal_pending -> status
+//         kartu MENYIAPKAN TERMINAL, lalu TERHUBUNG HANYA setelah probe
+//         live backend berhasil (bukan hanya karena POST sukses)
+//     W10 verifikasi live gagal (hardening): probe tetap gagal -> banner
+//         GAGAL + alasan, sesi tetap ada, riwayat jurnal tetap terbuka
 //   LAPISAN UNIT (Mt5AuthApi + SessionStore nyata):
 //     U1  connectAccount sukses -> token BARU tersimpan (rotasi sesi)
 //     U2  connectAccount 401 -> store tidak tersentuh, error dilempar
@@ -41,10 +46,12 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:transcendence/app_config.dart';
 import 'package:transcendence/mt5_api.dart';
 import 'package:transcendence/mt5_auth.dart';
 import 'package:transcendence/mt5_page.dart';
 import 'package:transcendence/mt5_servers.dart';
+import 'package:transcendence/ui_kit.dart';
 
 const _tokenBaru = 'TOKEN-CONNECT-BARU-0123456789abcdef';
 const _tokenLama = 'TOKEN-LAMA-BASI-yet-another-stale-token';
@@ -106,6 +113,22 @@ const _fixtureEquity = {
   'max_drawdown_pct': null,
 };
 
+/// Finder TOMBOL HUBUNGKAN — judul kartu ber-teks sama dengan tombol,
+/// jadi cari berdasarkan widget GoldButton agar tidak ambigu.
+Finder hubungkanBtn() =>
+    find.widgetWithText(GoldButton, 'HUBUNGKAN AKUN MT5');
+
+/// Tap tombol HUBUNGKAN — scroll dulu ke tampak (form bisa lebih
+/// tinggi dari viewport test 800x600 setelah field manual muncul).
+/// CATATAN: sengaja TIDAK memakai pumpAndSettle — kursor TextField yang
+/// berkedip membuat pumpAndSettle tak pernah konvergen di widget test.
+Future<void> tapHubungkan(WidgetTester tester) async {
+  await tester.ensureVisible(hubungkanBtn());
+  await tester.pump(const Duration(milliseconds: 300));
+  await tester.tap(hubungkanBtn(), warnIfMissed: false);
+  await tester.pump();
+}
+
 http.Response _json(Object j, [int code = 200]) => http.Response(
       jsonEncode(j),
       code,
@@ -122,6 +145,37 @@ Mt5Api mockDataApi() => Mt5Api(
         if (p.endsWith('/mt5/account')) return _json(_fixtureAccount);
         if (p.endsWith('/journal/stats')) return _json(_fixtureStats);
         if (p.endsWith('/journal/equity-curve')) return _json(_fixtureEquity);
+        if (p.contains('/journal/trades')) return _json(_fixtureTrades);
+        if (p.endsWith('/symbols')) {
+          return _json({
+            'items': [
+              {
+                'symbol': 'XAUUSD',
+                'point': 0.01,
+                'digits': 2,
+                'pip_size': 0.1
+              },
+            ],
+          });
+        }
+        return _json({'error': {'message': 'tak dikenal: $p'}}, 404);
+      }),
+    );
+
+/// API data mock dengan status live VARIABEL — dipakai test verifikasi
+/// live (W9/W10): [statusFn] dipanggil tiap GET /mt5/status.
+Mt5Api dataApiWithStatus(Map<String, dynamic> Function() statusFn) =>
+    Mt5Api(
+      baseUrl: 'https://srv.test',
+      token: _tokenBaru,
+      client: MockClient((r) async {
+        final p = r.url.path;
+        if (p.endsWith('/mt5/status')) return _json(statusFn());
+        if (p.endsWith('/mt5/account')) return _json(_fixtureAccount);
+        if (p.endsWith('/journal/stats')) return _json(_fixtureStats);
+        if (p.endsWith('/journal/equity-curve')) {
+          return _json(_fixtureEquity);
+        }
         if (p.contains('/journal/trades')) return _json(_fixtureTrades);
         if (p.endsWith('/symbols')) {
           return _json({
@@ -221,6 +275,13 @@ void main() {
 
   setUp(() async {
     await _resetStorage();
+    // TEST-ONLY: sediakan URL backend agar alur koneksi benar-benar
+    // menembus jalur jaringan (produksi tetap via --dart-define).
+    AppConfig.debugOverrideBaseUrl = 'https://srv.test';
+  });
+
+  tearDown(() async {
+    AppConfig.debugOverrideBaseUrl = null;
   });
 
   // ======================================================== LAPISAN WIDGET
@@ -228,7 +289,7 @@ void main() {
     testWidgets('W1: boot tanpa sesi -> hanya 3 input + HUBUNGKAN AKUN MT5, '
         'tanpa ATUR SERVER', (tester) async {
       await _pumpForm(tester);
-      expect(find.text('HUBUNGKAN AKUN MT5'), findsOneWidget);
+      expect(hubungkanBtn(), findsOneWidget);
       expect(find.text('NOMOR AKUN MT5'), findsOneWidget);
       expect(find.text('SERVER BROKER'), findsOneWidget);
       expect(find.text('PASSWORD INVESTOR'), findsOneWidget);
@@ -271,7 +332,7 @@ void main() {
         api: mockDataApi(),
         authApi: _recordingAuth(rec),
       );
-      await tester.tap(find.text('HUBUNGKAN AKUN MT5'));
+      await tapHubungkan(tester);
       await tester.pump();
       expect(find.textContaining('wajib'), findsWidgets); // pesan galat
       expect(rec.paths, isEmpty); // TIDAK ada panggilan jaringan
@@ -286,7 +347,7 @@ void main() {
         authApi: _recordingAuth(rec),
       );
       await _isiForm(tester);
-      await tester.tap(find.text('HUBUNGKAN AKUN MT5'));
+      await tapHubungkan(tester);
       await tester.pumpAndSettle();
 
       expect(rec.paths.single, endsWith('/api/v1/mt5/connect'));
@@ -323,20 +384,115 @@ void main() {
             }),
       );
       await _isiForm(tester);
-      await tester.tap(find.text('HUBUNGKAN AKUN MT5'));
+      await tapHubungkan(tester);
       await tester.pumpAndSettle();
 
       expect(rec.paths.single, endsWith('/api/v1/mt5/connect'));
       expect(await _storedToken(), isNull); // TIDAK ada token tersimpan
       expect(find.textContaining('Verifikasi gagal'), findsOneWidget);
       // form tetap tampil (bukan layar jurnal)
-      expect(find.text('HUBUNGKAN AKUN MT5'), findsOneWidget);
+      expect(hubungkanBtn(), findsOneWidget);
       // password dikosongkan — tidak bertahan di memori controller
       final nFields = tester.widgetList<TextField>(
           find.byType(TextField)).length;
       final passCtrl = tester.widget<TextField>(
           find.byType(TextField).at(nFields - 1)).controller!;
       expect(passCtrl.text, isEmpty);
+    });
+
+    testWidgets('W9: verifikasi live — terminal_pending menampilkan '
+        'MENYIAPKAN TERMINAL, TERHUBUNG hanya setelah probe live backend '
+        'sukses', (tester) async {
+      // probe pertama BELUM live; setelah siklus tunggu backend siap
+      var live = false;
+      final dataApi = dataApiWithStatus(() => {
+            ..._fixtureStatus,
+            'connected': live,
+            'reason': live ? null : 'Terminal belum terverifikasi ke broker',
+            'terminal': {
+              'status': 'ready',
+              'rpyc_port': 18812,
+              'service_name': 'transcendence-mt5-c001',
+            },
+          });
+      final rec = _Recorder();
+      await _pumpForm(
+        tester,
+        api: dataApi,
+        authApi: _recordingAuth(rec, connectStatus: 200, connectBody: {
+          'ok': true,
+          'mode': 'login',
+          'token': _tokenBaru,
+          'connection_state': 'terminal_pending',
+          'live_verified': false,
+        }),
+      );
+      await _isiForm(tester);
+      await tapHubungkan(tester);
+      await tester.pump(); // POST berjalan/resolves
+      await tester.pumpAndSettle(); // refreshAll selesai (status belum live)
+
+      // status kartu BUKAN TERHUBUNG — sesi ada tapi belum terbukti live
+      expect(find.text('MENYIAPKAN TERMINAL'), findsOneWidget);
+      expect(find.text('TERHUBUNG'), findsNothing);
+
+      // backend kini membuktikan koneksi live
+      live = true;
+      await tester.pump(const Duration(seconds: 2)); // siklus poll 1
+      await tester.pump(); // resolve status()
+      await tester.pump(const Duration(seconds: 4)); // bakar timer snackbar
+      await tester.pump();
+
+      expect(find.text('TERHUBUNG'), findsOneWidget);
+      expect(find.text('MENYIAPKAN TERMINAL'), findsNothing);
+      expect(await _storedToken(), _tokenBaru); // sesi utuh
+    });
+
+    testWidgets('W10: verifikasi live gagal -> banner GAGAL + alasan, '
+        'riwayat jurnal tetap terbuka (sesi tidak dibuang)',
+        (tester) async {
+      final dataApi = dataApiWithStatus(() => {
+            ..._fixtureStatus,
+            'connected': false,
+            'reason': 'MT5 initialize gagal: broker tidak terjangkau',
+          });
+      final rec = _Recorder();
+      await _pumpForm(
+        tester,
+        api: dataApi,
+        authApi: _recordingAuth(rec, connectStatus: 200, connectBody: {
+          'ok': true,
+          'mode': 'self_link',
+          'token': _tokenBaru,
+          'connection_state': 'terminal_pending',
+          'live_verified': false,
+        }),
+      );
+      await _isiForm(tester);
+      await tapHubungkan(tester);
+      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(find.text('MENYIAPKAN TERMINAL'), findsOneWidget);
+
+      // bakar 4 siklus poll (2s masing-masing) — probe tetap gagal
+      for (var i = 0; i < 5; i++) {
+        await tester.pump(const Duration(seconds: 2));
+        await tester.pump();
+      }
+      await tester.pumpAndSettle();
+
+      // banner GAGAL + alasan (tanpa kredensial) — alasan tampil di
+      // banner DAN di kartu status (dua lokasi, dua peran tampilan)
+      expect(find.textContaining('GAGAL — VERIFIKASI BROKER'),
+          findsOneWidget);
+      expect(find.textContaining('broker tidak terjangkau'), findsWidgets);
+      // status tetap TIDAK TERHUBUNG
+      expect(find.text('TERPUTUS'), findsOneWidget);
+      expect(find.text('TERHUBUNG'), findsNothing);
+      // sesi tetap ada & riwayat jurnal tetap terbuka (D3)
+      expect(await _storedToken(), _tokenBaru);
+      expect(find.text('STATISTIK'), findsOneWidget);
+      expect(find.text('COBA VERIFIKASI ULANG'), findsOneWidget);
     });
 
     testWidgets('W6: pilih Lainnya -> field manual muncul, nilai manual '
@@ -350,7 +506,7 @@ void main() {
       await _isiForm(tester, lainnya: true);
       // field manual server tampil
       expect(find.text('NAMA SERVER (MANUAL)'), findsOneWidget);
-      await tester.tap(find.text('HUBUNGKAN AKUN MT5'));
+      await tapHubungkan(tester);
       await tester.pumpAndSettle();
 
       expect(rec.connectBody!['server'], 'Exness-MT5Real5');
@@ -385,7 +541,7 @@ void main() {
       expect(rec.paths, [endsWith('/api/v1/mt5/disconnect')]);
       expect(await _storedToken(), isNull); // token dicabut & dibuang
       // kembali ke form koneksi
-      expect(find.text('HUBUNGKAN AKUN MT5'), findsOneWidget);
+      expect(hubungkanBtn(), findsOneWidget);
       expect(find.text('TERHUBUNG'), findsNothing);
     });
 

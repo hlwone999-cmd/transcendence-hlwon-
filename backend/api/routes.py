@@ -21,13 +21,15 @@ import hmac
 import logging
 import secrets
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
+from pathlib import Path
 
 from flask import Blueprint, abort, current_app, g, jsonify, request
 
 import db as dbmod
-from mt5client.provider import MT5Error
+from mt5client.provider import MT5ConnectionError, MT5Error
 from services import analytics
 
 api_bp = Blueprint("api", __name__, url_prefix="/api/v1")
@@ -519,6 +521,17 @@ def mt5_connect():
     - Password investor HANYA di memori proses selama request; tersimpan
       TERENKRIPSI (Fernet) di mt5_credentials; TIDAK pernah di-log dan
       TIDAK masuk audit_logs.
+    - VERIFIKASI LIVE (hardening): akun tidak pernah dinyatakan TERHUBUNG
+      hanya karena password cocok dgn kredensial tersimpan — bukti yang
+      diterima adalah LOGIN NYATA ke broker via terminal read-only
+      (_live_verify_account) dengan batas waktu cfg.mt5_verify_timeout_seconds.
+      Akun BARU bahkan tidak diaktifkan sebelum verifikasi live berhasil;
+      kegagalan verifikasi membersihkan SEMUA jejak (kredensial, akun,
+      terminal, customer baru) sehingga slot kapasitas tidak bocor.
+    - Deteksi password MASTER: API MetaTrader5 menerima password master
+      ATAU investor tanpa parameter pembeda. Sesi investor selalu
+      trade_allowed=False; bila sesi berhak trade (password master),
+      kredensial DITOLAK, tidak disimpan, dan customer baru dibuang.
     - Kapasitas: maks cfg.max_customers (default 4) customer aktif —
       cek-dan-tulis diserialisasi capacity_guard (aman pendaftaran
       bersamaan, audit #4); alokasi terminal juga ter-guard + UNIQUE port.
@@ -603,6 +616,42 @@ def mt5_connect():
         if urow is None:
             abort(503, description="Identitas customer tidak lengkap — "
                                    "hubungi admin")
+
+        # ---- VERIFIKASI LIVE (hardening #5): password cocok dgn
+        # kredensial tersimpan BELUM cukup bila status koneksi broker
+        # belum terbukti. Bukti = login nyata ke broker via provider
+        # read-only. Klasifikasi: ok / auth_failed / master_password /
+        # unreachable / timeout / busy.
+        registry = current_app.extensions["mt5_registry"]
+        ver = _live_verify_account(
+            conn, registry, int(existing["id"]),
+            timeout=c.mt5_verify_timeout_seconds,
+            enforce_investor_readonly=c.mt5_enforce_investor_readonly)
+        if ver["class"] == "master_password":
+            lock.record_failure(lock_key)
+            auditmod.audit(conn, "mt5_connect_gagal",
+                           customer_id=int(existing["customer_id"]),
+                           detail={"login": login_val, "server": server,
+                                   "reason": "master_password_ditolak"})
+            abort(401, description="Password MASTER terdeteksi — hubungkan "
+                                   "hanya dengan password INVESTOR "
+                                   "(read-only). Hubungi admin bila password "
+                                   "investor tidak tersedia.")
+        if ver["class"] == "auth_failed":
+            # Kredensial tersimpan TIDAK lagi diterima broker (password
+            # diubah di broker / server tidak cocok) — identitas tidak
+            # bisa dibenarkan -> tanpa token.
+            lock.record_failure(lock_key)
+            auditmod.audit(conn, "mt5_connect_gagal",
+                           customer_id=int(existing["customer_id"]),
+                           detail={"login": login_val, "server": server,
+                                   "reason": "broker_auth_failed"})
+            abort(401, description="Kredensial tidak lagi diterima server "
+                                   "broker — kemungkinan password MT5 di "
+                                   "broker sudah diubah atau server tidak "
+                                   "cocok. Hubungi admin untuk memperbarui "
+                                   "kredensial.")
+        live_ok = ver["class"] == "ok"
         lock.clear(lock_key)
         token = authmod.issue_token(conn, c,
                                     user_id=int(urow["id"]),
@@ -611,19 +660,39 @@ def mt5_connect():
         conn.execute("UPDATE users SET last_login_at=? WHERE id=?",
                      (_now_iso(), int(urow["id"])))
         conn.commit()
-        auditmod.audit(conn, "mt5_connect",
-                       customer_id=int(existing["customer_id"]),
-                       user_id=int(urow["id"]),
-                       entity=f"mt5_account:{int(existing['id'])}",
-                       detail={"mode": "login", "server": server})
+        if live_ok:
+            auditmod.audit(conn, "mt5_connect",
+                           customer_id=int(existing["customer_id"]),
+                           user_id=int(urow["id"]),
+                           entity=f"mt5_account:{int(existing['id'])}",
+                           detail={"mode": "login", "server": server,
+                                   "live_verified": True})
+        else:
+            # unreachable/timeout/busy: kredensial cocok dgn tersimpan dan
+            # customer aktif — sesi diterbitkan agar riwayat jurnal tetap
+            # bisa dibuka (D3), TAPI status TIDAK BOLEH 'TERHUBUNG':
+            # connection_state='terminal_pending' — UI menampilkan
+            # MENYIAPKAN TERMINAL sampai /mt5/status membuktikan live.
+            auditmod.audit(conn, "mt5_connect",
+                           customer_id=int(existing["customer_id"]),
+                           user_id=int(urow["id"]),
+                           entity=f"mt5_account:{int(existing['id'])}",
+                           detail={"mode": "login", "server": server,
+                                   "live_verified": False,
+                                   "verify_class": ver["class"]})
         return jsonify({"ok": True, "mode": "login", "token": token,
                         "token_type": "bearer",
+                        "connection_state":
+                            "connected" if live_ok else "terminal_pending",
+                        "live_verified": live_ok,
                         "account": {"login": int(existing["login"]),
                                     "server": existing["server"],
                                     "currency": existing["currency"]}}), 200
 
     # ---- akun baru: daftarkan customer (capacity-guard, D2) + akun +
-    # kredensial terenkripsi + terminal, lalu keluarkan token sesi.
+    # kredensial terenkripsi + terminal, lalu VERIFIKASI LIVE — aktivasi
+    # (token + sync) baru setelah password investor terbukti diterima
+    # terminal MT5. Kegagalan verifikasi = SEMUA jejak dibersihkan.
     try:
         enc, key_version = crypto.encrypt_password(c, password)
     except crypto.CredentialCryptoError as e:
@@ -674,8 +743,13 @@ def mt5_connect():
         term = registry_provision(current_app, conn,
                                   created["customer_id"])
     except TerminalError:
-        if not reuse:  # customer baru gagal provisioning -> buang
-            _discard_orphan_customer(conn, created["customer_id"])
+        # customer baru gagal provisioning -> buang SEMUA jejak (customer,
+        # sisa baris terminal, direktori) agar slot kapasitas tidak bocor
+        _cleanup_failed_activation(
+            conn, current_app.extensions["mt5_registry"],
+            customer_id=created["customer_id"],
+            base_dir=str(Path(c.term_base_dir) / created["code"]),
+            new_customer=not reuse)
         abort(409, description="Provisioning terminal MT5 gagal — kapasitas "
                                "terminal penuh atau alokasi port bentrok")
     now = _now_iso()
@@ -709,11 +783,55 @@ def mt5_connect():
             _discard_orphan_customer(conn, created["customer_id"])
         raise
 
+    # ---- VERIFIKASI LIVE SEBELUM AKTIVASI (hardening #1/#2): akun baru
+    # tidak dinyatakan TERHUBUNG dan customer tidak dianggap sah sebelum
+    # password investor benar-benar diterima terminal MT5 (login nyata
+    # via provider read-only, berbatas waktu). Kegagalan -> SEMUA jejak
+    # dibersihkan: slot customer bebas kembali, resource tidak bocor.
+    registry = current_app.extensions["mt5_registry"]
+    ver = _live_verify_account(
+        conn, registry, acc_id,
+        timeout=c.mt5_verify_timeout_seconds,
+        enforce_investor_readonly=c.mt5_enforce_investor_readonly)
+    if ver["class"] != "ok":
+        _cleanup_failed_activation(
+            conn, registry, customer_id=created["customer_id"],
+            account_id=acc_id,
+            base_dir=str(Path(term["terminal_dir"]).parent),
+            new_customer=not reuse)
+        auditmod.audit(conn, "mt5_connect_gagal",
+                       detail={"login": login_val, "server": server,
+                               "reason": {
+                                   "auth_failed": "live_auth_failed",
+                                   "master_password": "master_password_ditolak",
+                                   "unreachable": "broker_unreachable",
+                                   "timeout": "broker_timeout",
+                                   "busy": "broker_busy",
+                               }.get(ver["class"], ver["class"])})
+        if ver["class"] == "master_password":
+            lock.record_failure(lock_key)
+            abort(401, description="Password MASTER terdeteksi — hubungkan "
+                                   "hanya dengan password INVESTOR "
+                                   "(read-only). Akun tidak diaktifkan.")
+        if ver["class"] == "auth_failed":
+            lock.record_failure(lock_key)
+            abort(401, description="Verifikasi ke server broker gagal — "
+                                   "periksa nomor akun, server, dan password "
+                                   "investor. Pastikan server dipilih sesuai "
+                                   "akun (mis. Exness-Real vs Exness-Demo). "
+                                   "Akun belum diaktifkan.")
+        abort(503, description="Verifikasi ke server broker tidak berhasil "
+                               "dalam batas waktu (terminal MT5 atau server "
+                               "broker tidak terjangkau). Akun BELUM "
+                               "diaktifkan dan slot tidak terpakai — coba "
+                               "lagi nanti.")
+
     auditmod.audit(conn, "mt5_connect",
                    customer_id=created["customer_id"],
                    user_id=created["user_id"],
                    entity=f"mt5_account:{acc_id}",
                    detail={"mode": "self_link", "server": server,
+                           "live_verified": True,
                            "rpyc_port": term["rpyc_port"]})
 
     # sync awal di background — sama seperti bind; tidak memblokir request.
@@ -738,6 +856,8 @@ def mt5_connect():
                        (acc_id,)).fetchone()
     return jsonify({"ok": True, "mode": "self_link", "token": token,
                     "token_type": "bearer",
+                    "connection_state": "connected",
+                    "live_verified": True,
                     "customer_code": created["code"],
                     "account": {"login": int(acc["login"]),
                                 "server": acc["server"],
@@ -766,6 +886,178 @@ def _discard_orphan_customer(conn, customer_id: int) -> None:
     except Exception:  # noqa: BLE001 — pembersihan tak boleh menutupi
         conn.rollback()
         log.exception("gagal membersihkan customer yatim %d", customer_id)
+
+
+# ------------------------------------- verifikasi live kredensial (hardening)
+# Marker teks yang mengindikasikan BROKER MENOLAK kredensial (bukan masalah
+# jaringan). MT5LinuxProvider membungkus last_error terminal ke dalam
+# MT5ConnectionError, sehingga "password/login/authorization salah" dan
+# "port tidak terjangkau" datang sebagai exception yang SAMA — dipilah di
+# sini dari teksnya. Marker sengaja luas; salah klasifikasi auth->unreachable
+# berakibat pesan lebih lunak (tidak berbahaya); sebaliknya berakibat lockout
+# — karena itu marker auth harus spesifik, bukan generik.
+_BROKER_AUTH_MARKERS = (
+    "invalid login", "invalid password", "login or password",
+    "password", "authorization", "auth failed", "denied", "otorisasi",
+)
+
+
+def _looks_like_broker_auth_error(text: str) -> bool:
+    t = (text or "").lower()
+    return any(m in t for m in _BROKER_AUTH_MARKERS)
+
+
+def _live_verify_account(conn, registry, account_id: int, *, timeout: float,
+                         enforce_investor_readonly: bool = True) -> dict:
+    """Verifikasi LIVE kredensial akun lewat terminal MT5 (read-only).
+
+    Jaminan jujur status (hardening post-redesign): akun TIDAK boleh
+    dinyatakan TERHUBUNG hanya karena password cocok dengan ciphertext
+    tersimpan — bukti yang diterima adalah LOGIN NYATA ke broker via
+    provider read-only + account_info(), dengan batas waktu total
+    [timeout] detik (terminal butuh waktu start pada mode "real").
+
+    Return {"class", "detail", "account_info"} dengan klasifikasi:
+    - ok              : login nyata sukses + account_info terbaca
+                        (+ trade_allowed False bila enforce aktif).
+    - auth_failed     : broker MENOLAK kredensial (password salah/diubah,
+                        server tidak cocok) — TANPA retry.
+    - master_password : login sukses tapi trade_allowed=True → kredensial
+                        menghasilkan sesi berhak trade (password MASTER,
+                        bukan investor) — DITOLAK. API MetaTrader5 tidak
+                        membedakan keduanya secara eksplisit; satu-satunya
+                        sinyal adalah flag ini.
+    - unreachable     : terminal/broker tidak terjangkau sampai deadline
+                        (terminal belum start, port RPyC mati, jaringan).
+    - timeout         : verifikasi tidak selesai dalam batas waktu;
+                        runtime dibuang agar percobaan berikutnya segar.
+    - busy            : runtime sedang dipakai proses lain (lock sibuk).
+
+    Kredensial TIDAK PERNAH masuk hasil maupun log: provider tidak
+    memasukkan password ke pesan error, dan detail di sini dibatasi
+    200 karakter. Verifikasi berjalan di thread terpisah agar hang
+    provider tidak menggantung request melewati batas waktu.
+    """
+    try:
+        rt = registry.runtime_for(conn, account_id)
+    except Exception as e:  # noqa: BLE001 — akun/terminal tidak ada
+        return {"class": "unreachable", "detail": f"{type(e).__name__}",
+                "account_info": None}
+
+    deadline = time.monotonic() + max(0.05, float(timeout))
+    # batas tunggu lock ikut mengikuti anggaran waktu verifikasi
+    if not rt.lock.acquire(timeout=min(2.0, max(0.1, float(timeout)))):
+        return {"class": "busy", "detail": "runtime sibuk",
+                "account_info": None}
+    out: dict = {}
+
+    def _attempt():
+        # disconnect dulu: paksa sesi login BARU ke broker — jangan
+        # percaya flag _connected cache dari sesi sebelumnya.
+        try:
+            rt.provider.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+        while True:
+            try:
+                rt.provider.connect()
+                break
+            except MT5ConnectionError as e:
+                if _looks_like_broker_auth_error(str(e)):
+                    out["err"] = ("auth_failed", str(e))
+                    return
+                if time.monotonic() >= deadline:
+                    out["err"] = ("unreachable", str(e))
+                    return
+                time.sleep(0.5)  # beri waktu terminal start, lalu ulangi
+            except MT5Error as e:  # noqa: BLE001 — error baca lain
+                out["err"] = ("unreachable", str(e))
+                return
+        try:
+            info = rt.provider.account_info()
+        except MT5Error as e:
+            out["err"] = ("unreachable", str(e))
+            return
+        finally:
+            try:
+                rt.provider.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+        out["info"] = info
+
+    th = threading.Thread(target=_attempt, daemon=True,
+                          name=f"live-verify-{account_id}")
+    th.start()
+    th.join(max(0.1, deadline - time.monotonic()))
+    try:
+        rt.lock.release()
+    except Exception:  # noqa: BLE001
+        pass
+    if "info" not in out and "err" not in out:
+        # thread masih berjalan melewati deadline -> runtime dibuang agar
+        # percobaan berikutnya memakai provider segar (yang lama mungkin
+        # menggantung di tengah connect)
+        registry.evict(account_id)
+        return {"class": "timeout",
+                "detail": "verifikasi melewati batas waktu",
+                "account_info": None}
+    if "err" in out:
+        kind, detail = out["err"]
+        registry.evict(account_id)
+        return {"class": kind, "detail": str(detail)[:200],
+                "account_info": None}
+    info = out.get("info") or {}
+    if enforce_investor_readonly and info.get("trade_allowed") is True:
+        registry.evict(account_id)
+        return {"class": "master_password",
+                "detail": "sesi memiliki hak trade (bukan sesi investor)",
+                "account_info": None}
+    return {"class": "ok", "detail": "", "account_info": info}
+
+
+def _cleanup_failed_activation(conn, registry, *, customer_id: int,
+                               account_id: int | None = None,
+                               base_dir: str | None = None,
+                               new_customer: bool = False) -> None:
+    """Buang SEMUA jejak aktivasi yang GAGAL verifikasi/provisioning.
+
+    Jaminan (hardening #2): kegagalan tidak menghabiskan slot customer
+    dan resource dibersihkan — runtime/koneksi, kredensial terenkripsi,
+    baris akun, baris terminal, customer BARU hasil request ini, dan
+    direktori terminal. Idempoten; semua langkah best-effort — kegagalan
+    pembersihan tidak pernah menutupi pesan error asli.
+    """
+    if account_id is not None:
+        try:
+            registry.evict(account_id)
+        except Exception:  # noqa: BLE001
+            log.exception("evict runtime gagal (account=%s)", account_id)
+    try:
+        if account_id is not None:
+            conn.execute("DELETE FROM mt5_credentials WHERE account_id=?",
+                         (account_id,))
+            conn.execute("DELETE FROM mt5_accounts WHERE id=?",
+                         (account_id,))
+        conn.execute("DELETE FROM mt5_terminals WHERE customer_id=?",
+                     (customer_id,))
+        if new_customer:
+            # guard ganda: customer hanya dibuang bila benar-benar
+            # tanpa akun (sama seperti _discard_orphan_customer)
+            if conn.execute(
+                    "SELECT 1 FROM mt5_accounts WHERE customer_id=?",
+                    (customer_id,)).fetchone() is None:
+                conn.execute("DELETE FROM customers WHERE id=?",
+                             (customer_id,))
+        conn.commit()
+    except Exception:  # noqa: BLE001
+        conn.rollback()
+        log.exception("cleanup aktivasi gagal (customer=%s)", customer_id)
+    if base_dir:
+        import shutil
+        try:
+            shutil.rmtree(base_dir, ignore_errors=True)
+        except Exception:  # noqa: BLE001
+            log.exception("rmtree direktori terminal gagal: %s", base_dir)
 
 
 @api_bp.post("/mt5/disconnect")

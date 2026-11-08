@@ -64,6 +64,20 @@ class Config:
     # Kapasitas tetap dibatasi max_customers (default 4 customer aktif).
     mt5_self_link_enabled: bool = True
 
+    # --- verifikasi live kredensial (hardening post-redesign) ----------
+    # POST /mt5/connect TIDAK menyatakan akun TERHUBUNG sebelum kredensial
+    # benar-benar terverifikasi terminal MT5 (login nyata ke broker via
+    # provider read-only). mt5_verify_timeout_seconds = batas waktu total
+    # verifikasi (retry sampai deadline; terminal butuh waktu start di
+    # mode "real"). WAJIB lebih kecil dari timeout HTTP klien Flutter (25s).
+    mt5_verify_timeout_seconds: float = 12.0
+    # Deteksi password MASTER: MetaTrader5 menerima password master ATAU
+    # investor di initialize() tanpa parameter pembeda. Sesi investor
+    # read-only selalu melaporkan account_info().trade_allowed == False;
+    # sesi password master = True. Bila True (default), kredensial yang
+    # menghasilkan sesi trade-capable DITOLAK dan tidak pernah disimpan.
+    mt5_enforce_investor_readonly: bool = True
+
     # --- enkripsi kredensial MT5 (brief §5/§7) ---
     # Kunci Fernet. TIDAK boleh di repo/db; WAJIB env di produksi.
     cred_key: str = ""
@@ -134,6 +148,10 @@ def load_config(env_file: str | None = None) -> Config:
         lockout_seconds=max(30, int(os.getenv("AUTH_LOCKOUT_SECONDS", "900"))),
         max_customers=max(1, int(os.getenv("MAX_CUSTOMERS", "4"))),
         mt5_self_link_enabled=_bool(os.getenv("MT5_SELF_LINK_ENABLED", "1")),
+        mt5_verify_timeout_seconds=max(
+            1.0, float(os.getenv("MT5_VERIFY_TIMEOUT_SECONDS", "12"))),
+        mt5_enforce_investor_readonly=_bool(
+            os.getenv("MT5_ENFORCE_INVESTOR_READONLY", "1")),
         cred_key=os.getenv("MT5_CRED_KEY", "").strip(),
         cred_key_old=os.getenv("MT5_CRED_KEY_OLD", "").strip(),
         rpyc_port_base=max(1024, int(os.getenv("RPYC_PORT_BASE", "18812"))),
