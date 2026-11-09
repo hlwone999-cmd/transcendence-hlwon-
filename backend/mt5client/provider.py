@@ -57,6 +57,22 @@ FORBIDDEN = (
 )
 
 
+# Marker teks penolakan kredensial oleh BROKER (bukan masalah jaringan).
+# Hanya frasa spesifik (remediasi R2): kata generik seperti "password" /
+# "denied" TIDAK dipakai agar error lain (mis. "Permission denied" OS)
+# tidak salah diklasifikasi sebagai kredensial ditolak.
+BROKER_AUTH_MARKERS = (
+    "invalid login", "invalid password", "login or password",
+    "invalid account", "authorization failed", "auth failed",
+    "otorisasi gagal",
+)
+
+
+def looks_like_broker_auth_error(text: str) -> bool:
+    t = (text or "").lower()
+    return any(m in t for m in BROKER_AUTH_MARKERS)
+
+
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 

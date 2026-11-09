@@ -125,14 +125,33 @@ def test_lockout_setelah_login_gagal_berulang(client):
 
 
 # ------------------------------------------------- batas kapasitas (§12)
-def test_maks_customer_aktif(make_client):
+def test_registrasi_tidak_memakai_slot_mt5(make_client, cfg):
+    """Keputusan produk #1: registrasi publik tetap aktif dan TIDAK
+    memakai slot MT5 (max_customers=4 kini = slot terminal)."""
     c = make_client()
-    emails = [f"cust{i}@test.id" for i in range(4)]
-    for e in emails:
-        r = c.post("/api/v1/auth/register", json={"email": e,
-                                                  "password": "rahasia123"})
+    for i in range(6):
+        r = c.post("/api/v1/auth/register",
+                   json={"email": f"cust{i}@test.id",
+                         "password": "rahasia123"},
+                   headers={"X-Real-IP": f"198.51.{i}.10"})
+        assert r.status_code == 201, r.get_json()
+    import db as dbmod
+    conn = dbmod.get_db(cfg)
+    assert conn.execute("SELECT COUNT(*) AS n FROM mt5_terminals"
+                        ).fetchone()["n"] == 0
+
+
+def test_maks_akun_portal_bila_dikonfigurasi(make_client, cfg):
+    """Batas akun portal opsional (max_registered_customers)."""
+    cfg.max_registered_customers = 4
+    c = make_client()
+    for i in range(4):
+        r = c.post("/api/v1/auth/register",
+                   json={"email": f"cust{i}@test.id",
+                         "password": "rahasia123"},
+                   headers={"X-Real-IP": f"198.51.{i}.10"})
         assert r.status_code == 201
     r = c.post("/api/v1/auth/register",
-               json={"email": "cust5@test.id", "password": "rahasia123"})
+               json={"email": "cust5@test.id", "password": "rahasia123"},
+               headers={"X-Real-IP": "198.51.9.10"})
     assert r.status_code == 403
-    assert "4" in r.get_json()["error"]["message"]

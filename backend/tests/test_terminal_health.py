@@ -24,6 +24,8 @@ from services.terminals import (
 @pytest.fixture()
 def hcfg(tmp_path):
     c = Config()
+    # registrasi portal diaktifkan eksplisit (default produksi juga aktif)
+    c.public_register_enabled = True
     c.db_path = str(tmp_path / "health.db")
     c.cred_key = Fernet.generate_key().decode("ascii")
     c.term_base_dir = str(tmp_path / "terminals")

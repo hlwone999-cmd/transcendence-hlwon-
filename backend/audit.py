@@ -25,12 +25,30 @@ def _now_iso() -> str:
 def _request_meta() -> tuple[str | None, str | None]:
     try:
         from flask import request
-        ip = (request.headers.get("X-Forwarded-For", "")
-              or request.remote_addr or "").split(",")[0].strip()[:64] or None
+        # Remediasi T2: IP audit memakai IP klien TEPERCAYA (proxy
+        # terdaftar) — X-Forwarded-For bawaan klien tidak dipercaya.
+        import auth as authmod
+        ip = (authmod.current_ip() or "")[:64] or None
         ua = (request.headers.get("User-Agent") or "")[:180] or None
         return ip, ua
     except RuntimeError:  # di luar konteks request (scheduler/tools)
         return None, None
+
+
+_SECRET_KEYS = ("password", "passwd", "token", "secret", "enc_password",
+                "authorization", "api_key", "credential")
+
+
+def _scrub(obj):
+    """Buang nilai ber-kunci rahasia dari detail audit (defense-in-depth:
+    pemanggil memang tidak boleh mengirim secret — Tahap 2)."""
+    if isinstance(obj, dict):
+        return {k: ("[disensor]" if any(s in str(k).lower()
+                                       for s in _SECRET_KEYS) else _scrub(v))
+                for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_scrub(v) for v in obj]
+    return obj
 
 
 def audit(conn, action: str, *, customer_id: int | None = None,
@@ -39,7 +57,8 @@ def audit(conn, action: str, *, customer_id: int | None = None,
     """Tulis satu baris audit. Aman dipanggil dari mana saja."""
     try:
         ip, ua = _request_meta()
-        raw = json.dumps(detail or {}, ensure_ascii=False, default=str)
+        raw = json.dumps(_scrub(detail or {}), ensure_ascii=False,
+                         default=str)
         if len(raw) > _MAX_DETAIL_JSON:
             raw = raw[:_MAX_DETAIL_JSON]
         conn.execute(

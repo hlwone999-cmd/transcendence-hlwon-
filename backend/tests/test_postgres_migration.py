@@ -43,6 +43,10 @@ def pg_cfg(pg_server, tmp_path):
     uri = pg_server.get_uri().replace("/postgres?", f"/{name}?")
 
     cfg = Config()
+
+    # registrasi portal diaktifkan eksplisit (default produksi juga aktif)
+
+    cfg.public_register_enabled = True
     cfg.db_url = uri
     cfg.db_path = str(tmp_path / "unused.db")
     cfg.api_token = "TESTTOKEN"
@@ -83,7 +87,7 @@ def test_migrasi_pg_dari_db_kosong(pg_server):
     applied = dbmod.migrate(conn)
     # audit #2: 002_rls_roles.sql (role aplikasi non-owner + grant) ikut
     # diterapkan pada migrasi DB kosong.
-    assert applied == [1, 2]
+    assert applied == [1, 2, 3]
     tables = {r["tablename"] for r in conn.execute(
         "SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     for t in WAJIB_TABLES:
@@ -181,11 +185,16 @@ def test_bind_unbind_di_postgresql(pg_cfg):
     with c.application.app_context():
         import db as dbmod
         conn = dbmod.get_db(c.application.config["APP_CFG"])
-        n = conn.execute("SELECT COUNT(*) AS n FROM mt5_accounts"
-                         ).fetchone()["n"]
+        # keputusan produk #4: baris akun (riwayat) DIPERTAHANKAN,
+        # kredensial DIHAPUS. Hitung sebagai owner-scope: kredensial
+        # ber-RLS dicek lewat scope customer pemilik.
+        row = conn.execute("SELECT customer_id, state FROM mt5_accounts"
+                           ).fetchone()
+        dbmod.set_customer_context(conn, int(row["customer_id"]))
         ncred = conn.execute("SELECT COUNT(*) AS n FROM mt5_credentials"
                              ).fetchone()["n"]
-    assert (n, ncred) == (0, 0)   # CASCADE
+        dbmod.clear_customer_context(conn)
+    assert row["state"] == "unbound" and ncred == 0
 
 
 # ---------------------- data migration SQLite (lama) -> PostgreSQL

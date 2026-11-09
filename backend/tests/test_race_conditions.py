@@ -8,17 +8,17 @@ RLS dan tetap satu kode capacity_guard di db.py).
 import sqlite3
 import threading
 
-import pytest
-
 import db as dbmod
 import auth as authmod
 from config import Config
 from cryptography.fernet import Fernet
-from services.terminals import TerminalError, TerminalRegistry
+from services.terminals import TerminalRegistry
 
 
 def _mk_cfg(tmp_path, max_customers=4) -> Config:
     c = Config()
+    # registrasi portal diaktifkan eksplisit (default produksi juga aktif)
+    c.public_register_enabled = True
     c.db_path = str(tmp_path / "race.db")
     c.cred_key = Fernet.generate_key().decode("ascii")
     c.term_base_dir = str(tmp_path / "terminals")
@@ -34,8 +34,12 @@ def _new_conn(cfg):
 # ---------------------------------------------------------- registrasi
 def test_registrasi_bersamaan_slot_terakhir_tidak_dobel(tmp_path):
     """8 thread mendaftar bersamaan saat slot aktif tinggal 1 dari 4:
-    TEPAT 1 yang berhasil; jumlah customer aktif final == 4 (maks)."""
+    TEPAT 1 yang berhasil; jumlah customer aktif final == 4 (maks).
+
+    Sejak keputusan produk 2026-11 batas registrasi adalah
+    max_registered_customers (opsional) — guard serialisasi yang sama."""
     cfg = _mk_cfg(tmp_path)
+    cfg.max_registered_customers = 4
     seed = _new_conn(cfg)
     dbmod.migrate(seed)
     # isi 3 customer dulu secara berurutan
@@ -184,9 +188,10 @@ def test_alokasi_port_terminal_bersamaan_unik_per_customer(tmp_path):
     assert len({int(r["rpyc_port"]) for r in rows}) == 4
 
 
-def test_provisi_customer_sama_dua_kali_ditolak_rapi(tmp_path):
-    """Provision ulang customer yang SUDAH punya terminal: UNIQUE(customer_id)
-    → di-retry lalu TerminalError rapi (bukan IntegrityError mentah/500)."""
+def test_provisi_customer_sama_dua_kali_idempoten(tmp_path):
+    """Provision ulang customer yang SUDAH punya terminal: idempoten
+    (remediasi S5/T4) — terminal yang sama dikembalikan dengan
+    created=False, tanpa baris/port baru, tanpa transaksi menggantung."""
     cfg = _mk_cfg(tmp_path)
     conn = _new_conn(cfg)
     dbmod.migrate(conn)
@@ -196,9 +201,11 @@ def test_provisi_customer_sama_dua_kali_ditolak_rapi(tmp_path):
     reg = TerminalRegistry(cfg)
     info = reg.provision_terminal(conn, created["customer_id"])
     conn.commit()
-    assert info["rpyc_port"] == 18812
-    with pytest.raises(TerminalError):
-        reg.provision_terminal(conn, created["customer_id"])
+    assert info["rpyc_port"] == 18812 and info["created"] is True
+    again = reg.provision_terminal(conn, created["customer_id"])
+    assert again["created"] is False
+    assert again["rpyc_port"] == 18812
+    assert again["terminal_id"] == info["terminal_id"]
     # kegagalan tidak meninggalkan transaksi menggantung
     assert not conn.in_transaction if hasattr(conn, "in_transaction") else True
     rows = conn.execute("SELECT COUNT(*) AS n FROM mt5_terminals"

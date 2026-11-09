@@ -159,6 +159,10 @@ class TerminalError(Exception):
     pass
 
 
+class TerminalCapacityError(TerminalError):
+    """Semua slot MT5 (max_customers terminal) sudah terpakai."""
+
+
 def probe_rpyc_port(port: int, host: str = RPYC_HOST,
                     timeout: float = 2.0) -> bool:
     """Probe transport: TCP connect ke 127.0.0.1:<port> (socket nyata).
@@ -265,17 +269,28 @@ class TerminalRegistry:
         mt5server_bin = f"{terminal_dir}/mt5server.exe"
         wine_bin = getattr(cfg, "wine_bin", "/usr/bin/wine") or "/usr/bin/wine"
 
+        # Remediasi S5/T4: idempoten per customer — terminal yang SUDAH
+        # dimiliki customer ini dipakai kembali (created=False) dan TIDAK
+        # PERNAH dialokasikan ulang ke customer lain. Pemanggil hanya
+        # boleh membersihkan terminal yang created=True.
+        own = self._own_terminal(conn, customer_id)
+        if own is not None:
+            return own
+
         last_err: Exception | None = None
         for _attempt in range(5):
             try:
                 with capacity_guard(conn, CAPACITY_LOCK_TERMINAL):
+                    own = self._own_terminal(conn, customer_id)
+                    if own is not None:   # balapan: customer sama
+                        return own
                     n_terms = conn.execute(
                         "SELECT COUNT(*) AS n FROM mt5_terminals"
                     ).fetchone()["n"]
                     if int(n_terms) >= cfg.max_customers:
-                        raise TerminalError(
+                        raise TerminalCapacityError(
                             f"Kapasitas maksimal {cfg.max_customers} "
-                            "terminal tercapai")
+                            "slot MT5 sudah terpakai")
                     taken = {int(r["rpyc_port"]) for r in conn.execute(
                         "SELECT rpyc_port FROM mt5_terminals")}
                     port = None
@@ -327,7 +342,12 @@ class TerminalRegistry:
                     log.info("terminal %s diprovisikan: port=%d mode=%s "
                              "(terminal64.exe + mt5server RPyC)",
                              service_name, port, cfg.terminal_provision_mode)
-                    return {"rpyc_port": port, "rpyc_host": RPYC_HOST,
+                    trow = conn.execute(
+                        "SELECT id FROM mt5_terminals WHERE customer_id=?",
+                        (customer_id,)).fetchone()
+                    return {"terminal_id": int(trow["id"]),
+                            "created": True,
+                            "rpyc_port": port, "rpyc_host": RPYC_HOST,
                             "service_name": service_name,
                             "wine_prefix": str(wine_prefix),
                             "terminal_dir": str(terminal_dir),
@@ -341,6 +361,22 @@ class TerminalRegistry:
         raise TerminalError(
             f"Alokasi port terminal gagal setelah beberapa percobaan: "
             f"{last_err}")
+
+    @staticmethod
+    def _own_terminal(conn, customer_id: int) -> dict | None:
+        own = conn.execute(
+            "SELECT * FROM mt5_terminals WHERE customer_id=?",
+            (customer_id,)).fetchone()
+        if own is None:
+            return None
+        return {"terminal_id": int(own["id"]), "created": False,
+                "rpyc_port": int(own["rpyc_port"]), "rpyc_host": RPYC_HOST,
+                "service_name": own["service_name"],
+                "wine_prefix": own["wine_prefix"],
+                "terminal_dir": own["terminal_dir"],
+                "data_dir": own["data_dir"],
+                "mt5server_bin": f"{own['terminal_dir']}/mt5server.exe",
+                "status": own["status"]}
 
     # ------------------------------------------------------- health check
     def health_check(self, conn, customer_id: int, deep: bool = False,
@@ -479,12 +515,19 @@ class TerminalRegistry:
             except Exception:  # noqa: BLE001
                 pass
 
+    @staticmethod
+    def account_state(conn, account_id: int) -> str | None:
+        row = conn.execute("SELECT state FROM mt5_accounts WHERE id=?",
+                           (account_id,)).fetchone()
+        return row["state"] if row is not None else None
+
     def active_account_ids(self, conn, limit: int | None = None) -> list[int]:
         """Akun customer aktif, terurut (basis scheduler per-akun)."""
         rows = conn.execute(
             """SELECT a.id FROM mt5_accounts a
                JOIN customers c ON c.id = a.customer_id
-               WHERE c.status='active' ORDER BY a.id""").fetchall()
+               WHERE c.status='active' AND a.state='active'
+               ORDER BY a.id""").fetchall()
         ids = [int(r["id"]) for r in rows]
         return ids[:limit] if limit else ids
 

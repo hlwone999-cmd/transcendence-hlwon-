@@ -361,26 +361,92 @@ def _schema_migrations_ddl(conn) -> str:
             " DEFAULT (datetime('now')))")
 
 
+class MigrationPrivilegeError(RuntimeError):
+    """Migrasi tertunda tetapi role koneksi tidak berhak DDL.
+
+    Role aplikasi produksi (transcendence_app, migrasi 002) sengaja
+    NON-OWNER tanpa hak CREATE pada skema — migrasi WAJIB dijalankan
+    dengan DSN owner (docs/MULTI-CUSTOMER-INSTALASI-PROVISIONING.md §4).
+    """
+
+
+def _applied_versions(conn) -> set[int] | None:
+    """Versi yang sudah diterapkan, atau None bila tabel belum ada.
+
+    Hanya SELECT — tidak butuh hak DDL (aman untuk role non-owner).
+    """
+    if is_postgres(conn):
+        row = conn.execute(
+            "SELECT to_regclass('public.schema_migrations') AS t").fetchone()
+        exists = row is not None and row["t"] is not None
+    else:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table'"
+            " AND name='schema_migrations'").fetchone() is not None
+    if not exists:
+        return None
+    return {int(r["version"]) for r in conn.execute(
+        "SELECT version FROM schema_migrations")}
+
+
+def _migration_files(conn) -> list[tuple[int, Path]]:
+    subdir = "postgres" if is_postgres(conn) else "sqlite"
+    return [(int(f.name.split("_", 1)[0]), f)
+            for f in sorted((MIGRATIONS_DIR / subdir).glob("*.sql"))]
+
+
+def _is_privilege_error(exc: BaseException) -> bool:
+    code = getattr(exc, "pgcode", None)
+    # 42501 insufficient_privilege; 42P01 tidak relevan di sini
+    return code == "42501" or "permission denied" in str(exc).lower()
+
+
 def migrate(conn) -> list[int]:
     """Terapkan migrasi engine yang sesuai. Return daftar versi baru.
 
     - SQLite  : migrations/sqlite/*.sql   (001_init.sql = skema lama utuh)
     - Postgres: migrations/postgres/*.sql (001_multi_customer.sql)
     Aman dijalankan ulang; tiap file diterapkan maksimal sekali.
+
+    Remediasi startup non-owner: bila SEMUA migrasi sudah diterapkan,
+    fungsi ini TIDAK menjalankan DDL apa pun (hanya SELECT) — backend
+    dapat start dengan role aplikasi non-owner (transcendence_app) yang
+    tidak punya hak CREATE pada skema public (PostgreSQL >= 15). Bila
+    ada migrasi tertunda dan role tidak berhak DDL, dilempar
+    MigrationPrivilegeError yang jelas (bukan traceback psycopg2).
     """
-    conn.execute(_schema_migrations_ddl(conn))
+    files = _migration_files(conn)
+    applied = _applied_versions(conn)
     conn.commit()
-    applied = {r["version"] for r in conn.execute(
-        "SELECT version FROM schema_migrations")}
-    subdir = "postgres" if is_postgres(conn) else "sqlite"
-    done: list[int] = []
-    for sql_file in sorted((MIGRATIONS_DIR / subdir).glob("*.sql")):
-        version = int(sql_file.name.split("_", 1)[0])
-        if version in applied:
-            continue
-        conn.executescript(sql_file.read_text(encoding="utf-8"))
-        conn.execute("INSERT INTO schema_migrations(version) VALUES (?)",
-                     (version,))
-        conn.commit()
-        done.append(version)
-    return done
+    if applied is not None and all(v in applied for v, _ in files):
+        return []
+    try:
+        if applied is None:
+            conn.execute(_schema_migrations_ddl(conn))
+            conn.commit()
+            applied = set()
+        done: list[int] = []
+        for version, sql_file in files:
+            if version in applied:
+                continue
+            conn.executescript(sql_file.read_text(encoding="utf-8"))
+            conn.execute("INSERT INTO schema_migrations(version) VALUES (?)",
+                         (version,))
+            conn.commit()
+            done.append(version)
+        return done
+    except Exception as e:  # noqa: BLE001
+        if is_postgres(conn) and _is_privilege_error(e):
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            pending = sorted(v for v, _ in files
+                             if applied is None or v not in applied)
+            raise MigrationPrivilegeError(
+                f"Migrasi tertunda {pending} tidak bisa diterapkan dengan "
+                "role koneksi ini (tanpa hak DDL). Jalankan migrasi dengan "
+                "DSN OWNER database terlebih dahulu (lihat docs/MULTI-"
+                "CUSTOMER-INSTALASI-PROVISIONING.md §4), lalu start "
+                "backend dengan role aplikasi non-owner.") from e
+        raise

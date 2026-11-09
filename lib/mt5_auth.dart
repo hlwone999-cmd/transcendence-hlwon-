@@ -3,8 +3,9 @@
 // bind/unbind akun MT5, dan penyimpanan token sesi.
 //
 // Token sesi disimpan di flutter_secure_storage (encrypted keystore).
-// Fallback SharedPreferences hanya untuk perangkat sangat lama —
-// dilakukan migrasi sekali ke secure storage begitu tersedia.
+// Token plaintext lama di SharedPreferences hanya DIBACA untuk migrasi
+// sekali ke secure storage; token baru TIDAK PERNAH ditulis plaintext —
+// tanpa secure storage token hanya hidup di memori proses (remediasi R4).
 //
 // TIDAK ADA bagian dari file ini yang menyentuh kalkulator lot
 // (lib/engine.dart, lib/montecarlo.dart, main.dart — protected).
@@ -33,7 +34,8 @@ abstract class SessionStoreContract {
   Future<void> clear();
 }
 
-/// Penyimpanan token sesi — secure storage dulu, fallback SharedPreferences.
+/// Penyimpanan token sesi — secure storage; tanpa secure storage token hanya
+/// di memori (R4). SharedPreferences hanya dibaca untuk migrasi token lama.
 class SessionStore implements SessionStoreContract {
   static const _kToken = 'mt5_session_token';
   static const _kLegacyToken = 'mt5_api_token'; // key lama di SharedPreferences
@@ -52,6 +54,9 @@ class SessionStore implements SessionStoreContract {
       t = await _sec.read(key: _kToken);
     } catch (_) {
       t = null; // secure storage tidak tersedia -> cek fallback di bawah
+    }
+    if ((t == null || t.isEmpty) && _memoryToken != null) {
+      return _memoryToken; // R4: sesi memori (secure storage tak tersedia)
     }
     if (t != null && t.isNotEmpty) {
       // M1: secure storage sudah memegang sesi — sisa token lama di
@@ -88,18 +93,31 @@ class SessionStore implements SessionStoreContract {
     return legacy;
   }
 
+  /// Remediasi R4: bila secure storage TIDAK tersedia, token sesi hanya
+  /// dipegang di memori proses (hilang saat aplikasi ditutup) — TIDAK
+  /// PERNAH ditulis plaintext ke SharedPreferences.
+  static String? _memoryToken;
+
   @override
   Future<void> saveToken(String token) async {
     try {
       await _sec.write(key: _kToken, value: token);
+      _memoryToken = null;
     } catch (_) {
+      _memoryToken = token.isEmpty ? null : token;
+    }
+    // sisa token plaintext lama (bila ada) tidak boleh hidup berdampingan
+    try {
       final sp = await SharedPreferences.getInstance();
-      await sp.setString(_kLegacyToken, token);
+      await sp.remove(_kLegacyToken);
+    } catch (_) {
+      // best-effort
     }
   }
 
   @override
   Future<void> clear() async {
+    _memoryToken = null;
     try {
       await _sec.delete(key: _kToken);
     } catch (_) {

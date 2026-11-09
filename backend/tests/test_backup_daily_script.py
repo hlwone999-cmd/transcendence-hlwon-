@@ -368,8 +368,15 @@ def test_flock_lepas_otomatis_setelah_gagal_dan_setelah_proses_dibunuh(tmp_path)
     (bk / "LAST_DAILY").write_text("daily-20260101-020000\n")  # kondisi awal
     # Bunuh SELURUH grup proses (bash + anak pipeline pewaris fd 9) —
     # cara operator mematikan job yang kabur; SIGKILL = trap tak berjalan.
-    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    pgid = os.getpgid(proc.pid)
+    os.killpg(pgid, signal.SIGKILL)
     proc.wait()
+    # proc.wait() hanya menunggu bash INDUK. Anak dalam grup yang sama
+    # (subshell/pipeline pewaris fd 9) bisa masih memproses SIGKILL —
+    # kernel baru menutup fd (melepas lock) saat proses itu benar-benar
+    # keluar. Tunggu sampai TIDAK ada anggota grup yang hidup, lalu cek
+    # lock secara KETAT (LOCK_NB, tanpa retry).
+    assert _tunggu_grup_mati(pgid), "anggota grup proses tidak mati"
     fd = os.open(str(lockfile), os.O_RDWR | os.O_CREAT, 0o600)
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)    # sukses = kernel lepas
     os.close(fd)
@@ -385,6 +392,28 @@ def test_flock_lepas_otomatis_setelah_gagal_dan_setelah_proses_dibunuh(tmp_path)
     final = _final(bk)          # tepat 1 dump harian final — tak ada korup
     assert gzip.decompress(final.read_bytes()).startswith(b"--\n-- PostgreSQL")
     assert (bk / "LAST_DAILY").read_text().strip() == final.name[:-len(".sql.gz")]
+
+
+def _tunggu_grup_mati(pgid: int, timeout: float = 10.0) -> bool:
+    """True bila semua anggota grup proses [pgid] sudah keluar (tidak
+    ada lagi, atau tinggal zombie — fd zombie sudah ditutup kernel)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        hidup = False
+        for d in os.listdir("/proc"):
+            if not d.isdigit():
+                continue
+            try:
+                f = open(f"/proc/{d}/stat").read().rsplit(")", 1)[1].split()
+            except OSError:
+                continue
+            if int(f[2]) == pgid and f[0] != "Z":
+                hidup = True
+                break
+        if not hidup:
+            return True
+        time.sleep(0.02)
+    return False
 
 
 # ------------------------------------------------------------- 3. simulasi

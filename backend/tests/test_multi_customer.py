@@ -15,7 +15,7 @@ from tests.conftest import bind_account, register_and_login
 def _acc(login, server, currency="USD"):
     return AccountInfo(
         login=login, trade_mode=0, leverage=100, limit_orders=200,
-        margin_so_mode=0, trade_allowed=True, trade_expert=False,
+        margin_so_mode=0, trade_allowed=False, trade_expert=False,
         margin_mode=0, currency_digits=2, fifo_close=False,
         balance=1000.0, credit=0.0, profit=0.0, equity=1000.0,
         margin=0.0, margin_free=1000.0, margin_level=0.0,
@@ -64,6 +64,8 @@ def _ds_two_trades(login, server, symbol, point, digits, pid, profit):
 def _mc_client(datasets, mt5_enabled=True):
     """Client dgn provider mock dipilih per login akun (multi-customer)."""
     cfg = Config()
+    # registrasi portal diaktifkan eksplisit (default produksi juga aktif)
+    cfg.public_register_enabled = True
     tmp = tempfile.mkdtemp(prefix="mc-")
     cfg.db_path = f"{tmp}/journal.db"
     cfg.api_token = "TESTTOKEN"
@@ -101,15 +103,31 @@ def test_akun_sama_tidak_bisa_dibind_dua_customer(client):
 
 
 def test_unbind_lalu_bind_lagi(client):
+    """Keputusan produk #2/#4: unbind mencabut semua sesi, riwayat akun
+    dipertahankan; customer hanya dapat mengaktifkan kembali akun MT5
+    yang SAMA (akun lain ditolak 409 — riwayat tidak tercampur)."""
     hA = _session(client, "ganti@test.id")
     bind_account(client, hA, login=55500001, server="Exness-MT5Real")
     r = client.post("/api/v1/accounts/unbind", headers=hA)
     assert r.status_code == 200
-    bind_account(client, hA, login=55500002, server="BrokerBaru-MT5Demo")
+    assert r.get_json()["history_retained"] is True
+    # S4: unbind mencabut SEMUA sesi customer (token lama mati)
+    assert client.get("/api/v1/auth/me", headers=hA).status_code == 401
+    r = client.post("/api/v1/auth/login",
+                    json={"email": "ganti@test.id", "password": "rahasia123"})
+    hA = {"Authorization": f"Bearer {r.get_json()['token']}"}
+    me = client.get("/api/v1/auth/me", headers=hA).get_json()
+    assert me["account"]["state"] == "unbound"
+    r = client.post("/api/v1/accounts/bind", headers=hA,
+                    json={"login": 55500002, "server": "BrokerBaru-MT5Demo",
+                          "password": "MT5_PASSWORD_X"})
+    assert r.status_code == 409
+    r = client.post("/api/v1/accounts/bind", headers=hA,
+                    json={"login": 55500001, "server": "Exness-MT5Real",
+                          "password": "MT5_PASSWORD_X"})
+    assert r.status_code == 200, r.get_json()
     acc = client.get("/api/v1/mt5/account", headers=hA).get_json()
-    assert acc["login"] == 55500002
-    assert client.get("/api/v1/journal/trades",
-                      headers=hA).get_json()["total"] == 0
+    assert acc["login"] == 55500001 and acc["state"] == "active"
 
 
 # --------------------------------------------- #6 A tidak bisa membaca B

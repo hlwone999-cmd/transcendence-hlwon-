@@ -42,6 +42,10 @@ MAX_CUSTOMERS=4
 TERMINAL_PROVISION_MODE=real
 TERM_BASE_DIR=/var/lib/transcendence/terminals
 API_TOKEN=<openssl rand -hex 32>   # hanya utk /admin/*
+AUTH_PUBLIC_REGISTER_ENABLED=1     # registrasi publik aktif; tidak memakai slot MT5
+TRUSTED_PROXIES=127.0.0.1,::1      # hanya nginx lokal yang dipercaya
+CLIENT_IP_HEADER=X-Real-IP         # nginx: proxy_set_header X-Real-IP $remote_addr;
+MT5_ENFORCE_INVESTOR_READONLY=1    # sync menolak sesi password MASTER
 ```
 
 ## 4. Migrasi PostgreSQL (pakai DSN owner, bukan DSN app)
@@ -59,6 +63,11 @@ MT5_CRED_KEY=<kunci> python3 tools/migrate_sqlite_to_postgres.py \
 
 Migrasi 002 membuat/membenahkan role `transcendence_app` + grant + policy
 RLS secara idempoten.
+
+Backend (role `transcendence_app`) **tidak** menjalankan DDL saat start bila
+semua migrasi sudah diterapkan. Bila ada migrasi tertunda, backend berhenti
+dengan `MigrationPrivilegeError` — jalankan langkah di atas dengan DSN owner
+dulu, lalu start ulang backend.
 
 ## 5. Provisioning terminal per customer (otomatis saat bind)
 

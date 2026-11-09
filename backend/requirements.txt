@@ -18,6 +18,10 @@ psycopg2-binary>=2.9,<3
 # backend tetap bisa jalan & test bisa lulus tanpa paket ini terpasang
 # (MT5_ENABLED=false atau pakai mock di test).
 mt5linux>=0.2.4
+# Klien RPyC dipakai LANGSUNG (ClassicClient — server tidak bisa memanggil
+# balik proses API; lihat mt5client/mt5linux_provider.py) + layanan RPC
+# read-only (mt5client/ro_service.py).
+rpyc>=5.3,<7
 
 # --- dev/test ---
 # pytest>=8.0  (install terpisah: pip install pytest)
