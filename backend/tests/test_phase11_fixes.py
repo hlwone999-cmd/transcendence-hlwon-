@@ -40,7 +40,7 @@ SYMBOLS = {
 
 ACCOUNT = AccountInfo(
     login=12345678, trade_mode=0, leverage=500, limit_orders=200,
-    margin_so_mode=0, trade_allowed=True, trade_expert=False,
+    margin_so_mode=0, trade_allowed=False, trade_expert=False,
     margin_mode=0, currency_digits=2, fifo_close=False,
     balance=0.0, credit=0.0, profit=0.0, equity=0.0,
     margin=0.0, margin_free=0.0, margin_level=0.0,

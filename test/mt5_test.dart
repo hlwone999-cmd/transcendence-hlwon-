@@ -4,13 +4,16 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:transcendence/mt5_api.dart';
+import 'package:transcendence/mt5_auth.dart';
 import 'package:transcendence/mt5_models.dart';
 import 'package:transcendence/mt5_page.dart';
+import 'package:transcendence/ui_kit.dart';
 
 // ---------------------------------------------------------------------------
 // Fixture JSON — bentuk persis seperti balasan backend Flask.
@@ -284,17 +287,145 @@ void main() {
     });
   });
 
+  // ------------------------------------------------------- M-A (PR #4)
+  // Remediasi M-A: klien data Mt5Api dan jalur TOKEN MANUAL → SIMPAN
+  // kini memakai kebijakan URL M3 yang SAMA dengan klien auth
+  // (Mt5UrlPolicy — satu sumber, tidak ada jalur alternatif).
+  group('M-A — validasi URL klien data (kebijakan M3 bersama)', () {
+    test('HTTP ke host produksi DITOLAK di konstruktor Mt5Api', () {
+      Mt5ApiError? caught;
+      try {
+        Mt5Api(baseUrl: 'http://jurnal.domain.com', token: 'TOK');
+      } on Mt5ApiError catch (e) {
+        caught = e;
+      }
+      expect(caught, isNotNull);
+      expect(caught!.kind, Mt5ApiErrorKind.badResponse);
+      expect(caught.message, contains('HTTPS'));
+    });
+
+    test('HTTP localhost/loopback DITERIMA dan dipakai apa adanya', () async {
+      final seen = <String>[];
+      final api = Mt5Api(
+        baseUrl: 'http://localhost:8000',
+        token: 'TOK',
+        client: MockClient((r) async {
+          seen.add(r.url.toString());
+          return _json(fixtureStatus);
+        }),
+      );
+      await api.status();
+      expect(seen.single,
+          startsWith('http://localhost:8000/api/v1/')); // skema http utuh
+
+      // varian loopback lain diterima konstruktor
+      expect(
+        Mt5Api(baseUrl: 'http://127.0.0.1:5000', token: 't'),
+        isA<Mt5Api>(),
+      );
+      expect(
+        Mt5Api(baseUrl: 'http://[::1]:9000', token: 't'),
+        isA<Mt5Api>(),
+      );
+    });
+
+    test('HTTPS tetap berfungsi — eksplisit maupun host tanpa scheme',
+        () async {
+      final seen = <String>[];
+      final api = Mt5Api(
+        baseUrl: 'https://srv.test',
+        token: 'TOK',
+        client: MockClient((r) async {
+          seen.add(r.url.toString());
+          return _json(fixtureStatus);
+        }),
+      );
+      await api.status();
+      expect(seen.single, startsWith('https://srv.test/api/v1/'));
+
+      // host tanpa scheme tetap dianggap https (perilaku lama)
+      final api2 = Mt5Api(
+        baseUrl: 'srv.test',
+        token: 'TOK',
+        client: MockClient((r) async {
+          seen.add(r.url.toString());
+          return _json(fixtureStatus);
+        }),
+      );
+      await api2.status();
+      expect(seen.last, startsWith('https://'));
+    });
+
+    test('HTTP non-loopback diterima hanya dengan flag dev eksplisit', () {
+      expect(
+        Mt5Api(
+          baseUrl: 'http://192.168.1.10:8000',
+          token: 't',
+          allowInsecureHttp: true, // development eksplisit
+        ),
+        isA<Mt5Api>(),
+      );
+    });
+
+    test('baseUrl kosong tetap diterima (kontrak belum terkonfigurasi)', () {
+      // Halaman mengonstruksi Mt5Api dengan URL kosong saat boot sebelum
+      // user mengisi konfigurasi — kontrak ini TIDAK boleh pecah.
+      final api = Mt5Api(baseUrl: '', token: '');
+      expect(api.isConfigured, isFalse);
+    });
+
+    test('Mt5Api dan Mt5AuthApi memakai kebijakan URL yang SAMA', () {
+      const urls = [
+        'https://jurnal.domain.com', // https eksplisit — terima
+        'jurnal.domain.com', // tanpa scheme — terima (dianggap https)
+        'http://localhost:8000', // loopback — terima
+        'http://127.0.0.1:5000', // loopback — terima
+        'http://jurnal.domain.com', // http produksi — TOLAK
+        'http://10.20.30.40', // http LAN — TOLAK
+      ];
+      for (final u in urls) {
+        Object? viaData;
+        Object? viaAuth;
+        try {
+          Mt5Api(baseUrl: u, token: 't');
+        } catch (e) {
+          viaData = e;
+        }
+        try {
+          Mt5AuthApi(baseUrl: u);
+        } catch (e) {
+          viaAuth = e;
+        }
+        expect(
+          viaData == null,
+          viaAuth == null,
+          reason:
+              'kebijakan URL tidak sinkron untuk "$u": '
+              'data=${viaData == null ? "terima" : "tolak"} '
+              'auth=${viaAuth == null ? "terima" : "tolak"}',
+        );
+      }
+    });
+  });
+
   group('Mt5JournalPage (widget)', () {
-    testWidgets('belum dikonfigurasi -> tampil ATUR SERVER, tanpa crash', (
-      tester,
-    ) async {
+    testWidgets('belum ada sesi -> FORM KONEKSI (3 input), tanpa ATUR '
+        'SERVER', (tester) async {
       SharedPreferences.setMockInitialValues({});
       await tester.pumpWidget(
         const MaterialApp(home: Scaffold(body: Mt5JournalPage())),
       );
       await tester.pumpAndSettle();
-      expect(find.text('BELUM TERHUBUNG'), findsOneWidget);
-      expect(find.text('ATUR SERVER'), findsOneWidget);
+      expect(find.widgetWithText(GoldButton, 'HUBUNGKAN AKUN MT5'),
+          findsOneWidget);
+      expect(find.text('NOMOR AKUN MT5'), findsOneWidget);
+      expect(find.text('SERVER BROKER'), findsOneWidget);
+      expect(find.text('PASSWORD INVESTOR'), findsOneWidget);
+      // D1: input lama TIDAK ADA
+      expect(find.text('ATUR SERVER'), findsNothing);
+      expect(find.text('URL SERVER'), findsNothing);
+      expect(find.text('EMAIL CUSTOMER'), findsNothing);
+      expect(find.text('TOKEN SESI'), findsNothing);
     });
 
     testWidgets('terhubung -> akun, statistik, dan daftar trade tampil', (
@@ -344,7 +475,8 @@ void main() {
       expect(find.text('MUAT LAGI'), findsNothing); // 1 halaman saja
     });
 
-    testWidgets('server 401 -> pesan ramah, bukan crash', (tester) async {
+    testWidgets('server 401 -> sesi dibersihkan, kembali ke form koneksi '
+        '(M2 + redesign)', (tester) async {
       SharedPreferences.setMockInitialValues({
         'mt5_base_url': 'https://srv.test',
         'mt5_api_token': 'SALAH',
@@ -356,9 +488,110 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      expect(find.text('GAGAL TERHUBUNG'), findsOneWidget);
-      expect(find.textContaining('Token API ditolak'), findsOneWidget);
-      expect(find.text('COBA LAGI'), findsOneWidget);
+      // token basi ditolak server -> M2 membersihkan sesi lokal dan
+      // halaman kembali ke FORM KONEKSI (bukan layar error mati).
+      expect(find.widgetWithText(GoldButton, 'HUBUNGKAN AKUN MT5'),
+          findsOneWidget);
+      expect(find.text('GAGAL TERHUBUNG'), findsNothing);
+      expect(
+        await const FlutterSecureStorage().read(key: 'mt5_session_token'),
+        isNull,
+      );
+    });
+  });
+
+  // ------------------------------------------------- redesign D1 (widget)
+  // Form koneksi menggantikan dialog ATUR SERVER. Regresi D1: tidak ada
+  // lagi input URL/email/password customer/token manual; dropdown server
+  // punya opsi Lainnya (D4); password investor bisa dilihat/sembunyi.
+  // Alur connect/disconnect lengkap di mt5_connect_flow_test.dart.
+  group('redesign D1 — form koneksi (widget)', () {
+    Future<void> pumpForm(WidgetTester tester) async {
+      SharedPreferences.setMockInitialValues({});
+      // Mock secure storage dipakai bersama seluruh file test — bersihkan
+      // agar boot tanpa sesi deterministik.
+      await const FlutterSecureStorage().deleteAll();
+      await tester.pumpWidget(
+        const MaterialApp(home: Scaffold(body: Mt5JournalPage())),
+      );
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('form tampil: 3 input saja, tanpa URL/email/token manual',
+        (tester) async {
+      await pumpForm(tester);
+      expect(find.widgetWithText(GoldButton, 'HUBUNGKAN AKUN MT5'),
+          findsOneWidget);
+      expect(find.text('NOMOR AKUN MT5'), findsOneWidget);
+      expect(find.text('SERVER BROKER'), findsOneWidget);
+      expect(find.text('PASSWORD INVESTOR'), findsOneWidget);
+      for (final label in [
+        'URL SERVER',
+        'EMAIL CUSTOMER',
+        'TOKEN SESI',
+        'ATUR SERVER',
+        'TOKEN MANUAL (LANJUTAN)',
+      ]) {
+        expect(find.text(label), findsNothing, reason: label);
+      }
+      // hanya 2 TextField: nomor akun + password (dropdown bukan TextField)
+      expect(
+        tester.widgetList<TextField>(find.byType(TextField)).length,
+        2,
+      );
+    });
+
+    testWidgets('pilih Lainnya -> field nama server manual muncul (D4)',
+        (tester) async {
+      await pumpForm(tester);
+      expect(find.text('NAMA SERVER (MANUAL)'), findsNothing);
+      await tester.tap(find.text('Exness-MT5Real').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Lainnya (isi manual)').last);
+      await tester.pumpAndSettle();
+      expect(find.text('NAMA SERVER (MANUAL)'), findsOneWidget);
+      // catatan kejujuran D4: daftar tidak dianggap lengkap
+      expect(find.textContaining('tidak lengkap'), findsOneWidget);
+    });
+
+    testWidgets('tombol lihat/sembunyi password investor', (tester) async {
+      await pumpForm(tester);
+      final n = tester.widgetList<TextField>(find.byType(TextField)).length;
+      expect(
+        tester
+            .widget<TextField>(find.byType(TextField).at(n - 1))
+            .obscureText,
+        isTrue,
+      );
+      await tester.tap(find.byIcon(Icons.visibility_outlined));
+      await tester.pump();
+      expect(
+        tester
+            .widget<TextField>(find.byType(TextField).at(n - 1))
+            .obscureText,
+        isFalse,
+      );
+      await tester.tap(find.byIcon(Icons.visibility_off_outlined));
+      await tester.pump();
+      expect(
+        tester
+            .widget<TextField>(find.byType(TextField).at(n - 1))
+            .obscureText,
+        isTrue,
+      );
+    });
+
+    testWidgets('submit kosong -> validasi lokal, tidak ada crash',
+        (tester) async {
+      await pumpForm(tester);
+      await tester.tap(find.widgetWithText(
+          GoldButton, 'HUBUNGKAN AKUN MT5'));
+      await tester.pump();
+      // pesan galat lokal (tanpa jaringan — flutter_test mem-blok HTTP)
+      expect(find.textContaining('wajib'), findsWidgets);
+      // form tetap tampil
+      expect(find.widgetWithText(GoldButton, 'HUBUNGKAN AKUN MT5'),
+          findsOneWidget);
     });
   });
 }

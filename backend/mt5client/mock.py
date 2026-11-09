@@ -19,6 +19,7 @@ ORDER_TYPE: BUY=0 SELL=1 ...; ORDER_STATE_FILLED=4 PARTIAL=3
 """
 from __future__ import annotations
 
+import time
 from collections import namedtuple
 from datetime import datetime, timedelta, timezone
 
@@ -152,7 +153,7 @@ def scenario_dataset():
     }
     account = AccountInfo(
         login=12345678, trade_mode=0, leverage=500, limit_orders=200,
-        margin_so_mode=0, trade_allowed=True, trade_expert=False,
+        margin_so_mode=0, trade_allowed=False, trade_expert=False,
         margin_mode=0, currency_digits=2, fifo_close=False,
         balance=750.0, credit=0.0, profit=0.10, equity=750.10,
         margin=0.0, margin_free=750.10, margin_level=0.0,
@@ -168,24 +169,52 @@ def scenario_dataset():
 class MockMT5Client(MT5ProviderBase):
     """Mock provider: dataset statis + mode gagal untuk test error path.
 
+    Knob test verifikasi live (hardening post-redesign):
+    - fail_connect : connect() raise MT5ConnectionError (terminal/broker
+      tidak terjangkau — jalur unreachable/timeout).
+    - fail_auth    : connect() raise MT5ConnectionError dengan pesan
+      "Invalid login or password" — simulasi broker MENOLAK kredensial
+      (password salah / server tidak cocok), berbeda dari unreachable.
+    - trade_allowed: override account_info().trade_allowed dataset.
+      None = pakai nilai dataset. False = sesi INVESTOR read-only
+      (semestinya); True = sesi password MASTER (dipakai test deteksi
+      password master — MetaTrader5 tidak membedakan keduanya di
+      initialize, satu-satunya sinyalnya trade_allowed sesi ini).
+
     Catatan: class ini sengaja TIDAK mendefinisikan order_send/eval/execute —
     pemanggilannya jatuh ke __getattr__ dan raise ReadOnlyViolationError.
     """
 
     def __init__(self, dataset: dict | None = None, *,
                  fail_connect: bool = False,
-                 fail_history: bool = False):
+                 fail_history: bool = False,
+                 fail_auth: bool = False,
+                 trade_allowed: bool | None = None,
+                 connect_delay: float = 0.0):
         self._ds = dataset if dataset is not None else scenario_dataset()
+        if trade_allowed is not None and self._ds.get("account") is not None:
+            self._ds["account"] = self._ds["account"]._replace(
+                trade_allowed=trade_allowed)
         self._connected = False
         self.fail_connect = fail_connect
         self.fail_history = fail_history
+        self.fail_auth = fail_auth
+        self.connect_delay = connect_delay
         self.connect_calls = 0
 
     # --- lifecycle ------------------------------------------------------
     def connect(self) -> None:
         self.connect_calls += 1
+        if self.connect_delay:
+            time.sleep(self.connect_delay)
         if self.fail_connect:
             raise MT5ConnectionError("mock: mt5server tidak terjangkau")
+        if self.fail_auth:
+            # Bentuk pesan meniru MT5LinuxProvider: initialize gagal +
+            # last_error terminal berisi alasan otorisasi broker.
+            raise MT5ConnectionError(
+                "MT5 initialize gagal (-6, 'Terminal: Invalid login or "
+                "password')")
         self._connected = True
 
     def disconnect(self) -> None:
