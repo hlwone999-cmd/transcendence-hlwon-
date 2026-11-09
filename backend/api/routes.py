@@ -80,15 +80,18 @@ def require_customer(fn):
     return wrapper
 
 
-def require_rate_limit(action: str, limit: int, window_seconds: int):
-    """Dekorator rate-limit per IP+aksi (sliding window in-memory)."""
+def require_rate_limit(action: str, limit, window_seconds: int):
+    """Dekorator rate-limit per IP klien tepercaya + aksi (persisten di DB,
+    lintas worker). [limit] int atau nama atribut config."""
     def deco(fn):
         @wraps(fn)
         def wrapper(*a, **kw):
             import auth as authmod
             ip = authmod.current_ip() or "?"
+            lim = limit if isinstance(limit, int) else \
+                int(getattr(cfg(), limit))
             try:
-                authmod.register_rate_limit(f"{action}:{ip}", limit,
+                authmod.register_rate_limit(f"{action}:{ip}", lim,
                                             window_seconds)
             except authmod.AuthError as e:
                 abort(e.code, description=e.message)
@@ -309,18 +312,50 @@ def admin_health_terminals():
 
 
 # ------------------------------------------------------------------- auth
+def _subnet_of(ip: str | None) -> str:
+    """Subnet klien untuk rate-limit registrasi (/24 IPv4, /64 IPv6)."""
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(ip or "")
+    except ValueError:
+        return "?"
+    prefix = 24 if addr.version == 4 else 64
+    return str(ipaddress.ip_network(f"{addr}/{prefix}", strict=False))
+
+
 @api_bp.post("/auth/register")
-@require_rate_limit("register", 5, 3600)
+@require_rate_limit("register", "register_per_ip_hour", 3600)
 def auth_register():
+    """Registrasi portal publik (keputusan produk #1: TETAP AKTIF).
+
+    Perlindungan (Tahap 1): validasi input (auth.normalize_email /
+    validate_password / validate_display_name), rate limit PERSISTEN per
+    IP klien tepercaya (per jam + per hari) dan per subnet (per hari) —
+    X-Forwarded-For dari klien tidak dipercaya (auth.current_ip).
+    Registrasi TIDAK memberi terminal/slot MT5: slot hanya dialokasikan
+    saat bind/connect akun MT5 yang lolos verifikasi.
+    """
     import audit as auditmod
     import auth as authmod
+    c = cfg()
+    if not getattr(c, "public_register_enabled", True):
+        abort(403, description="Registrasi publik dinonaktifkan — "
+                               "hubungi admin untuk provisioning customer")
+    ip = authmod.current_ip() or "?"
+    try:
+        authmod.register_rate_limit(f"register-day:{ip}",
+                                    c.register_per_ip_day, 86400)
+        authmod.register_rate_limit(f"register-net:{_subnet_of(ip)}",
+                                    c.register_per_subnet_day, 86400)
+    except authmod.AuthError as e:
+        abort(e.code, description=e.message)
     body = request.get_json(silent=True) or {}
     email = str(body.get("email") or "")
     password = str(body.get("password") or "")
     display_name = str(body.get("display_name") or "") or None
     conn = get_db()
     try:
-        created = authmod.register_customer(conn, cfg(), email, password,
+        created = authmod.register_customer(conn, c, email, password,
                                             display_name)
     except authmod.AuthError as e:
         abort(e.code, description=e.message)
@@ -372,10 +407,12 @@ def auth_me():
            FROM customers c JOIN users u ON u.customer_id = c.id
            WHERE c.id=?""", (g.customer_id,)).fetchone()
     acc = conn.execute(
-        "SELECT id, login, server, currency, last_sync_at FROM mt5_accounts"
-        " WHERE customer_id=?", (g.customer_id,)).fetchone()
+        "SELECT id, login, server, currency, last_sync_at, state"
+        " FROM mt5_accounts WHERE customer_id=?", (g.customer_id,)).fetchone()
+    # Remediasi R1: port RPyC & nama unit systemd adalah metadata
+    # infrastruktur internal — tidak diekspos ke klien.
     term = conn.execute(
-        "SELECT rpyc_port, service_name, status FROM mt5_terminals"
+        "SELECT status FROM mt5_terminals"
         " WHERE customer_id=?", (g.customer_id,)).fetchone()
     return jsonify({
         "customer": dict(row) if row else None,
@@ -398,10 +435,17 @@ def accounts_current():
 @api_bp.post("/accounts/bind")
 @require_customer
 def accounts_bind():
-    """Bind 1 akun MT5 (MVP: satu per customer; kredensial dienkripsi)."""
+    """Bind 1 akun MT5 (MVP: satu per customer; kredensial dienkripsi).
+
+    Keputusan produk #4: unbind MEMPERTAHANKAN baris akun & riwayat
+    jurnal (state='unbound'). Customer hanya dapat mengaktifkan kembali
+    akun MT5 yang SAMA (login+server); mengganti ke akun lain ditolak
+    409 agar riwayat lama tidak tercampur/terhapus (hubungi admin).
+    Slot MT5 penuh -> 403 (registrasi tidak memakai slot).
+    """
     import audit as auditmod
     from security import crypto
-    from services.terminals import TerminalError
+    from services.terminals import TerminalCapacityError, TerminalError
     body = request.get_json(silent=True) or {}
     try:
         login_val = int(body.get("login"))
@@ -409,18 +453,27 @@ def accounts_bind():
         abort(400, description="'login' harus angka (login MT5)")
     password = str(body.get("password") or "")
     server = str(body.get("server") or "").strip()
-    if not login_val or not server or not password:
+    if not login_val or login_val < 0 or not server or not password:
         abort(400, description="'login', 'password', dan 'server' wajib")
     if len(server) > 128 or len(password) > 256:
         abort(400, description="'server'/'password' terlalu panjang")
 
     conn = get_db()
-    if conn.execute("SELECT 1 FROM mt5_accounts WHERE customer_id=?",
-                    (g.customer_id,)).fetchone() is not None:
-        abort(409, description="Customer sudah punya akun MT5 (MVP: 1 akun "
-                               "per customer). Unbind dulu untuk mengganti.")
-    if conn.execute("SELECT 1 FROM mt5_accounts WHERE login=? AND server=?",
-                    (login_val, server)).fetchone() is not None:
+    mine = conn.execute("SELECT * FROM mt5_accounts WHERE customer_id=?",
+                        (g.customer_id,)).fetchone()
+    reactivate = False
+    if mine is not None:
+        same = (int(mine["login"]) == login_val and
+                str(mine["server"]).strip().casefold() == server.casefold())
+        if mine["state"] == "active" or not same:
+            abort(409, description="Customer sudah punya akun MT5 (MVP: 1 "
+                                   "akun per customer; riwayat jurnal akun "
+                                   "lama dipertahankan). Hubungi admin "
+                                   "untuk mengganti akun.")
+        reactivate = True
+    elif conn.execute(
+            "SELECT 1 FROM mt5_accounts WHERE login=? AND"
+            " lower(server)=lower(?)", (login_val, server)).fetchone():
         abort(409, description="Akun MT5 itu sudah ter-bind ke customer lain")
     try:
         enc, key_version = crypto.encrypt_password(cfg(), password)
@@ -429,32 +482,39 @@ def accounts_bind():
     registry = current_app.extensions["mt5_registry"]
     try:
         term = registry.provision_terminal(conn, g.customer_id)
+    except TerminalCapacityError as e:
+        abort(403, description=str(e))
     except TerminalError as e:
         abort(409, description=str(e))
     now = _now_iso()
     try:
-        conn.execute(
-            """INSERT INTO mt5_accounts (customer_id, login, server,
-                 first_sync_at, last_sync_at) VALUES (?,?,?,?,?)""",
-            (g.customer_id, login_val, server, now, None))
-        acc_id = int(conn.execute(
-            "SELECT id FROM mt5_accounts WHERE customer_id=?",
-            (g.customer_id,)).fetchone()["id"])
+        if reactivate:
+            acc_id = int(mine["id"])
+            conn.execute("DELETE FROM mt5_credentials WHERE account_id=?",
+                         (acc_id,))
+        else:
+            conn.execute(
+                """INSERT INTO mt5_accounts (customer_id, login, server,
+                     first_sync_at, last_sync_at) VALUES (?,?,?,?,?)""",
+                (g.customer_id, login_val, server, now, None))
+            acc_id = int(conn.execute(
+                "SELECT id FROM mt5_accounts WHERE customer_id=?",
+                (g.customer_id,)).fetchone()["id"])
         conn.execute(
             "INSERT INTO mt5_credentials (account_id, enc_password,"
             " key_version) VALUES (?,?,?)", (acc_id, enc, key_version))
+        conn.execute("UPDATE mt5_accounts SET state='active', unbound_at=NULL"
+                     " WHERE id=?", (acc_id,))
         conn.commit()
     except dbmod.INTEGRITY_ERRORS as e:
-        # balapan bind login/server sama antar customer (UNIQUE) —
-        # rollback melepas lock terminal juga; respons tetap 409.
         conn.rollback()
-        log.warning("bind bentrok (UNIQUE) customer=%s login=%s: %s",
-                    g.customer_id, login_val, e)
+        log.warning("bind bentrok (UNIQUE) customer=%s: %s",
+                    g.customer_id, type(e).__name__)
         abort(409, description="Akun MT5 itu sudah ter-bind ke customer "
                                "lain (bentrok)")
     auditmod.audit(conn, "bind", customer_id=g.customer_id, user_id=g.user_id,
                    entity=f"mt5_account:{acc_id}",
-                   detail={"server": server, "rpyc_port": term["rpyc_port"]})
+                   detail={"server": server, "reactivate": reactivate})
 
     # sync awal di background — bind tidak diblokir riwayat 90 hari.
     # Dimatikan bila provider di-inject (konteks test) agar deterministik.
@@ -474,27 +534,41 @@ def accounts_bind():
     acc = conn.execute("SELECT * FROM mt5_accounts WHERE id=?",
                        (acc_id,)).fetchone()
     out = dict(acc)
-    out["terminal"] = term
-    return jsonify(out), 201
+    # Remediasi R1: tidak mengekspos port RPyC / path Wine / unit systemd.
+    out["terminal"] = {"status": term["status"]}
+    return jsonify(out), 201 if not reactivate else 200
 
 
 @api_bp.post("/accounts/unbind")
 @require_customer
 def accounts_unbind():
-    """Lepas akun: hapus akun+data (CASCADE), evict runtime & terminal."""
+    """Lepas akun MT5 — keputusan produk #2 & #4.
+
+    - Riwayat jurnal (deal/order/trade) DIPERTAHANKAN: baris akun tidak
+      dihapus, hanya state='unbound' + unbound_at.
+    - Kredensial MT5 terenkripsi DIHAPUS (tidak ada secret tersimpan
+      untuk akun yang tidak aktif); runtime/provider di-evict; scheduler
+      tidak lagi menyinkronkan akun ini.
+    - SEMUA token sesi customer dicabut (termasuk token request ini).
+    - Baris terminal dipertahankan (port tetap milik customer ini; tidak
+      dialokasikan ke customer lain selama terminalnya mungkin hidup).
+    """
     import audit as auditmod
+    import auth as authmod
     conn = get_db()
     acc = _own_account(conn)
     acc_id = int(acc["id"])
     registry = current_app.extensions["mt5_registry"]
     registry.evict(acc_id)          # terminal lain TIDAK terpengaruh
-    conn.execute("DELETE FROM mt5_terminals WHERE customer_id=?",
-                 (g.customer_id,))
-    conn.execute("DELETE FROM mt5_accounts WHERE id=?", (acc_id,))
+    conn.execute("DELETE FROM mt5_credentials WHERE account_id=?", (acc_id,))
+    conn.execute("UPDATE mt5_accounts SET state='unbound', unbound_at=?"
+                 " WHERE id=?", (_now_iso(), acc_id))
     conn.commit()
     auditmod.audit(conn, "unbind", customer_id=g.customer_id,
                    user_id=g.user_id, entity=f"mt5_account:{acc_id}")
-    return jsonify({"ok": True, "removed_account_id": acc_id})
+    authmod.revoke_all_for_customer(conn, g.customer_id)
+    return jsonify({"ok": True, "unbound_account_id": acc_id,
+                    "history_retained": True, "sessions_revoked": True})
 
 
 # ------------------------------------------------- self-link akun MT5 (D1/D2)
@@ -1098,12 +1172,11 @@ def mt5_status():
         status["account_id"] = int(acc["id"])
     if term is not None:
         # additive (kompatibel): info terminal milik customer ini saja
-        status["terminal"] = {
-            "rpyc_port": term["rpyc_port"],
-            "service_name": term["service_name"],
-            "status": term["status"],
-        }
-    if c.mt5_enabled and acc is not None:
+        # Remediasi R1: hanya status — port RPyC/unit systemd internal.
+        status["terminal"] = {"status": term["status"]}
+    if acc is not None and acc["state"] != "active":
+        status["reason"] = f"akun_{acc['state']}"
+    if c.mt5_enabled and acc is not None and acc["state"] == "active":
         try:
             registry = current_app.extensions["mt5_registry"]
             rt = registry.runtime_for(conn, int(acc["id"]))
@@ -1169,6 +1242,9 @@ def mt5_sync():
         days = _parse_int("days", body.get("days"), 1, 3650)
     conn = get_db()
     acc = _own_account(conn)
+    if acc["state"] != "active":
+        abort(409, description="Akun MT5 tidak aktif (unbind / kredensial "
+                               "ditolak broker) — hubungkan ulang dulu")
     svc = current_app.extensions["mt5_sync"]
     try:
         summary = svc.sync_account(int(acc["id"]), mode=mode, full=full,
@@ -1347,8 +1423,8 @@ def admin_list_customers():
     rows = [dict(r) for r in get_db().execute(
         """SELECT c.id, c.code, c.display_name, c.status, c.created_at,
                   u.email,
-                  (SELECT login FROM mt5_accounts a WHERE a.customer_id=c.id)
-                    AS bound_login
+                  (SELECT login FROM mt5_accounts a WHERE a.customer_id=c.id
+                     AND a.state='active') AS bound_login
            FROM customers c LEFT JOIN users u ON u.customer_id=c.id
            ORDER BY c.id""")]
     return jsonify({"items": rows})
@@ -1373,6 +1449,29 @@ def admin_create_customer():
                    customer_id=created["customer_id"],
                    detail={"code": created["code"]})
     return jsonify(created), 201
+
+
+@api_bp.post("/admin/customers/<int:customer_id>/revoke-sessions")
+def admin_revoke_sessions(customer_id: int):
+    """Pencabutan akses oleh admin (Tahap 2): cabut SEMUA sesi customer.
+
+    Riwayat jurnal & akun tidak disentuh. Audit tidak menyimpan token.
+    """
+    if not _admin_token_ok():
+        abort(401, description="Token admin tidak valid")
+    import audit as auditmod
+    import auth as authmod
+    conn = get_db()
+    if conn.execute("SELECT 1 FROM customers WHERE id=?",
+                    (customer_id,)).fetchone() is None:
+        abort(404, description="Customer tidak ditemukan")
+    n = conn.execute("SELECT COUNT(*) AS n FROM auth_tokens WHERE"
+                     " customer_id=? AND revoked_at IS NULL",
+                     (customer_id,)).fetchone()["n"]
+    authmod.revoke_all_for_customer(conn, customer_id)
+    auditmod.audit(conn, "admin_revoke_sessions", customer_id=customer_id,
+                   detail={"revoked": int(n)})
+    return jsonify({"ok": True, "revoked": int(n)})
 
 
 # ------------------------------------------------------------- error json

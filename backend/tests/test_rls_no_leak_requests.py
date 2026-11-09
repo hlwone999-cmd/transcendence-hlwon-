@@ -62,6 +62,8 @@ def pg_cfg(pg_server, tmp_path):
     admin.cursor().execute(f'CREATE DATABASE "{name}"')
     admin.close()
     cfg = Config()
+    # registrasi portal diaktifkan eksplisit (default produksi juga aktif)
+    cfg.public_register_enabled = True
     cfg.db_url = pg_server.get_uri().replace("/postgres?", f"/{name}?")
     cfg.db_path = str(tmp_path / "unused.db")
     cfg.api_token = "TESTTOKEN"

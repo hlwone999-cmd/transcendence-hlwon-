@@ -35,7 +35,8 @@ import time as _time
 from datetime import datetime, timedelta, timezone
 
 import db as dbmod
-from mt5client.provider import MT5ConnectionError, MT5Error, utcnow_iso
+from mt5client.provider import (MT5ConnectionError, MT5Error,
+                                looks_like_broker_auth_error, utcnow_iso)
 from services.reconstruct import TRADING_DEAL_TYPES, reconstruct_trades
 
 log = logging.getLogger(__name__)
@@ -52,6 +53,33 @@ ORDER_TYPE_NAMES = {0: "buy", 1: "sell", 2: "buy_limit", 3: "sell_limit",
                     7: "sell_stop_limit", 8: "close_by"}
 ORDER_STATE_NAMES = {0: "started", 1: "placed", 2: "canceled", 3: "partial",
                      4: "filled", 5: "rejected", 6: "expired"}
+
+
+class InvestorOnlyViolation(MT5Error):
+    """Sesi MT5 bukan sesi investor read-only — sync ditolak."""
+
+
+def enforce_investor_session(config, acc) -> None:
+    """Remediasi T5 (defense-in-depth): tolak sync akun customer bila
+    sesi terminal BUKAN sesi investor read-only.
+
+    Sesi investor MetaTrader5 selalu account_info().trade_allowed ==
+    False. Fail-closed: account_info kosong, bukan dict, atau tanpa
+    field trade_allowed juga ditolak — kredensial MASTER yang lolos
+    lewat jalur mana pun (mis. /accounts/bind lama, migrasi data) tidak
+    pernah dipakai untuk sinkronisasi. Dapat dimatikan HANYA lewat
+    MT5_ENFORCE_INVESTOR_READONLY=0 (tidak disarankan).
+    """
+    if not getattr(config, "mt5_enforce_investor_readonly", True):
+        return
+    if not isinstance(acc, dict) or "trade_allowed" not in acc:
+        raise InvestorOnlyViolation(
+            "account_info tidak memuat trade_allowed — sesi investor "
+            "tidak bisa dibuktikan, sync ditolak")
+    if acc.get("trade_allowed") is not False:
+        raise InvestorOnlyViolation(
+            "sesi MT5 memiliki hak trade (bukan password investor) — "
+            "sync ditolak; ganti kredensial dengan password INVESTOR")
 
 
 def _iso_epoch(sec) -> str | None:
@@ -136,6 +164,12 @@ class SyncService:
         if self._registry is None:
             raise RuntimeError("sync_account butuh TerminalRegistry")
         conn = conn or dbmod.get_db(self._cfg)
+        state_of = getattr(self._registry, "account_state", None)
+        st = state_of(conn, account_id) if state_of else None
+        # akun unbind / kredensial ditolak broker: TIDAK disinkronkan
+        # (tanpa kredensial tersimpan; riwayat tetap utuh)
+        if st is not None and st != "active":
+            raise MT5Error(f"akun {account_id} tidak aktif — sync dilewati")
         rt = self._registry.runtime_for(conn, account_id)
         # AUDIT ROUND-4 #1: lock DULU, scope RLS kemudian. Urutan lama
         # (set_customer_context -> lock) bocor: bila lock gagal,
@@ -213,6 +247,13 @@ class SyncService:
         except SyncLockBusy:
             raise
         except Exception as e:  # noqa: BLE001 — sync tidak boleh crash-kan backend
+            if (account_id is not None and isinstance(e, MT5ConnectionError)
+                    and looks_like_broker_auth_error(str(e))):
+                try:
+                    self._handle_broker_rejection(conn, account_id)
+                except Exception:  # noqa: BLE001
+                    log.exception("gagal menandai kredensial ditolak "
+                                  "(akun %s)", account_id)
             msg = f"{type(e).__name__}: {e}"
             # JANGAN pernah masukkan nilai env/argumen (bisa mengandung password)
             summary["status"] = "error"
@@ -230,6 +271,33 @@ class SyncService:
                 except Exception:  # pragma: no cover
                     pass
 
+    def _handle_broker_rejection(self, conn, account_id: int) -> None:
+        """Keputusan produk #2 (Tahap 2): broker MENOLAK kredensial yang
+        sebelumnya valid -> akun 'credentials_rejected', kredensial
+        tersimpan dihapus, SEMUA sesi customer dicabut, audit tanpa
+        secret. Riwayat jurnal tidak disentuh. Customer menghubungkan
+        ulang dengan password investor baru (diverifikasi live)."""
+        import audit as auditmod
+        import auth as authmod
+        row = conn.execute("SELECT customer_id, state FROM mt5_accounts"
+                           " WHERE id=?", (account_id,)).fetchone()
+        if row is None or row["state"] != "active":
+            return
+        cid = int(row["customer_id"])
+        conn.rollback()
+        dbmod.set_customer_context(conn, cid)
+        conn.execute("UPDATE mt5_accounts SET state='credentials_rejected'"
+                     " WHERE id=? AND state='active'", (account_id,))
+        conn.execute("DELETE FROM mt5_credentials WHERE account_id=?",
+                     (account_id,))
+        conn.commit()
+        authmod.revoke_all_for_customer(conn, cid)
+        auditmod.audit(conn, "broker_menolak_kredensial", customer_id=cid,
+                       entity=f"mt5_account:{account_id}",
+                       detail={"sessions_revoked": True})
+        if self._registry is not None:
+            self._registry.evict(account_id)
+
     # -------------------------------------------------------------- internal
     def _do_sync(self, conn, provider, mode, full: bool, days: int | None,
                  account_id: int | None = None) -> dict:
@@ -237,6 +305,8 @@ class SyncService:
         now = datetime.now(timezone.utc)
 
         acc = provider.account_info()
+        if account_id is not None:
+            enforce_investor_session(self._cfg, acc)
         customer_id = None
         if account_id is not None:
             brow = conn.execute(

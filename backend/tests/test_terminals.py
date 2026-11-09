@@ -41,12 +41,21 @@ def test_empat_customer_empat_terminal(make_client):
 def test_terminal_kelima_ditolak(make_client):
     c = make_client()
     _four_customers_bound(c)
-    # customer ke-5 ditolak pada register (kapasitas MVP 4)
-    r = c.post("/api/v1/auth/register",
-               json={"email": "c5@test.id", "password": "rahasia123"})
-    assert r.status_code == 403
-    # dan bila register lolos (mis. customer lama dinonaktifkan),
-    # bind tanpa slot terminal tetap ditolak 409
+    # keputusan produk #1: registrasi ke-5 BOLEH (tidak memakai slot),
+    # tetapi bind akun MT5 ke-5 ditolak 403 — 4 slot MT5 sudah penuh
+    h5ok = register_and_login(c, email="c5@test.id")
+    r = c.post("/api/v1/accounts/bind", headers=h5ok,
+               json={"login": 55555555, "server": "Lain", "password": "x" * 8})
+    assert r.status_code == 403, r.get_json()
+    assert "slot MT5" in r.get_json()["error"]["message"]
+    import db as dbmod
+    with c.application.app_context():
+        conn = dbmod.get_db(c.application.config["APP_CFG"])
+        assert conn.execute("SELECT COUNT(*) AS n FROM mt5_terminals"
+                            ).fetchone()["n"] == 4
+        assert conn.execute("SELECT COUNT(*) AS n FROM mt5_accounts WHERE"
+                            " login=55555555").fetchone()["n"] == 0
+    # bind tanpa sesi valid tetap ditolak
     h5 = {"Authorization": "Bearer bootstrap-dummy"}  # bukan sesi valid
     r = c.post("/api/v1/accounts/bind", headers=h5,
                json={"login": 55555555, "server": "Lain", "password": "x" * 8})

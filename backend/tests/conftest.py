@@ -22,20 +22,17 @@ from services.sync import SyncService  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _reset_rate_limiting():
-    """Reset limiter in-memory antar test (limiter hidup lintas thread)."""
-    import auth as authmod
-    authmod.limiter._hits.clear()
-    for lo in authmod._lockout_cache.values():
-        lo._fails.clear()
+    """Rate limiter & lockout kini PERSISTEN di database (auth_throttle /
+    auth_lockouts) — tiap test memakai DB segar sehingga otomatis
+    terisolasi; tidak ada state in-memory yang perlu direset."""
     yield
-    authmod.limiter._hits.clear()
-    for lo in authmod._lockout_cache.values():
-        lo._fails.clear()
 
 
 @pytest.fixture()
 def cfg(tmp_path):
     c = Config()
+    # registrasi portal diaktifkan eksplisit (default produksi juga aktif)
+    c.public_register_enabled = True
     c.db_path = str(tmp_path / "journal.db")
     c.api_token = "TESTTOKEN"          # hanya dipakai test endpoint /admin
     c.mt5_enabled = False
