@@ -99,6 +99,14 @@ class Config:
     # saat itu provisioning customer hanya via /auth/register (admin/API).
     # Kapasitas tetap dibatasi max_customers (default 4 customer aktif).
     mt5_self_link_enabled: bool = True
+    # Remediasi T3 (penyalahgunaan kapasitas): akun demo gratis dapat
+    # menduduki slot secara permanen. Self-link akun BARU hanya untuk
+    # akun REAL (account_info().trade_mode == ACCOUNT_TRADE_MODE_REAL),
+    # fail-closed bila trade_mode tidak tersedia. Opsional: allowlist
+    # nama server (pola fnmatch, case-insensitive), mis.
+    # MT5_SELF_LINK_SERVER_ALLOWLIST="Exness-MT5Real*".
+    mt5_self_link_require_real: bool = True
+    mt5_self_link_server_allowlist: tuple = ()
 
     # --- verifikasi live kredensial (hardening post-redesign) ----------
     # POST /mt5/connect TIDAK menyatakan akun TERHUBUNG sebelum kredensial
@@ -107,6 +115,23 @@ class Config:
     # verifikasi (retry sampai deadline; terminal butuh waktu start di
     # mode "real"). WAJIB lebih kecil dari timeout HTTP klien Flutter (25s).
     mt5_verify_timeout_seconds: float = 12.0
+    # --- auto-provisioning terminal (keputusan produk #3, Tahap 3) ---
+    # Batas waktu TOTAL job aktivasi (install+start+health+verifikasi).
+    mt5_provision_timeout_seconds: float = 120.0
+    # Request /mt5/connect menunggu job selesai maks N detik; bila belum,
+    # respons 202 + job_id/job_secret untuk polling /mt5/connect/status.
+    # WAJIB < timeout HTTP klien Flutter (25 s).
+    mt5_connect_sync_wait_seconds: float = 10.0
+    # Helper privileged (mode real) — dipanggil `sudo -n <helper> ...`.
+    provisioner_helper: str = "/usr/local/sbin/transcendence-mt5-provision"
+    provisioner_sudo: str = "/usr/bin/sudo"
+    provisioner_timeout_seconds: float = 60.0
+    # Tahap 4: secret HMAC token layanan RPC read-only (MT5_PROVIDER=mt5ro).
+    # SECRET — hanya di .env (0600) & konfigurasi helper root-only.
+    mt5_rpc_secret: str = field(default="", repr=False)
+    # Mode RPC terminal BARU: 'classic' (mt5server RPyC, kompatibilitas)
+    # atau 'ro' (layanan read-only bertoken). Terminal lama tidak berubah.
+    mt5_rpc_mode_default: str = "classic"
     # Deteksi password MASTER: MetaTrader5 menerima password master ATAU
     # investor di initialize() tanpa parameter pembeda. Sesi investor
     # read-only selalu melaporkan account_info().trade_allowed == False;
@@ -198,8 +223,28 @@ def load_config(env_file: str | None = None) -> Config:
                 "TRUSTED_PROXIES", "127.0.0.1,::1").split(",") if p.strip()),
         client_ip_header=os.getenv("CLIENT_IP_HEADER", "X-Real-IP").strip(),
         mt5_self_link_enabled=_bool(os.getenv("MT5_SELF_LINK_ENABLED", "1")),
+        mt5_self_link_require_real=_bool(
+            os.getenv("MT5_SELF_LINK_REQUIRE_REAL", "1")),
+        mt5_self_link_server_allowlist=tuple(
+            p.strip() for p in os.getenv(
+                "MT5_SELF_LINK_SERVER_ALLOWLIST", "").split(",")
+            if p.strip()),
         mt5_verify_timeout_seconds=max(
             1.0, float(os.getenv("MT5_VERIFY_TIMEOUT_SECONDS", "12"))),
+        mt5_provision_timeout_seconds=max(
+            10.0, float(os.getenv("MT5_PROVISION_TIMEOUT_SECONDS", "120"))),
+        mt5_connect_sync_wait_seconds=min(20.0, max(
+            0.0, float(os.getenv("MT5_CONNECT_SYNC_WAIT_SECONDS", "10")))),
+        provisioner_helper=os.getenv(
+            "PROVISIONER_HELPER",
+            "/usr/local/sbin/transcendence-mt5-provision").strip(),
+        provisioner_sudo=os.getenv("PROVISIONER_SUDO", "/usr/bin/sudo").strip(),
+        provisioner_timeout_seconds=max(5.0, float(os.getenv(
+            "PROVISIONER_TIMEOUT_SECONDS", "60"))),
+        mt5_rpc_secret=os.getenv("MT5_RPC_SECRET", ""),
+        mt5_rpc_mode_default=(
+            "ro" if os.getenv("MT5_RPC_MODE_DEFAULT", "classic").strip()
+            .lower() == "ro" else "classic"),
         mt5_enforce_investor_readonly=_bool(
             os.getenv("MT5_ENFORCE_INVESTOR_READONLY", "1")),
         cred_key=os.getenv("MT5_CRED_KEY", "").strip(),

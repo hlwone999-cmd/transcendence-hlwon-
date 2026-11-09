@@ -400,6 +400,42 @@ void main() {
       expect(passCtrl.text, isEmpty);
     });
 
+    testWidgets('W11: auto-provisioning 202 lalu job GAGAL -> tidak '
+        'TERHUBUNG, token tidak tersimpan, password dibersihkan',
+        (tester) async {
+      final paths = <String>[];
+      final auth = Mt5AuthApi(
+        baseUrl: 'https://srv.test',
+        client: MockClient((req) async {
+          paths.add(req.url.path);
+          if (req.url.path.endsWith('/mt5/connect')) {
+            return _json({'ok': true, 'state': 'provisioning',
+                          'job_id': 'J', 'job_secret': 'S',
+                          'connection_state': 'provisioning',
+                          'live_verified': false}, 202);
+          }
+          return _json({'error': {'code': 503, 'message':
+              'Verifikasi ke server broker tidak berhasil dalam batas '
+              'waktu. Akun BELUM diaktifkan.'}}, 503);
+        }),
+      )..pollDelay = (_) async {};
+      await _pumpForm(tester, api: mockDataApi(), authApi: auth);
+      await _isiForm(tester);
+      await tapHubungkan(tester);
+      await tester.pumpAndSettle();
+      expect(paths.first, endsWith('/api/v1/mt5/connect'));
+      expect(paths.last, endsWith('/api/v1/mt5/connect/status'));
+      expect(await _storedToken(), isNull);
+      expect(find.text('TERHUBUNG'), findsNothing);
+      expect(find.textContaining('BELUM diaktifkan'), findsOneWidget);
+      expect(hubungkanBtn(), findsOneWidget);
+      final nFields = tester.widgetList<TextField>(
+          find.byType(TextField)).length;
+      final passCtrl = tester.widget<TextField>(
+          find.byType(TextField).at(nFields - 1)).controller!;
+      expect(passCtrl.text, isEmpty);
+    });
+
     testWidgets('W9: verifikasi live — terminal_pending menampilkan '
         'MENYIAPKAN TERMINAL, TERHUBUNG hanya setelah probe live backend '
         'sukses', (tester) async {

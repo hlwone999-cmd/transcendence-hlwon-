@@ -105,3 +105,19 @@ def bind_account(client, headers, login=12345678, server="Exness-MT5Real",
                           "password": password})
     assert r.status_code == 201, r.get_json()
     return r.get_json()
+
+
+def investor_dataset(login, server, trade_mode=2):
+    """Dataset mock yang menyajikan akun (login, server) YANG DIMINTA
+    sebagai sesi INVESTOR (trade_allowed=False) akun REAL (trade_mode=2).
+
+    Verifikasi live fail-closed (remediasi S1) mencocokkan login & server
+    hasil account_info() dengan akun yang di-bind — broker tiruan harus
+    menyajikan akun yang sama seperti broker sungguhan.
+    """
+    ds = scenario_dataset()
+    ds["account"] = ds["account"]._replace(
+        login=int(login), server=server, trade_allowed=False,
+        trade_mode=trade_mode)
+    return ds
+

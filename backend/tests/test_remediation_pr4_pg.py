@@ -142,12 +142,14 @@ def test_migrasi_tertunda_dengan_role_app_gagal_jelas(dbs):
     owner_uri, app_uri = dbs
     owner = dbmod.connect_postgres(owner_uri)
     owner.execute("DELETE FROM schema_migrations WHERE version=3")
+    owner.execute("DELETE FROM schema_migrations WHERE version>3")
     owner.commit()
     owner.close()
     conn = dbmod.connect_postgres(app_uri)
     with pytest.raises(dbmod.MigrationPrivilegeError) as ei:
         dbmod.migrate(conn)
-    assert "DSN OWNER" in str(ei.value) and "[3]" in str(ei.value)
+    # semua migrasi tertunda tercantum TEPAT (PR #4: "[3]")
+    assert "DSN OWNER" in str(ei.value) and "[3, 4, 5]" in str(ei.value)
     conn.close()
 
 

@@ -605,21 +605,36 @@ def test_t5_sync_sesi_investor_tetap_berjalan():
 
 
 # =================================================== S5: port terminal
-def test_s5_unbind_tidak_membebaskan_port_ke_customer_lain():
+def test_s5_unbind_menghentikan_dan_menghapus_terminal_dgn_bukti_kepemilikan():
+    """PR #5 (auto-provisioning): unbind MENGHENTIKAN & MENGHAPUS terminal
+    lewat provisioner DENGAN bukti kepemilikan (provision_id) sebelum
+    slot/port dibebaskan — port tidak pernah berpindah ke customer lain
+    selama terminal lama mungkin masih hidup. Tanpa bukti kepemilikan
+    terminal TIDAK dihapus (slot tetap terpakai)."""
     cfg = _cfg()
     c = _client(cfg)
     hA = register_and_login(c, "pa@t.id")
     bind_account(c, hA, login=51515151)
     conn = dbmod.get_db(cfg)
-    q = ("SELECT t.rpyc_port FROM mt5_terminals t JOIN users u"
-         " ON u.customer_id=t.customer_id WHERE u.email=?")
-    port_a = int(conn.execute(q, ("pa@t.id",)).fetchone()["rpyc_port"])
-    assert c.post("/api/v1/accounts/unbind", headers=hA).status_code == 200
-    assert _n(cfg, "SELECT COUNT(*) AS n FROM mt5_terminals") == 1
+    trow = conn.execute("SELECT terminal_dir, rpyc_port FROM mt5_terminals"
+                        ).fetchone()
+    base = os.path.dirname(trow["terminal_dir"])
+    assert os.path.isdir(base)
+    r = c.post("/api/v1/accounts/unbind", headers=hA)
+    assert r.get_json()["terminal_released"] is True
+    prov = c.application.extensions["mt5_provisioner"]
+    assert ("remove", os.path.basename(base)) in prov.calls
+    assert _n(cfg, "SELECT COUNT(*) AS n FROM mt5_terminals") == 0
+    assert not os.path.isdir(base)
+    # tanpa bukti kepemilikan: TIDAK dihapus, slot tetap terpakai
     hB = register_and_login(c, "pb@t.id")
     bind_account(c, hB, login=52525252)
-    assert int(conn.execute(q, ("pb@t.id",)).fetchone()["rpyc_port"]) \
-        != port_a
+    conn.execute("UPDATE mt5_terminals SET provision_id=NULL")
+    conn.commit()
+    r = c.post("/api/v1/accounts/unbind", headers=hB)
+    assert r.get_json()["terminal_released"] is False
+    row = conn.execute("SELECT lifecycle FROM mt5_terminals").fetchone()
+    assert row["lifecycle"] == "failed"
 
 
 # ================================================= R1: metadata infra

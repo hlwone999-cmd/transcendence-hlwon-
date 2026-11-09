@@ -159,6 +159,10 @@ class TerminalError(Exception):
     pass
 
 
+class _SkipFiles(Exception):
+    """Internal: mode real — berkas terminal ditulis helper, bukan API."""
+
+
 class TerminalCapacityError(TerminalError):
     """Semua slot MT5 (max_customers terminal) sudah terpakai."""
 
@@ -210,6 +214,31 @@ def probe_rpyc_session(port: int, host: str = RPYC_HOST,
         return True
     except Exception:  # noqa: BLE001 — probe tak boleh meledak
         return False
+
+
+def probe_ro_session(port: int, token: str, timeout: float = 3.0) -> bool:
+    """Handshake NYATA ke layanan RPC read-only (token + satu round-trip).
+
+    Mode 'ro' tidak menerima handshake RPyC tanpa token — probe classic
+    (probe_rpyc_session) selalu gagal di sana, sehingga health check mode
+    'ro' WAJIB memakai probe ini.
+    """
+    try:
+        from mt5client.ro_service import client_connect
+        conn = client_connect(int(port), token, timeout=timeout)
+        try:
+            _ = conn.root.get_service_name()
+        finally:
+            conn.close()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def terminal_token(cfg, code: str, port: int, provision_id) -> str:
+    from mt5client.ro_provider import derive_token
+    return derive_token(getattr(cfg, "mt5_rpc_secret", ""), code, int(port),
+                        provision_id)
 
 
 class AccountRuntime:
@@ -303,9 +332,26 @@ class TerminalRegistry:
                         raise TerminalError(
                             "Tidak ada port RPyC bebas di jendela alokasi")
 
+                    # Tahap 3B: di mode "real" API TIDAK menulis unit
+                    # systemd/skrip — itu tugas helper privileged
+                    # (provisioner/mt5_provision_helper.py) dari template
+                    # miliknya sendiri. Mode "mock" (dev/test) tetap
+                    # menulis berkas contoh di direktori lokal.
+                    import uuid
+                    provision_id = uuid.uuid4().hex
+                    rpc_mode = "ro" if getattr(
+                        cfg, "mt5_rpc_mode_default", "classic") == "ro" \
+                        else "classic"
                     try:
+                        if cfg.terminal_provision_mode == "real":
+                            raise _SkipFiles()
                         for d in (wine_prefix, terminal_dir, data_dir):
                             d.mkdir(parents=True, exist_ok=True)
+                        # pembuat direktori menulis penanda kepemilikan
+                        # (paritas helper: penanda ditulis sebelum isi)
+                        marker = base / ".provision_id"
+                        if not marker.exists():
+                            marker.write_text(provision_id, encoding="utf-8")
                         unit_path = base / f"{service_name}.service"
                         unit_path.write_text(SYSTEMD_UNIT_TEMPLATE.format(
                             unit_path=unit_path, service_name=service_name,
@@ -324,6 +370,8 @@ class TerminalRegistry:
                             encoding="utf-8")
                         for sh in (run_sh, stop_sh):
                             sh.chmod(0o755)
+                    except _SkipFiles:
+                        pass
                     except OSError as e:
                         raise TerminalError(
                             f"Gagal menyiapkan direktori terminal {base}: "
@@ -334,11 +382,12 @@ class TerminalRegistry:
                     conn.execute(
                         """INSERT INTO mt5_terminals (customer_id, rpyc_port,
                              wine_prefix, terminal_dir, data_dir,
-                             service_name, status)
-                           VALUES (?,?,?,?,?,?,?)""",
+                             service_name, status, provision_id, lifecycle,
+                             rpc_mode)
+                           VALUES (?,?,?,?,?,?,?,?,'provisioning',?)""",
                         (customer_id, port, str(wine_prefix),
                          str(terminal_dir), str(data_dir), service_name,
-                         status))
+                         status, provision_id, rpc_mode))
                     log.info("terminal %s diprovisikan: port=%d mode=%s "
                              "(terminal64.exe + mt5server RPyC)",
                              service_name, port, cfg.terminal_provision_mode)
@@ -347,6 +396,8 @@ class TerminalRegistry:
                         (customer_id,)).fetchone()
                     return {"terminal_id": int(trow["id"]),
                             "created": True,
+                            "provision_id": provision_id,
+                            "rpc_mode": rpc_mode,
                             "rpyc_port": port, "rpyc_host": RPYC_HOST,
                             "service_name": service_name,
                             "wine_prefix": str(wine_prefix),
@@ -370,6 +421,9 @@ class TerminalRegistry:
         if own is None:
             return None
         return {"terminal_id": int(own["id"]), "created": False,
+                "provision_id": own["provision_id"],
+                "lifecycle": own["lifecycle"],
+                "rpc_mode": own["rpc_mode"],
                 "rpyc_port": int(own["rpyc_port"]), "rpyc_host": RPYC_HOST,
                 "service_name": own["service_name"],
                 "wine_prefix": own["wine_prefix"],
@@ -402,8 +456,18 @@ class TerminalRegistry:
         # Audit round-2 #1: TCP probe SAJA tidak cukup — bila rpyc
         # tersedia, lakukan handshake RPyC nyata sebelum menyebut
         # server RPyC hidup. None = rpyc tidak terpasang (tak terukur).
-        handshake = probe_rpyc_session(port, timeout=timeout) \
-            if reachable else False
+        if reachable and row["rpc_mode"] == "ro":
+            code = conn.execute("SELECT code FROM customers WHERE id=?",
+                                (customer_id,)).fetchone()["code"]
+            try:
+                tok = terminal_token(self._cfg, code, port,
+                                     row["provision_id"])
+                handshake = probe_ro_session(port, tok, timeout=timeout)
+            except Exception:  # noqa: BLE001
+                handshake = False
+        else:
+            handshake = probe_rpyc_session(port, timeout=timeout) \
+                if reachable else False
         detail: dict = {"customer_id": customer_id, "port": port,
                         "host": RPYC_HOST, "reachable": reachable,
                         "rpyc_handshake": handshake,
@@ -438,9 +502,11 @@ class TerminalRegistry:
         """Config provider per akun: host/port terminal + kredensial terdekripsi."""
         acc = conn.execute(
             """SELECT a.id, a.customer_id, a.login, a.server,
-                      t.rpyc_port, t.status AS term_status
+                      t.rpyc_port, t.status AS term_status,
+                      t.provision_id, t.rpc_mode, c.code
                FROM mt5_accounts a
                JOIN mt5_terminals t ON t.customer_id = a.customer_id
+               JOIN customers c ON c.id = a.customer_id
                WHERE a.id=?""", (account_id,)).fetchone()
         if acc is None:
             raise TerminalError(f"akun {account_id} tidak ditemukan")
@@ -472,13 +538,25 @@ class TerminalRegistry:
         finally:
             set_customer_context(conn, prev)
 
+        # Mode RPC PER TERMINAL (migrasi bertahap, docs/RPYC-SECURITY.md):
+        # 'ro' -> layanan read-only bertoken; 'classic' -> mt5server.
+        provider_name = "mt5ro" if acc["rpc_mode"] == "ro" else "mt5linux"
+        token = None
+        if provider_name == "mt5ro":
+            # Tahap 4: layanan RPC read-only bertoken (bukan RPyC classic)
+            from mt5client.ro_provider import derive_token
+            token = derive_token(getattr(self._cfg, "mt5_rpc_secret", ""),
+                                 acc["code"], int(acc["rpyc_port"]),
+                                 acc["provision_id"])
+
         class _AccCfg:  # namespace ringan — antarmuka sama dengan Config
             mt5_host = "127.0.0.1"
             mt5_port = int(acc["rpyc_port"])
             mt5_login = str(acc["login"])
             mt5_password = password          # SECRET — tidak di-log
             mt5_server = acc["server"]
-            mt5_provider = "mt5linux"
+            mt5_provider = "mt5ro" if provider_name == "mt5ro" else "mt5linux"
+            mt5_token = token                # SECRET — tidak di-log
 
         return _AccCfg()
 
@@ -486,6 +564,9 @@ class TerminalRegistry:
         acc_cfg = self._account_config(conn, account_id)
         if self._provider_builder is not None:
             return self._provider_builder(acc_cfg)
+        if acc_cfg.mt5_provider == "mt5ro":
+            from mt5client.ro_provider import MT5ReadOnlyServiceProvider
+            return MT5ReadOnlyServiceProvider(acc_cfg)
         from mt5client.mt5linux_provider import MT5LinuxProvider
         return MT5LinuxProvider(acc_cfg)
 

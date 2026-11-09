@@ -53,6 +53,23 @@ def create_app(config: Config | None = None,
                                 else None)
     app.extensions["mt5_registry"] = registry
 
+    # Keputusan produk #3: auto-provisioning terminal lewat helper
+    # privileged terbatas (mode real) / MockProvisioner (dev/test).
+    from services.provisioner import build_provisioner
+    from services.provisioning import ConnectCoordinator
+    provisioner = build_provisioner(config)
+    app.extensions["mt5_provisioner"] = provisioner
+    coordinator = ConnectCoordinator(app, config, registry, provisioner)
+    app.extensions["mt5_coordinator"] = coordinator
+    try:  # pemulihan job yang terputus (restart) & melewati deadline
+        with app.app_context():
+            n = coordinator.recover_expired(dbmod.get_db(config))
+            if n:
+                logging.getLogger(__name__).warning(
+                    "%d job provisioning terputus dipulihkan", n)
+    except Exception:  # noqa: BLE001 - startup tidak boleh gagal karenanya
+        logging.getLogger(__name__).exception("pemulihan job gagal")
+
     sync_service = SyncService(config, factory, registry=registry)
     app.extensions["mt5_sync"] = sync_service
 

@@ -87,7 +87,7 @@ def test_migrasi_pg_dari_db_kosong(pg_server):
     applied = dbmod.migrate(conn)
     # audit #2: 002_rls_roles.sql (role aplikasi non-owner + grant) ikut
     # diterapkan pada migrasi DB kosong.
-    assert applied == [1, 2, 3]
+    assert applied == [1, 2, 3, 4, 5]
     tables = {r["tablename"] for r in conn.execute(
         "SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     for t in WAJIB_TABLES:
@@ -163,8 +163,10 @@ def test_sync_idempoten_di_postgresql(pg_cfg):
 
 
 def test_bind_unbind_di_postgresql(pg_cfg):
-    datasets = {"11111111": {"account": None, "deals": [], "orders": [],
-                             "positions": [], "symbols": {}}}
+    from tests.conftest import investor_dataset
+    datasets = {"11111111": {
+        "account": investor_dataset(11111111, "Exness-MT5Real")["account"],
+        "deals": [], "orders": [], "positions": [], "symbols": {}}}
     c = _pg_client(pg_cfg, datasets)
     h = register_and_login(c, email="bu@test.id")
     r = c.post("/api/v1/accounts/bind", headers=h,

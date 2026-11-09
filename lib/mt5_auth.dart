@@ -238,9 +238,10 @@ class Mt5AuthApi {
   /// Token sesi hasil server disimpan aman dan di-return.
   ///
   /// Server menjawab:
-  ///  - 201 mode=self_link : akun baru (customer dibuat otomatis,
-  ///    dibatasi kapasitas max_customers + guard anti-balapan).
-  ///  - 200 mode=login     : akun sudah dikenal, sesi diterbitkan lagi.
+  ///  - 201 mode=self_link : akun baru (customer + terminal otomatis,
+  ///    dibatasi slot MT5 max_customers + guard anti-balapan).
+  ///  - 200 mode=login|reactivate : akun dikenal / diaktifkan kembali.
+  ///  - 202 state=...      : terminal masih disiapkan -> polling.
   ///  - 401/403/409/429    : Mt5ApiError dengan pesan seragam dari server.
   Future<Map<String, dynamic>> connectAccount(
       {required int login,
@@ -253,11 +254,53 @@ class Mt5AuthApi {
                 {'login': login, 'server': server, 'password': password})),
         clearSessionOn401: false); // 401 di sini = password salah, bukan
     // sesi basi — jangan bersihkan store (tak ada sesi lama yang sah).
-    final map = j as Map<String, dynamic>;
-    final token = map['token'] as String;
+    var res = j as Map<String, dynamic>;
+    // Auto-provisioning (keputusan produk #3): server dapat menjawab
+    // 202 + job_id/job_secret bila terminal MT5 masih disiapkan. Token
+    // HANYA diterbitkan setelah verifikasi live broker lolos — klien
+    // melakukan polling POST /mt5/connect/status sampai final. Status
+    // TIDAK PERNAH dianggap terhubung sebelum token + 'connected'.
+    if (res['token'] == null && res['job_id'] is String) {
+      final jobId = res['job_id'] as String;
+      final secret = (res['job_secret'] as String?) ?? '';
+      final started = DateTime.now();
+      var polls = 0;
+      while (res['token'] == null) {
+        polls++;
+        if (DateTime.now().difference(started) > pollBudget ||
+            polls > maxPolls) {
+          throw Mt5ApiError(Mt5ApiErrorKind.network,
+              'Penyiapan terminal MT5 belum selesai — coba hubungkan lagi '
+              'beberapa saat lagi.');
+        }
+        final ms = ((res['poll_after_ms'] as num?)?.toInt() ?? 1000)
+            .clamp(250, 5000);
+        await pollDelay(Duration(milliseconds: ms));
+        final jj = await _send(
+            () => _http.post(_uri('/mt5/connect/status'),
+                headers: _headers(),
+                body: jsonEncode({'job_id': jobId, 'job_secret': secret})),
+            clearSessionOn401: false);
+        res = jj as Map<String, dynamic>;
+      }
+    }
+    final token = res['token'];
+    if (token is! String || token.isEmpty) {
+      throw Mt5ApiError(Mt5ApiErrorKind.badResponse,
+          'Balasan server tidak berisi sesi');
+    }
     await store.saveToken(token);
-    return map;
+    return res;
   }
+
+  /// Penundaan antar-polling job aktivasi (dapat diganti di test).
+  Future<void> Function(Duration) pollDelay =
+      (d) => Future<void>.delayed(d);
+
+  /// Batas total menunggu job aktivasi (sinkron dgn
+  /// MT5_PROVISION_TIMEOUT_SECONDS server, default 120 s) + cadangan.
+  Duration pollBudget = const Duration(seconds: 150);
+  int maxPolls = 600;
 
   /// PUTUSKAN KONEKSI (D3) — POST /mt5/disconnect.
   ///

@@ -170,9 +170,13 @@ class FailureLockout:
                     and float(row["locked_until"]) > time.time())
 
     def record_failure(self, key: str, conn=None) -> None:
+        self.record_failure_hashed(_key_hash(key), conn=conn)
+
+    def record_failure_hashed(self, kh: str, conn=None) -> None:
+        """Seperti record_failure, untuk kunci yang SUDAH di-hash (dipakai
+        worker provisioning yang hanya menyimpan hash, tanpa IP mentah)."""
         c = _db(conn)
         now = time.time()
-        kh = _key_hash(key)
         row = c.execute(
             "INSERT INTO auth_lockouts (key_hash, failures, window_start,"
             " locked_until) VALUES (?,1,?,NULL)"
@@ -201,6 +205,18 @@ limiter = RateLimiter()
 
 def _lockout_for(config) -> FailureLockout:
     return FailureLockout(getattr(config, "max_failed_logins", 5),
+                          getattr(config, "lockout_seconds", 900))
+
+
+def _account_lockout_for(config) -> FailureLockout:
+    """Lockout per AKUN (lintas IP) dengan ambang lebih tinggi (S3).
+
+    Lockout utama /mt5/connect berkunci (akun, IP klien tepercaya) —
+    penyerang dari IP lain tidak bisa mengunci pemilik sah hanya dengan
+    beberapa percobaan. Lockout per akun ini membatasi brute force
+    TERDISTRIBUSI (banyak IP) dengan ambang 4x lipat. Persisten di DB.
+    """
+    return FailureLockout(4 * getattr(config, "max_failed_logins", 5),
                           getattr(config, "lockout_seconds", 900))
 
 

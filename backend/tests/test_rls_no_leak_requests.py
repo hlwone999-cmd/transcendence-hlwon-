@@ -84,9 +84,12 @@ def _client(cfg, datasets=None):
     from app import create_app
     from mt5client.mock import MockMT5Client
     datasets = datasets or {}
+    from tests.conftest import investor_dataset
     app = create_app(cfg, provider_factory=lambda acc_cfg=None:
                      MockMT5Client(
-                         datasets.get(str(acc_cfg.mt5_login))
+                         (datasets.get(str(acc_cfg.mt5_login)) or
+                          investor_dataset(acc_cfg.mt5_login,
+                                           acc_cfg.mt5_server))
                          if acc_cfg else None))
     app.config["TESTING"] = True
     return app.test_client()

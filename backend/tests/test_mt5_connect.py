@@ -53,7 +53,7 @@ def _acc(login, server, currency="USD"):
     # password master akan trade_allowed=True — diuji eksplisit lewat knob
     # master_mode pada _client (deteksi password master).
     return AccountInfo(
-        login=login, trade_mode=0, leverage=100, limit_orders=200,
+        login=login, trade_mode=2, leverage=100, limit_orders=200,
         margin_so_mode=0, trade_allowed=False, trade_expert=False,
         margin_mode=0, currency_digits=2, fifo_close=False,
         balance=1000.0, credit=0.0, profit=0.0, equity=1000.0,
@@ -121,6 +121,12 @@ def _client(datasets=None, max_customers=4, self_link=True, cfg=None,
         ds = None
         if datasets is not None and acc_cfg is not None:
             ds = datasets.get(str(acc_cfg.mt5_login))
+        if ds is None and acc_cfg is not None:
+            # broker tiruan menyajikan akun yang SAMA dengan yang diminta
+            # (verifikasi fail-closed mencocokkan login & server).
+            ds = {"account": _acc(int(acc_cfg.mt5_login),
+                                  acc_cfg.mt5_server),
+                  "deals": [], "orders": [], "positions": [], "symbols": {}}
         return MockMT5Client(
             ds,
             fail_connect=fail_connect,
@@ -198,8 +204,9 @@ def test_connect_password_salah_401_pesan_seragam_lalu_lockout():
     for i in range(5):
         r = _connect(c, password=f"salah-{i}")
         assert r.status_code == 401
-        # pesan seragam — tidak membocorkan detail internal
-        assert "Verifikasi gagal" in r.get_json()["error"]["message"]
+        # pesan seragam (remediasi S2) — identik dgn akun TIDAK terdaftar
+        from api.routes import GENERIC_VERIFY_FAIL
+        assert r.get_json()["error"]["message"] == GENERIC_VERIFY_FAIL
     # lockout aktif setelah batas kegagalan (cfg.max_failed_logins=5)
     r = _connect(c, password=PW_INVESTOR)  # password BENAR pun ditolak
     assert r.status_code == 429
@@ -313,10 +320,12 @@ def test_unbind_tidak_ada_di_jalur_disconnect():
     assert c.get("/api/v1/mt5/account", headers=h2).status_code == 200
     # unbind memang masih ada sebagai API (di luar UI) dan bekerja
     assert c.post("/api/v1/accounts/unbind", headers=h2).status_code == 200
-    # setelah unbind, connect dgn kredensial sama = link ulang akun,
-    # tetap pada customer yang SAMA (identitas tidak digandakan)
+    # setelah unbind, connect dgn kredensial sama = REAKTIVASI akun yang
+    # sama (keputusan produk #4: riwayat dipertahankan), tetap pada
+    # customer yang SAMA (identitas tidak digandakan)
     r = _connect(c)
-    assert r.status_code == 201, r.get_json()
+    assert r.status_code == 200, r.get_json()
+    assert r.get_json()["mode"] == "reactivate"
     tok3 = r.get_json()["token"]
     h3 = {"Authorization": f"Bearer {tok3}"}
     cid_after = c.get("/api/v1/auth/me",
@@ -412,7 +421,7 @@ def test_source_connect_tanpa_method_tulis_mt5():
     from pathlib import Path
     src = (Path(__file__).resolve().parent.parent / "api" /
            "routes.py").read_text(encoding="utf-8")
-    block = src[src.index("def mt5_connect"):src.index("def registry_provision")]
+    block = src[src.index("def mt5_connect"):src.index("def _server_allowed")]
     for forbidden in ("order_send", "order_check", "positions_close",
                       "positions_modify", "order_modify", "order_delete",
                       ".login("):
@@ -528,8 +537,12 @@ def test_connect_akun_baru_timeout_broker_resource_dibersihkan():
 def test_reconnect_password_cocok_tapi_broker_menolak_401_tanpa_token():
     """Requirement 5: koneksi ulang TIDAK cukup membandingkan password
     terenkripsi bila broker menolak (password diubah di broker) -> 401
-    dengan pesan jelas, TANPA token baru. Sesi lama yang masih sah tidak
-    dicabut oleh kegagalan connect."""
+    dengan pesan jelas, TANPA token baru.
+
+    Remediasi S4 (keputusan berubah dari versi awal): kredensial yang
+    ditolak broker berarti akses lama TIDAK lagi sah (mis. pemilik
+    mengganti password investor untuk memutus penonton) — SEMUA sesi
+    customer dicabut."""
     import tempfile
     db_path = f"{tempfile.mkdtemp(prefix='rec-')}/journal.db"
     key = Fernet.generate_key().decode("ascii")  # SATU kunci utk dua app
@@ -548,9 +561,9 @@ def test_reconnect_password_cocok_tapi_broker_menolak_401_tanpa_token():
     assert "tidak lagi diterima" in msg
     assert "sudah diubah" in msg
     assert PW_INVESTOR not in msg
-    # token lama tetap sah — connect gagal tidak mencabut sesi sah
+    # S4: token lama ikut dicabut — kredensial sudah tidak sah di broker
     h = {"Authorization": f"Bearer {b1['token']}"}
-    assert c2.get("/api/v1/auth/me", headers=h).status_code == 200
+    assert c2.get("/api/v1/auth/me", headers=h).status_code == 401
 
 
 def test_reconnect_terminal_mati_sesi_terbit_status_terminal_pending():
@@ -590,6 +603,9 @@ def test_provisioning_gagal_tidak_meninggalkan_customer_yatim():
     import tempfile
     db_path = f"{tempfile.mkdtemp(prefix='prov-')}/journal.db"
     cfg = _make_cfg(max_customers=2, db_path=db_path)
+    # setup: customer "hantu" dibuat lewat registrasi portal legacy yang
+    # diaktifkan EKSPLISIT untuk test ini (default produksi juga aktif)
+    cfg.public_register_enabled = True
     c1 = _client(cfg=cfg)
     assert _connect(c1, login=LOGIN_A, server=SERVER_A).status_code == 201
     conn = _db_conn(c1.application)
@@ -611,7 +627,9 @@ def test_provisioning_gagal_tidak_meninggalkan_customer_yatim():
                  (cid2,))
     conn.commit()
     r = _connect(c1, login=LOGIN_B, server=SERVER_B)
-    assert r.status_code == 409, r.get_json()
+    # slot MT5 (terminal) penuh -> 403 (keputusan produk: slot = terminal)
+    assert r.status_code == 403, r.get_json()
+    assert "slot MT5" in r.get_json()["error"]["message"]
     # customer percobaan dibuang — tidak ada yatim (tetap 2 baris: A + hantu)
     assert conn.execute(
         "SELECT COUNT(*) AS n FROM customers").fetchone()["n"] == 2
@@ -653,9 +671,13 @@ def test_source_live_verify_tanpa_method_tulis_mt5():
     from pathlib import Path
     src = (Path(__file__).resolve().parent.parent / "api" /
            "routes.py").read_text(encoding="utf-8")
-    block = src[src.index("def _live_verify_account"):
-                src.index("def _cleanup_failed_activation")]
-    for forbidden in ("order_send", "order_check", "positions_close",
-                      "positions_modify", "order_modify", "order_delete",
-                      ".login("):
-        assert forbidden not in block, forbidden
+    del src
+    # implementasi verifikasi & koordinator kini di services/*.py —
+    # SELURUH berkas dipindai (cakupan lebih luas dari blok lama)
+    base = Path(__file__).resolve().parent.parent / "services"
+    for name in ("verification.py", "provisioning.py", "provisioner.py"):
+        block = (base / name).read_text(encoding="utf-8")
+        for forbidden in ("order_send", "order_check", "positions_close",
+                          "positions_modify", "order_modify",
+                          "order_delete", ".login("):
+            assert forbidden not in block, (name, forbidden)
