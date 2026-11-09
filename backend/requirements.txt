@@ -5,10 +5,23 @@ flask>=3.0,<4
 waitress>=3.0,<4          # production WSGI (pengganti werkzeug dev server)
 python-dotenv>=1.0,<2     # baca file .env
 
+# --- runtime WAJIB (temuan review N1; sebelumnya hanya dipasang ad-hoc CI) ---
+# Fernet (MT5_CRED_KEY) — import TINGKAT ATAS security/crypto.py; tanpa ini
+# backend gagal boot saat deploy (pip install -r requirements.txt di VPS).
+cryptography>=41.0,<48
+# Driver PostgreSQL (db.PostgresConn). Varian BINARY: wheel siap pakai —
+# VPS tidak butuh gcc/libpq-dev, dan KONSISTEN dengan CI yang sudah
+# memakai psycopg2-binary (.github/workflows/backend-tests.yml).
+psycopg2-binary>=2.9,<3
+
 # Klien MT5 via RPyC ke mt5server.exe (Wine). Import bersifat LAZY:
 # backend tetap bisa jalan & test bisa lulus tanpa paket ini terpasang
 # (MT5_ENABLED=false atau pakai mock di test).
 mt5linux>=0.2.4
+# Klien RPyC dipakai LANGSUNG (ClassicClient — server tidak bisa memanggil
+# balik proses API; lihat mt5client/mt5linux_provider.py) + layanan RPC
+# read-only (mt5client/ro_service.py).
+rpyc>=5.3,<7
 
 # --- dev/test ---
 # pytest>=8.0  (install terpisah: pip install pytest)

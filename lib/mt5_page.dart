@@ -10,12 +10,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'engine.dart' show fmtLots, fmtMoney, one, two;
 import 'mt5_api.dart';
+import 'mt5_auth.dart';
 import 'mt5_filters.dart';
 import 'mt5_models.dart';
 import 'ui_kit.dart';
 
 const _kPrefUrl = 'mt5_base_url';
-const _kPrefToken = 'mt5_api_token';
 
 class Mt5JournalPage extends StatefulWidget {
   final Mt5Api? api; // injeksi untuk test
@@ -69,18 +69,51 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
   }
 
   Future<void> _boot() async {
+    // Token sesi multi-customer: secure storage dulu, fallback/migrasi
+    // dari SharedPreferences lama (brief §7/§9).
+    final tok = await SessionStore().readToken();
     final sp = await SharedPreferences.getInstance();
     if (!mounted) return;
     setState(() {
       _baseUrl = sp.getString(_kPrefUrl) ?? '';
-      _token = sp.getString(_kPrefToken) ?? '';
-      _api = widget.api ?? Mt5Api(baseUrl: _baseUrl, token: _token);
+      _token = tok ?? '';
+      // M-A: URL tersimpan lama bisa melanggar kebijakan M3 (mis. HTTP
+      // produksi dari konfigurasi versi sebelumnya) — jangan crash saat
+      // boot; perlakukan sebagai belum terkonfigurasi.
+      _api = widget.api ?? _buildApiSafe(_baseUrl, _token);
     });
     if (!(_api?.isConfigured ?? false)) {
       setState(() => _phase = _Phase.unconfigured);
       return;
     }
     await refreshAll();
+  }
+
+  /// M-A: konstruksi Mt5Api dengan gerbang kebijakan M3 (Mt5UrlPolicy).
+  /// URL tersimpan yang kini ilegal TIDAK membuat halaman crash — halaman
+  /// kembali ke status "belum terkonfigurasi" dan URL baru divalidasi
+  /// lewat dialog ATUR SERVER.
+  Mt5Api? _buildApiSafe(String base, String token) {
+    try {
+      return Mt5Api(baseUrl: base, token: token);
+    } on Mt5ApiError {
+      return null;
+    }
+  }
+
+  /// M-A: validasi URL jalur simpan manual memakai kebijakan M3 yang SAMA
+  /// dengan klien auth/data (Mt5UrlPolicy) — tidak ada jalur alternatif.
+  /// Null = valid. String kosong diterima (berarti menghapus konfigurasi
+  /// — perilaku lama dipertahankan).
+  String? _urlPolicyError(String rawUrl) {
+    final base = rawUrl.trim();
+    if (base.isEmpty) return null;
+    try {
+      Mt5UrlPolicy.validatedBase(base);
+      return null;
+    } on Mt5ApiError catch (e) {
+      return e.message;
+    }
   }
 
   /// Rentang aktif dari preset + zona waktu. Null hanya jika preset
@@ -263,6 +296,16 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
   Future<void> _openSettings() async {
     final urlC = TextEditingController(text: _baseUrl);
     final tokC = TextEditingController(text: _token);
+    // L2 (audit PR #4): snapshot isi awal field token manual. tokC hanya bisa
+    // berubah setelah titik ini bila user benar-benar mengetik — satu-satunya
+    // sinyal niat simpan token manual yang valid. Tanpa ini, blok persist di
+    // bawah menimpa token hasil login dengan snapshot basi.
+    final tokInitial = tokC.text.trim();
+    final emailC = TextEditingController();
+    final passC = TextEditingController();
+    // M-A: pesan galat validasi URL (kebijakan M3) untuk tombol SIMPAN —
+    // ditampilkan di dalam sheet supaya penolakan terlihat jelas.
+    final sheetUrlError = ValueNotifier<String?>(null);
     final ok = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
@@ -275,55 +318,151 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
             top: 16,
             bottom: MediaQuery.of(ctx).viewInsets.bottom + 24,
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Icon(Icons.dns, size: 17, color: p.gold),
-                  const SizedBox(width: 8),
-                  Text(
-                    'Server Jurnal MT5',
-                    style: txt(ctx, 15, w: FontWeight.w600),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 4),
-              Text(
-                'Alamat backend Flask di VPS (HTTPS) + API token. '
-                'Ambil token dari file .env backend (API_TOKEN).',
-                style: txt(ctx, 12, color: p.muted),
-              ),
-              const SizedBox(height: 14),
-              _textField(
-                ctx,
-                'URL server',
-                'https://jurnal.domain.com',
-                urlC,
-                false,
-              ),
-              const SizedBox(height: 10),
-              _textField(ctx, 'API token', 'xxxxxxxx...', tokC, true),
-              const SizedBox(height: 16),
-              GoldButton(
-                'SIMPAN',
-                icon: Icons.save_outlined,
-                onTap: () => Navigator.pop(ctx, true),
-              ),
-            ],
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.dns, size: 17, color: p.gold),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Server Jurnal MT5',
+                      style: txt(ctx, 15, w: FontWeight.w600),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Alamat backend Flask di VPS (HTTPS). Masuk pakai akun '
+                  'customer — token sesi disimpan di secure storage.',
+                  style: txt(ctx, 12, color: p.muted),
+                ),
+                const SizedBox(height: 14),
+                _textField(
+                  ctx,
+                  'URL server',
+                  'https://jurnal.domain.com',
+                  urlC,
+                  false,
+                ),
+                const SizedBox(height: 10),
+                _textField(ctx, 'Email customer', 'nama@email.com', emailC,
+                    false),
+                const SizedBox(height: 10),
+                _textField(ctx, 'Password', '********', passC, true),
+                const SizedBox(height: 12),
+                GoldButton(
+                  'MASUK',
+                  icon: Icons.login,
+                  onTap: () async {
+                    try {
+                      final base = urlC.text.trim();
+                      final auth = Mt5AuthApi(baseUrl: base);
+                      final tok = await auth.login(
+                        emailC.text.trim(),
+                        passC.text,
+                      );
+                      if (!ctx.mounted) return;
+                      Navigator.pop(ctx, true);
+                      if (!mounted) return;
+                      setState(() {
+                        _baseUrl = base;
+                        _token = tok;
+                        _api = widget.api ??
+                            Mt5Api(baseUrl: base, token: tok);
+                      });
+                      await refreshAll();
+                      return;
+                    } on Mt5ApiError catch (e) {
+                      _toast(e.friendly, err: true);
+                    } catch (_) {
+                      _toast('Login gagal — cek URL/email/password',
+                          err: true);
+                    }
+                  },
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  'TOKEN MANUAL (LANJUTAN) — token sesi dari server',
+                  style: labelSm(ctx, color: p.dim),
+                ),
+                const SizedBox(height: 8),
+                _textField(ctx, 'Token sesi', 'xxxxxxxx...', tokC, true),
+                const SizedBox(height: 16),
+                ValueListenableBuilder<String?>(
+                  valueListenable: sheetUrlError,
+                  builder: (ctx, err, _) => err == null
+                      ? const SizedBox.shrink()
+                      : Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(Icons.report, size: 15, color: p.redSolid),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Text(
+                                  err,
+                                  style: txt(ctx, 12, color: p.redSolid),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                ),
+                GoldButton(
+                  'SIMPAN',
+                  icon: Icons.save_outlined,
+                  // M-A: validasi M3 sebelum sheet ditutup — URL HTTP
+                  // non-loopback DITOLAK di sini; sheet tetap terbuka
+                  // dan pesan galat ditampilkan.
+                  onTap: () {
+                    final err = _urlPolicyError(urlC.text);
+                    sheetUrlError.value = err;
+                    if (err != null) return;
+                    Navigator.pop(ctx, true);
+                  },
+                ),
+              ],
+            ),
           ),
         );
       },
     );
     if (ok != true) return;
+    final newBase = urlC.text.trim();
+    // M-A: gerbang persist — validasi M3 yang sama dengan klien auth/data.
+    // Tidak ada jalur alternatif: URL ilegal TIDAK tersimpan sama sekali
+    // (URL maupun token tidak disentuh) dan user melihat pesan galat.
+    final urlErr = _urlPolicyError(newBase);
+    if (urlErr != null) {
+      _toast(urlErr, err: true);
+      return;
+    }
     final sp = await SharedPreferences.getInstance();
-    await sp.setString(_kPrefUrl, urlC.text.trim());
-    await sp.setString(_kPrefToken, tokC.text.trim());
+    await sp.setString(_kPrefUrl, newBase);
+    // L2 fix: tulis token HANYA bila field manual diedit eksplisit. Sebelumnya
+    // baris ini selalu menulis tokC.text (snapshot token LAMA/kosong dari saat
+    // sheet DIBUKA) — menimpa token BARU yang baru saja disimpan
+    // Mt5AuthApi.login (mt5_auth.dart:190):
+    //  * login pertama, field kosong -> store berisi '' -> sesi hilang tiap
+    //    restart aplikasi (readToken -> null -> unconfigured);
+    //  * login ulang, field pre-fill -> token lama menimpa token baru;
+    //    rotasi sesi tidak pernah terjadi, token baru jadi yatim di
+    //    auth_tokens server sampai TTL.
+    final manualTok = tokC.text.trim();
+    final manualChanged = manualTok != tokInitial;
+    if (manualChanged) {
+      await SessionStore().saveToken(manualTok);
+    }
     if (!mounted) return;
     setState(() {
-      _baseUrl = urlC.text.trim();
-      _token = tokC.text.trim();
+      _baseUrl = newBase;
+      // L2 fix: tanpa edit manual, biarkan _token dari jalur MASUK (baris
+      // 367) — memori dan store harus selalu sepakat.
+      if (manualChanged) _token = manualTok;
       _api = widget.api ?? Mt5Api(baseUrl: _baseUrl, token: _token);
     });
     await refreshAll();

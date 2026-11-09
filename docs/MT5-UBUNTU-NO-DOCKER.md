@@ -105,10 +105,14 @@ mkdir -p $HOME/mt5 && cd $HOME/mt5
 wget -O mt5server.exe \
   "https://github.com/lucas-campagna/mt5linux/releases/download/${MT5SRV_VER}/mt5server.exe"
 
-# jalankan via Wine (default port 18812, HANYA localhost):
+# jalankan via Wine (CLI resmi rpyc-classic: switch --host/--port,
+# default port 18812, HANYA localhost):
 export WINEPREFIX=$HOME/.wine-mt5
 export WINEDEBUG=-all
-wine mt5server.exe --port 18812 &      # tampilkan opsi: wine mt5server.exe --help
+wine mt5server.exe --host 127.0.0.1 --port 18812 &
+# tampilkan opsi: wine mt5server.exe --help
+# (argumen adalah SWITCH --host/--port — BUKAN posisional; --host
+#  127.0.0.1 ditulis eksplisit agar bind dijamin localhost.)
 ```
 
 Lalu di sisi Linux Python (backend):
@@ -209,7 +213,7 @@ Environment=WINEPREFIX=/home/jurnal/.wine-mt5
 Environment=WINEDEBUG=-all
 Environment=DISPLAY=:99
 ExecStartPre=/usr/bin/Xvfb :99 -screen 0 1024x768x24
-ExecStart=/usr/bin/wine /home/jurnal/mt5/mt5server.exe --port 18812
+ExecStart=/usr/bin/wine /home/jurnal/mt5/mt5server.exe --host 127.0.0.1 --port 18812
 Restart=always
 RestartSec=10
 
