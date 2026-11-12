@@ -1071,11 +1071,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
             ],
           ),
-          const SizedBox(height: 14),
-          Text(
-            'Ukuran lot XAUUSD yang direkomendasikan',
-            style: txt(context, 13, color: p.onHeroMuted),
-          ),
+          const SizedBox(height: 10),
           Row(
             crossAxisAlignment: CrossAxisAlignment.baseline,
             textBaseline: TextBaseline.alphabetic,
@@ -1103,7 +1099,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ],
           ),
-          if (showSub) ...[
+          if (showSub && bad) ...[
             const SizedBox(height: 4),
             Text(
               subText,
@@ -1239,7 +1235,6 @@ class _HomeScreenState extends State<HomeScreen> {
     const presets = ['15', '20', '25', '30', '40'];
     return SectionCard(
       title: 'Maksimal Stop Loss',
-      subtitle: 'Jarak SL dalam pips · 1 pip = 0.10 \$',
       icon: Icons.straighten,
       children: [
         Container(
@@ -1290,11 +1285,6 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ],
           ],
-        ),
-        const SizedBox(height: 8),
-        Text(
-          'Cukup isi jarak SL maksimalmu — lot dihitung otomatis, mentok 10.00 lot.',
-          style: txt(context, 11.5, color: p.muted, height: 1.45),
         ),
       ],
     );
@@ -1566,8 +1556,6 @@ class _HomeScreenState extends State<HomeScreen> {
               Expanded(child: fact(riX, riXL, p.gold)),
             ],
           ),
-          const SizedBox(height: 10),
-          Text(riNote, style: txt(context, 11.5, color: p.muted, height: 1.5)),
         ],
       ],
     );
@@ -1666,23 +1654,8 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
           ),
-          const SizedBox(height: 10),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            child: Text(
-              matrixMode == 0
-                  ? 'Baris biru = lot terbesar yang masih muat untuk rencana SL-mu. Baris pudar: SL < 10 pips — terlalu sempit untuk emas (spread saja 2–4 pips).'
-                  : 'Kolom berwarna = risk % yang kamu isi. Kotak bergaris biru = lot terbesar yang masih muat di tiap persentase.',
-              style: txt(context, 11.5, color: p.muted, height: 1.5),
-            ),
-          ),
           const SizedBox(height: 14),
           if (tCalc != null && tCalc!.ok) _marginBanner(p),
-          const SizedBox(height: 14),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            child: _legendRow(p),
-          ),
         ],
       ),
     );
@@ -1888,37 +1861,6 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
-    );
-  }
-
-  Widget _legendRow(Palette p) {
-    Widget dot(Color c, String t, {bool square = false}) => Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          width: 8,
-          height: 8,
-          decoration: BoxDecoration(
-            color: c,
-            borderRadius: BorderRadius.circular(square ? 2 : 99),
-          ),
-        ),
-        const SizedBox(width: 5),
-        Text(t, style: txt(context, 11, color: p.muted)),
-      ],
-    );
-    return Wrap(
-      spacing: 14,
-      runSpacing: 6,
-      children: [
-        dot(p.red, 'SL Max'),
-        dot(p.mint, 'TP Target'),
-        dot(p.gold, 'Setup Ideal'),
-        Text(
-          'XAU/USD · 1 pip = \$0,10',
-          style: mono(context, 10.5, color: p.dim),
-        ),
-      ],
     );
   }
 
