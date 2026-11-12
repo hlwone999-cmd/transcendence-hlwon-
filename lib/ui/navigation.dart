@@ -39,13 +39,13 @@ class PillNavBar extends StatelessWidget {
     final safe = MediaQuery.of(context).padding.bottom;
     return Container(
       color: p.canvas,
-      padding: EdgeInsets.fromLTRB(16, 6, 16, 10 + safe),
+      padding: EdgeInsets.fromLTRB(40, 4, 40, 8 + safe),
       child: Container(
-        height: 68,
-        padding: const EdgeInsets.symmetric(horizontal: 8),
+        height: 54,
+        padding: const EdgeInsets.symmetric(horizontal: 6),
         decoration: BoxDecoration(
           color: p.navBg,
-          borderRadius: BorderRadius.circular(34),
+          borderRadius: BorderRadius.circular(27),
           border: Border.all(width: 1, color: p.navBorder),
           boxShadow: [
             BoxShadow(
@@ -80,14 +80,14 @@ class PillNavBar extends StatelessWidget {
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 240),
               curve: Curves.easeOutCubic,
-              width: active ? 62 : 46,
-              height: active ? 48 : 46,
+              width: active ? 50 : 38,
+              height: active ? 40 : 38,
               decoration: BoxDecoration(
                 color: active ? p.goldSolid : Colors.transparent,
-                borderRadius: BorderRadius.circular(24),
+                borderRadius: BorderRadius.circular(20),
                 border: active
                     ? Border.all(
-                        width: 3,
+                        width: 2,
                         color: p.goldSolid.withAlpha(70),
                         strokeAlign: BorderSide.strokeAlignOutside,
                       )
@@ -105,7 +105,7 @@ class PillNavBar extends StatelessWidget {
               alignment: Alignment.center,
               child: Icon(
                 active ? it.activeIcon : it.icon,
-                size: active ? 24 : 23,
+                size: active ? 20 : 19,
                 color: active ? p.onGold : p.navIdle,
               ),
             ),
