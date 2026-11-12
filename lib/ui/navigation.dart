@@ -30,6 +30,12 @@ class PillNavBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = Palette.of(context);
+    // Saat keyboard terbuka, bar disembunyikan agar tidak ikut naik dan
+    // menutupi kolom input yang sedang diketik.
+    // Dibaca langsung dari View: Scaffold menolkan viewInsets untuk body.
+    if (View.of(context).viewInsets.bottom > 0) {
+      return const SizedBox.shrink();
+    }
     final safe = MediaQuery.of(context).padding.bottom;
     return Container(
       color: p.canvas,
