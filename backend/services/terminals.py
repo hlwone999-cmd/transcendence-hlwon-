@@ -32,7 +32,8 @@ import threading
 import time
 from pathlib import Path
 
-from db import CAPACITY_LOCK_TERMINAL, INTEGRITY_ERRORS, capacity_guard
+from db import (CAPACITY_LOCK_TERMINAL, INTEGRITY_ERRORS, capacity_guard,
+                system_conn)
 from mt5client.provider import MT5Error
 from security import crypto
 
@@ -313,15 +314,24 @@ class TerminalRegistry:
                     own = self._own_terminal(conn, customer_id)
                     if own is not None:   # balapan: customer sama
                         return own
-                    n_terms = conn.execute(
-                        "SELECT COUNT(*) AS n FROM mt5_terminals"
-                    ).fetchone()["n"]
+                    # B12/T3-3 + B12.1: kapasitas slot & port bebas dihitung
+                    # atas SELURUH terminal (lintas customer) -> dibaca
+                    # lewat koneksi ROLE SISTEM (hanya COUNT & port). Kunci
+                    # advisory di atas (transaksi koneksi ini) menserialkan
+                    # alokasi; data yang dibaca sudah ter-commit. INSERT di
+                    # bawah tetap di koneksi pemanggil (customer sendiri).
+                    with system_conn(cfg) as sc:
+                        n_terms = sc.execute(
+                            "SELECT COUNT(*) AS n FROM mt5_terminals"
+                        ).fetchone()["n"]
+                        taken = {int(r["rpyc_port"]) for r in sc.execute(
+                            "SELECT rpyc_port FROM mt5_terminals")}
+                        if sc is not conn:
+                            sc.rollback()
                     if int(n_terms) >= cfg.max_customers:
                         raise TerminalCapacityError(
                             f"Kapasitas maksimal {cfg.max_customers} "
                             "slot MT5 sudah terpakai")
-                    taken = {int(r["rpyc_port"]) for r in conn.execute(
-                        "SELECT rpyc_port FROM mt5_terminals")}
                     port = None
                     for cand in range(cfg.rpyc_port_base,
                                       cfg.rpyc_port_base + cfg.max_customers):

@@ -40,7 +40,12 @@ def cfg():
 
 
 def get_db():
+    """Koneksi DB request. B12.1: endpoint @system_route (pra-auth, admin
+    terautentikasi) memakai koneksi ROLE SISTEM; lainnya role aplikasi
+    (customer scope / tanpa scope = default-deny)."""
     import db as dbmod
+    if g.get("_db_system"):
+        return dbmod.get_system_db(cfg())
     return dbmod.get_db(cfg())
 
 
@@ -56,13 +61,43 @@ def _admin_token_ok() -> bool:
 
 
 # ------------------------------------------------------------ customer ctx
+def system_route(fn=None, *, admin: bool = False):
+    """B12.1: endpoint yang MEMANG lintas-customer (pra-autentikasi:
+    register/login/connect; admin) memakai koneksi ROLE SISTEM
+    (transcendence_system) — bukan GUC yang dapat dipalsukan. Endpoint lain
+    memakai role aplikasi (customer scope; tanpa scope = default-deny).
+    admin=True: koneksi sistem HANYA setelah token admin terverifikasi;
+    token tidak valid -> tetap role aplikasi tanpa scope (default-deny) dan
+    pemeriksaan/401 endpoint sendiri tetap berlaku."""
+    def deco(f):
+        @wraps(f)
+        def wrapper(*a, **kw):
+            if not admin or _admin_token_ok():
+                g._db_system = True
+            return f(*a, **kw)
+        return wrapper
+    return deco(fn) if fn is not None else deco
+
+
 def require_customer(fn):
     """Wajib token sesi valid; set g.customer_id/g.user_id/g.token_id."""
     @wraps(fn)
     def wrapper(*a, **kw):
         import auth as authmod
+        import db as dbmod
         token = authmod._extract_token()
-        info = authmod.resolve_token(get_db(), token) if token else None
+        # B12: token di-lookup berdasarkan hash SEBELUM customer diketahui
+        # -> scope sistem HANYA untuk lookup ini, lalu scope dipulihkan;
+        # setelah verifikasi, koneksi di-scope ke customer token.
+        # B12.1: lookup hash token = SATU-SATUNYA operasi sistem di sini,
+        # lewat koneksi role sistem terpisah; request tetap role aplikasi.
+        info = None
+        if token:
+            with dbmod.system_conn(cfg()) as sc:
+                try:
+                    info = authmod.resolve_token(sc, token)
+                finally:
+                    sc.rollback()
         if info is None:
             abort(401, description="Token sesi tidak valid / kedaluwarsa / "
                                    "sudah logout")
@@ -72,7 +107,6 @@ def require_customer(fn):
         # RLS defense-in-depth (audit #2): scope koneksi PostgreSQL ke
         # customer hasil verifikasi token (SET LOCAL per transaksi).
         # SQLite no-op. Bukan pengganti filter customer_id di query.
-        import db as dbmod
         dbmod.set_customer_context(get_db(), g.customer_id)
         return fn(*a, **kw)
     return wrapper
@@ -257,11 +291,17 @@ def health():
             conn.rollback()
         except Exception:  # noqa: BLE001
             pass
-        terminals = _terminals_overview(conn)
+        # B12.1: ringkasan terminal = agregat lintas customer -> koneksi
+        # role sistem (readiness DB tetap koneksi aplikasi).
         try:
-            conn.rollback()
-        except Exception:  # noqa: BLE001
-            pass
+            with dbmod.system_conn(cfg()) as sc:
+                try:
+                    terminals = _terminals_overview(sc)
+                finally:
+                    sc.rollback()
+        except Exception as e:  # noqa: BLE001
+            terminals = {"reported": None,
+                         "error": f"{type(e).__name__}: {str(e)[:120]}"}
     ok = bool(db_report.get("ok"))
     body = {"ok": ok, "service": "jurnal-mt5", "time": _now_iso(),
             "database": db_report, "mt5_terminals": terminals}
@@ -269,6 +309,7 @@ def health():
 
 
 @api_bp.get("/admin/health/terminals")
+@system_route(admin=True)
 def admin_health_terminals():
     """Status terminal per customer — probe NYATA, terpisah dari health.
 
@@ -305,8 +346,11 @@ def admin_health_terminals():
         conn.rollback()
     except Exception:  # noqa: BLE001
         pass
+    import audit as auditmod
     return jsonify({"ok": True, "checked_at": _now_iso(),
-                    "items": items})
+                    "items": items,
+                    # B12.1: monitoring kegagalan tulis audit (proses ini)
+                    "audit_write_failures": auditmod.failure_stats()})
 
 
 # ------------------------------------------------------------------- auth
@@ -322,6 +366,7 @@ def _subnet_of(ip: str | None) -> str:
 
 
 @api_bp.post("/auth/register")
+@system_route
 @require_rate_limit("register", "register_per_ip_hour", 3600)
 def auth_register():
     """Registrasi portal publik (keputusan produk #1: TETAP AKTIF).
@@ -365,6 +410,7 @@ def auth_register():
 
 
 @api_bp.post("/auth/login")
+@system_route
 @require_rate_limit("login", 10, 300)
 def auth_login():
     import audit as auditmod
@@ -475,8 +521,19 @@ def accounts_bind():
                                    "akun per customer; riwayat jurnal akun "
                                    "lama dipertahankan). Hubungi admin "
                                    "untuk mengganti akun.")
-    elif _find_account(conn, login_val, server) is not None:
-        abort(409, description="Akun MT5 itu sudah ter-bind ke customer lain")
+    else:
+        # B12/T3-3: "sudah milik customer lain?" = cek keberadaan LINTAS
+        # customer -> scope sistem hanya untuk lookup boolean ini (di scope
+        # customer baris milik customer lain tersembunyi RLS dan bind akan
+        # berlanjut sampai bentrok UNIQUE). Tidak ada data yang dikembalikan.
+        with dbmod.system_conn(c) as sc:
+            try:
+                taken = _find_account(sc, login_val, server) is not None
+            finally:
+                sc.rollback()
+        if taken:
+            abort(409, description="Akun MT5 itu sudah ter-bind ke customer "
+                                   "lain")
     try:
         enc, key_version = crypto.encrypt_password(c, password)
     except crypto.CredentialCryptoError as e:
@@ -585,7 +642,8 @@ def accounts_unbind():
     if term is not None:
         coord = current_app.extensions["mt5_coordinator"]
         released = coord.remove_terminal(conn, int(term["id"]),
-                                         term["provision_id"])
+                                         term["provision_id"],
+                                         customer_id=g.customer_id)
     auditmod.audit(conn, "unbind", customer_id=g.customer_id,
                    user_id=g.user_id, entity=f"mt5_account:{acc_id}",
                    detail={"terminal_released": released})
@@ -796,6 +854,7 @@ def _job_response(conn, coord, job, secret: str | None, *,
 
 
 @api_bp.post("/mt5/connect")
+@system_route
 @require_rate_limit("mt5_connect", 10, 300)
 def mt5_connect():
     """Self-link / reaktivasi akun MT5 dengan AUTO-PROVISIONING terminal.
@@ -855,6 +914,8 @@ def mt5_connect():
     def _fail(reason: str, customer_id=None):
         lock_ip.record_failure(ip_key)
         lock_acct.record_failure(acct_key)
+        # B12.1: penulis audit dipilih audit() sendiri (koneksi audit role
+        # sistem bila scope koneksi ini bukan milik customer_id audit).
         auditmod.audit(conn, "mt5_connect_gagal", customer_id=customer_id,
                        detail={"login": login_val, "server": server,
                                "reason": reason})
@@ -897,7 +958,8 @@ def mt5_connect():
                                    "hubungi admin")
         term = conn.execute("SELECT id FROM mt5_terminals WHERE"
                             " customer_id=?", (cust_id,)).fetchone()
-        spec = coord.spec_for(conn, int(term["id"])) if term else None
+        spec = coord.spec_for(conn, int(term["id"]), cust_id) \
+            if term else None
         ver = _live_verify_account(
             conn, registry, int(existing["id"]),
             timeout=c.mt5_verify_timeout_seconds,
@@ -1078,6 +1140,8 @@ def mt5_connect():
         lock_acct_hash=authmod._key_hash(acct_key))
     coord.start(job_id)
     job = coord.wait(conn, job_id, c.mt5_connect_sync_wait_seconds)
+    # B12/B12.1: job gagal -> customer baru sudah dibersihkan; audit tanpa
+    # customer ditulis lewat koneksi audit sistem (dipilih audit()).
     auditmod.audit(conn, "mt5_connect_job",
                    customer_id=cust_id if job["state"] != "failed" else None,
                    detail={"kind": "self_link", "state": job["state"],
@@ -1087,6 +1151,7 @@ def mt5_connect():
 
 
 @api_bp.post("/mt5/connect/status")
+@system_route
 @require_rate_limit("mt5_connect_status", 120, 300)
 def mt5_connect_status():
     """Polling job aktivasi: body {"job_id", "job_secret"}.
@@ -1244,6 +1309,12 @@ def mt5_sync():
             abort(409, description="Sync lain sedang berjalan, coba lagi "
                                    "nanti")
         raise
+    finally:
+        # B12: sync_account melepas scope di akhir tugas (round-3);
+        # request ini masih milik customer token -> scope dipasang ulang
+        # (audit di bawah tunduk RLS customer).
+        import db as dbmod
+        dbmod.set_customer_context(conn, g.customer_id)
     _audit("sync_manual", entity=f"mt5_account:{acc['id']}",
            detail={"mode": mode, "status": summary.get("status")})
     return jsonify(summary), 200
@@ -1406,6 +1477,7 @@ def symbols():
 
 # ------------------------------------------------------------------ admin
 @api_bp.get("/admin/customers")
+@system_route(admin=True)
 def admin_list_customers():
     """Bootstrap admin via env API_TOKEN — untuk operasional VPS."""
     if not _admin_token_ok():
@@ -1421,6 +1493,7 @@ def admin_list_customers():
 
 
 @api_bp.post("/admin/customers")
+@system_route(admin=True)
 def admin_create_customer():
     if not _admin_token_ok():
         abort(401, description="Token admin tidak valid")
@@ -1428,6 +1501,15 @@ def admin_create_customer():
     import auth as authmod
     body = request.get_json(silent=True) or {}
     conn = get_db()
+    # B12.1: audit WAJIB write-ahead — identitas/akses baru tidak boleh
+    # dibuat tanpa jejak. Gagal ditulis -> 503, TIDAK ada customer dibuat.
+    try:
+        auditmod.audit(conn, "admin_create_customer_diminta", required=True,
+                       detail={"display_name_diisi":
+                               bool(body.get("display_name"))})
+    except auditmod.AuditWriteError:
+        abort(503, description="Audit wajib tidak dapat ditulis — customer "
+                               "TIDAK dibuat")
     try:
         created = authmod.register_customer(
             conn, cfg(), str(body.get("email") or ""),
@@ -1442,6 +1524,7 @@ def admin_create_customer():
 
 
 @api_bp.post("/admin/customers/<int:customer_id>/revoke-sessions")
+@system_route(admin=True)
 def admin_revoke_sessions(customer_id: int):
     """Pencabutan akses oleh admin (Tahap 2): cabut SEMUA sesi customer.
 
@@ -1459,9 +1542,13 @@ def admin_revoke_sessions(customer_id: int):
                      " customer_id=? AND revoked_at IS NULL",
                      (customer_id,)).fetchone()["n"]
     authmod.revoke_all_for_customer(conn, customer_id)
-    auditmod.audit(conn, "admin_revoke_sessions", customer_id=customer_id,
-                   detail={"revoked": int(n)})
-    return jsonify({"ok": True, "revoked": int(n)})
+    # B12.1: pencabutan sesi = aksi PENGAMANAN -> tidak diblokir oleh
+    # gangguan audit (best-effort, terpantau); hasil audit dilaporkan.
+    recorded = auditmod.audit(conn, "admin_revoke_sessions",
+                              customer_id=customer_id,
+                              detail={"revoked": int(n)})
+    return jsonify({"ok": True, "revoked": int(n),
+                    "audit_recorded": bool(recorded)})
 
 
 # ------------------------------------------------------------- error json

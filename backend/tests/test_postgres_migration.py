@@ -48,6 +48,8 @@ def pg_cfg(pg_server, tmp_path):
 
     cfg.public_register_enabled = True
     cfg.db_url = uri
+    # B12.2: role sistem wajib eksplisit (tidak ada fallback DSN owner)
+    cfg.db_system_url = uri.replace("postgres:@", "transcendence_system:@", 1)
     cfg.db_path = str(tmp_path / "unused.db")
     cfg.api_token = "TESTTOKEN"
     cfg.mt5_enabled = True
@@ -87,7 +89,7 @@ def test_migrasi_pg_dari_db_kosong(pg_server):
     applied = dbmod.migrate(conn)
     # audit #2: 002_rls_roles.sql (role aplikasi non-owner + grant) ikut
     # diterapkan pada migrasi DB kosong.
-    assert applied == [1, 2, 3, 4, 5]
+    assert applied == [1, 2, 3, 4, 5, 6, 7, 8]   # B12: 007 RLS tenant, B12.1: 008 role sistem
     tables = {r["tablename"] for r in conn.execute(
         "SELECT tablename FROM pg_tables WHERE schemaname='public'")}
     for t in WAJIB_TABLES:

@@ -88,7 +88,11 @@ class MultiAccountScheduler:
         import db as dbmod
         now_mono = time.monotonic()
         try:
-            conn = dbmod.get_db(self._cfg)
+            # B12.1: daftar akun aktif & runtime = operasi SISTEM (lintas
+            # customer) -> koneksi ROLE SISTEM thread scheduler (tanpa
+            # customer context). Tiap sync men-scope customer akunnya.
+            conn = dbmod.get_system_db(self._cfg)
+            dbmod.set_customer_context(conn, None)
             account_ids = self._registry.active_account_ids(
                 conn, limit=self._cfg.max_customers)
         except Exception:  # noqa: BLE001 — DB bermasalah: coba lagi nanti
@@ -113,7 +117,11 @@ class MultiAccountScheduler:
     def _worker(self, account_id: int) -> None:
         """Worker 1 akun. Error APAPUN tidak boleh menyentuh akun lain."""
         try:
-            summary = self._svc.sync_account(account_id, mode="incremental")
+            import db as dbmod
+            sc = dbmod.get_system_db(self._cfg)     # B12.1: role sistem
+            dbmod.set_customer_context(sc, None)
+            summary = self._svc.sync_account(account_id, mode="incremental",
+                                             conn=sc)
             self._note(account_id, summary.get("status", "error"),
                        summary.get("error"))
         except Exception as e:  # noqa: BLE001
