@@ -1,156 +1,17 @@
 // Transcendence — ui_kit.dart
-// Sistem desain "Obsidian Precision" (dari stitch_transcendence_minimalist_redesign).
-// Hanya lapisan visual: palet, tipografi, dan komponen dasar.
+// Sistem desain (redesign total hitam-biru / putih-biru).
+// Hanya lapisan visual: tipografi + komponen dasar. Token warna ada di
+// ui/tokens.dart (di-export ulang di sini agar import lama tetap berlaku).
 // ALGORITMA TIDAK ADA DI FILE INI.
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-// ---------------------------------------------------------------------------
-// Palet Obsidian Precision — dua varian: dark (asli) + light.
-// Palette.of(context) memilih varian sesuai brightness tema aktif, sehingga
-// SEMUA komponen otomatis mengikuti tema global (gelap/terang/sistem).
-// ---------------------------------------------------------------------------
+import 'ui/components.dart';
+import 'ui/tokens.dart';
 
-class Palette {
-  // Arsitektur netral
-  final Color canvas; // latar root #0B0F17
-  final Color surface1; // panel #111827
-  final Color card; // kartu #1A2234
-  final Color cardHi; // kartu aktif/hover #232D42
-  final Color cardHighest; // #2E3545
-  final Color track; // track segmented paling gelap #0E1420
-  final Color line; // border #1F293D
-  final Color lineSoft; // border lembut #1E293B
-  final Color rim; // rim highlight #334155
-
-  // Teks
-  final Color ink; // teks utama #F8FAFC
-  final Color muted; // teks sekunder #94A3B8
-  final Color dim; // teks lebih redup #64748B
-  final Color warm; // label hangat #D8C3AD
-
-  // Aksen fungsional
-  final Color gold; // teks emas #FFC174
-  final Color goldSolid; // tombol emas #F59E0B
-  final Color onGold; // teks di atas emas #2A1700
-  final Color goldsoft; // tint emas (bg baris pick / pill)
-  final Color mint; // teks mint #4EDEA3
-  final Color mintSolid; // #10B981
-  final Color onMint; // teks di atas mintSolid
-  final Color good; // alias mint
-  final Color goodsoft; // tint mint
-  final Color red; // teks salmon lembut #FF938C
-  final Color redSolid; // crimson #EF4444
-  final Color onRed; // teks di atas redSolid
-  final Color redsoft; // tint merah
-
-  // Band chart
-  final Color band1; // 5–95% (mint transparan)
-  final Color band2; // 25–75% (mint lebih pekat)
-
-  const Palette({
-    required this.canvas,
-    required this.surface1,
-    required this.card,
-    required this.cardHi,
-    required this.cardHighest,
-    required this.track,
-    required this.line,
-    required this.lineSoft,
-    required this.rim,
-    required this.ink,
-    required this.muted,
-    required this.dim,
-    required this.warm,
-    required this.gold,
-    required this.goldSolid,
-    required this.onGold,
-    required this.goldsoft,
-    required this.mint,
-    required this.mintSolid,
-    required this.onMint,
-    required this.good,
-    required this.goodsoft,
-    required this.red,
-    required this.redSolid,
-    required this.onRed,
-    required this.redsoft,
-    required this.band1,
-    required this.band2,
-  });
-
-  // Nama lama yang masih dipakai beberapa file — petakan ke token baru.
-  Color get paper => canvas;
-  Color get panel => card;
-
-  static const dark = Palette(
-    canvas: Color(0xFF0B0F17),
-    surface1: Color(0xFF111827),
-    card: Color(0xFF1A2234),
-    cardHi: Color(0xFF232D42),
-    cardHighest: Color(0xFF2E3545),
-    track: Color(0xFF0E1420),
-    line: Color(0xFF1F293D),
-    lineSoft: Color(0xFF1E293B),
-    rim: Color(0xFF334155),
-    ink: Color(0xFFF8FAFC),
-    muted: Color(0xFF94A3B8),
-    dim: Color(0xFF64748B),
-    warm: Color(0xFFD8C3AD),
-    gold: Color(0xFFFFC174),
-    goldSolid: Color(0xFFF59E0B),
-    onGold: Color(0xFF2A1700),
-    goldsoft: Color(0x26F59E0B),
-    mint: Color(0xFF4EDEA3),
-    mintSolid: Color(0xFF10B981),
-    onMint: Color(0xFF00311F),
-    good: Color(0xFF4EDEA3),
-    goodsoft: Color(0x2910B981),
-    red: Color(0xFFFF938C),
-    redSolid: Color(0xFFEF4444),
-    onRed: Color(0xFFFFDAD6),
-    redsoft: Color(0x1FEF4444),
-    band1: Color(0x2E10B981),
-    band2: Color(0x5210B981),
-  );
-
-  /// Varian terang — identitas yang sama (emas/mint/merah), latar putih.
-  /// Warna teks dipilih agar kontras WCAG AA di atas card putih.
-  static const light = Palette(
-    canvas: Color(0xFFF6F7FB),
-    surface1: Color(0xFFFFFFFF),
-    card: Color(0xFFFFFFFF),
-    cardHi: Color(0xFFF1F4FA),
-    cardHighest: Color(0xFFE7ECF5),
-    track: Color(0xFFEEF1F7),
-    line: Color(0xFFD9E0EC),
-    lineSoft: Color(0xFFE3E9F2),
-    rim: Color(0xFFC4CEE0),
-    ink: Color(0xFF0F172A),
-    muted: Color(0xFF475569),
-    dim: Color(0xFF64748B),
-    warm: Color(0xFFA16207),
-    gold: Color(0xFFB45309),
-    goldSolid: Color(0xFFF59E0B),
-    onGold: Color(0xFF2A1700),
-    goldsoft: Color(0x1AF59E0B),
-    mint: Color(0xFF047857),
-    mintSolid: Color(0xFF10B981),
-    onMint: Color(0xFF00311F),
-    good: Color(0xFF047857),
-    goodsoft: Color(0x1A047857),
-    red: Color(0xFFB91C1C),
-    redSolid: Color(0xFFDC2626),
-    onRed: Color(0xFFFFFFFF),
-    redsoft: Color(0x14DC2626),
-    band1: Color(0x2E10B981),
-    band2: Color(0x5210B981),
-  );
-
-  /// Ambil palet sesuai brightness tema MaterialApp aktif.
-  static Palette of(BuildContext c) =>
-      Theme.of(c).brightness == Brightness.dark ? dark : light;
-}
+export 'ui/tokens.dart';
+export 'ui/components.dart';
+export 'ui/navigation.dart';
 
 // ---------------------------------------------------------------------------
 // Tipografi — Geist (naratif) + JetBrains Mono (angka)
@@ -216,7 +77,7 @@ TextStyle mono(
 /// Warna teks yang tetap terbaca di atas latar warna aksen [bg]
 /// (mis. teks di atas tombol/pill solid emas, mint, atau merah).
 Color onColor(BuildContext c, Color bg) =>
-    bg.computeLuminance() > 0.4 ? Palette.of(c).onGold : Colors.white;
+    bg.computeLuminance() > 0.4 ? const Color(0xFF0D1321) : Colors.white;
 
 double clampSize(double v, double lo, double hi) =>
     v < lo ? lo : (v > hi ? hi : v);
@@ -225,7 +86,7 @@ double clampSize(double v, double lo, double hi) =>
 // Komponen dasar
 // ---------------------------------------------------------------------------
 
-/// Kartu obsidian: radius 16, bg card, border lineSoft.
+/// Kartu dasar: radius 20, bg card, border halus (+ bayangan lembut di light).
 class ObsCard extends StatelessWidget {
   final List<Widget> children;
   final EdgeInsets padding;
@@ -234,7 +95,7 @@ class ObsCard extends StatelessWidget {
   const ObsCard({
     super.key,
     required this.children,
-    this.padding = const EdgeInsets.all(16),
+    this.padding = const EdgeInsets.all(18),
     this.color,
     this.radius,
   });
@@ -244,10 +105,8 @@ class ObsCard extends StatelessWidget {
     final p = Palette.of(context);
     return Container(
       padding: padding,
-      decoration: BoxDecoration(
-        color: color ?? p.card,
-        border: Border.all(width: 1, color: p.lineSoft),
-        borderRadius: radius ?? BorderRadius.circular(16),
+      decoration: cardDecoration(p, color: color).copyWith(
+        borderRadius: radius ?? BorderRadius.circular(22),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -307,10 +166,10 @@ class BadgePill extends StatelessWidget {
   Widget build(BuildContext context) {
     final p = Palette.of(context);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
       decoration: BoxDecoration(
         color: bg ?? p.cardHi,
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(999),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -339,7 +198,7 @@ class BadgePill extends StatelessWidget {
   }
 }
 
-/// Tombol utama emas solid (Calculate / Execute).
+/// Tombol utama — isian biru primer, bentuk pill (nama kelas dipertahankan).
 class GoldButton extends StatelessWidget {
   final String text;
   final IconData? icon;
@@ -350,42 +209,55 @@ class GoldButton extends StatelessWidget {
     super.key,
     this.icon,
     this.onTap,
-    this.height = 48,
+    this.height = 52,
   });
 
   @override
   Widget build(BuildContext context) {
     final p = Palette.of(context);
-    return Material(
-      color: p.goldSolid,
-      borderRadius: BorderRadius.circular(10),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(10),
-        child: SizedBox(
-          height: height,
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              if (icon != null) ...[
-                Icon(icon, size: 18, color: p.onGold),
-                const SizedBox(width: 8),
-              ],
-              Flexible(
-                child: Text(
-                  text,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontFamily: kMonoFont,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 0.3,
-                    color: p.onGold,
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(999),
+        boxShadow: [
+          BoxShadow(
+            color: p.goldSolid.withAlpha(p.isDark ? 70 : 55),
+            blurRadius: 18,
+            spreadRadius: -6,
+            offset: const Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Material(
+        color: p.goldSolid,
+        borderRadius: BorderRadius.circular(999),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(999),
+          child: SizedBox(
+            height: height,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                if (icon != null) ...[
+                  Icon(icon, size: 18, color: p.onGold),
+                  const SizedBox(width: 8),
+                ],
+                Flexible(
+                  child: Text(
+                    text,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontFamily: kBodyFont,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.4,
+                      color: p.onGold,
+                    ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -413,15 +285,15 @@ class GhostButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final p = Palette.of(context);
     final btn = Material(
-      color: p.card,
-      borderRadius: BorderRadius.circular(8),
+      color: p.isDark ? p.cardHi : p.card,
+      borderRadius: BorderRadius.circular(999),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(999),
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(999),
             border: Border.all(width: 1, color: p.line),
           ),
           child: Row(
@@ -439,10 +311,10 @@ class GhostButton extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
-                    fontFamily: kMonoFont,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    letterSpacing: 0.4,
+                    fontFamily: kBodyFont,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.2,
                     color: textColor ?? p.ink,
                   ),
                 ),
@@ -478,10 +350,10 @@ class PresetChip extends StatelessWidget {
     final p = Palette.of(context);
     final chip = Material(
       color: active ? p.goldSolid : p.cardHi,
-      borderRadius: BorderRadius.circular(8),
+      borderRadius: BorderRadius.circular(999),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(999),
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
           alignment: Alignment.center,
@@ -537,9 +409,9 @@ class ToggleRow extends StatelessWidget {
         Switch.adaptive(
           value: value,
           onChanged: enabled ? onChanged : null,
-          activeThumbColor: p.goldSolid,
-          activeTrackColor: p.goldsoft,
-          inactiveThumbColor: p.muted,
+          activeThumbColor: p.onGold,
+          activeTrackColor: p.goldSolid,
+          inactiveThumbColor: p.isDark ? p.muted : p.card,
           inactiveTrackColor: p.cardHighest,
         ),
       ],
@@ -580,7 +452,14 @@ class LabeledField extends StatelessWidget {
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            Text(label, style: labelSm(context)),
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: labelSm(context),
+              ),
+            ),
             ?labelTrailing,
           ],
         ),
@@ -588,10 +467,13 @@ class LabeledField extends StatelessWidget {
         Container(
           decoration: BoxDecoration(
             color: p.surface1,
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(width: 1, color: p.line),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(width: 1, color: p.isDark ? p.line : p.lineSoft),
           ),
-          padding: EdgeInsets.symmetric(horizontal: 12, vertical: big ? 10 : 8),
+          padding: EdgeInsets.symmetric(
+            horizontal: 14,
+            vertical: big ? 12 : 10,
+          ),
           child: Row(
             children: [
               if (prefix != null) ...[
@@ -646,7 +528,7 @@ class LabeledField extends StatelessWidget {
   }
 }
 
-/// Judul seksi kecil dengan ikon emas.
+/// Judul seksi: ikon biru dalam kotak tint + judul.
 class SectionHead extends StatelessWidget {
   final IconData icon;
   final String text;
@@ -658,8 +540,17 @@ class SectionHead extends StatelessWidget {
     final p = Palette.of(context);
     return Row(
       children: [
-        Icon(icon, size: 17, color: p.gold),
-        const SizedBox(width: 8),
+        Container(
+          width: 30,
+          height: 30,
+          decoration: BoxDecoration(
+            color: p.goldsoft,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          alignment: Alignment.center,
+          child: Icon(icon, size: 16, color: p.gold),
+        ),
+        const SizedBox(width: 10),
         Expanded(
           child: Text(text, style: txt(context, 15, w: FontWeight.w600)),
         ),

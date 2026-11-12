@@ -1037,7 +1037,7 @@ class _JournalPageState extends State<JournalPage> {
     final netPnl = s.balanceNow - s.startBal;
 
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1048,22 +1048,27 @@ class _JournalPageState extends State<JournalPage> {
             'atau miss — statistik & drawdown terhitung otomatis.',
             style: txt(context, 12, color: p.muted),
           ),
-          const SizedBox(height: 14),
+          const SizedBox(height: 16),
 
-          // ---- TOTAL BUANGAN (di atas, sesuai permintaan) ----
-          _buanganCard(p, s),
-          const SizedBox(height: 10),
-
-          // ---- balance sekarang + mulai dari rule ----
+          // ---- balance sekarang + mulai dari rule (kartu hero) ----
           _balanceCard(p, s, netPnl),
-          const SizedBox(height: 10),
+          const SizedBox(height: 12),
+
+          // ---- TOTAL BUANGAN ----
+          _buanganCard(p, s),
+          const SizedBox(height: 22),
+
+          // ---- komposisi hasil (donut) — memvisualkan angka statistik
+          //      yang SAMA dengan kartu di bawahnya; tidak ada hitungan baru.
+          _compositionCard(p, s),
+          const SizedBox(height: 12),
 
           // ---- total trade / tp / sl / winrate ----
           Row(
             children: [
               _mini(p, 'TOTAL', '${s.total}', p.ink),
               const SizedBox(width: 8),
-              _mini(p, 'TP', '${s.tp}', p.mint),
+              _mini(p, 'TP', '${s.tp}', p.gold),
               const SizedBox(width: 8),
               _mini(p, 'SL', '${s.sl}', p.red),
               const SizedBox(width: 8),
@@ -1075,7 +1080,7 @@ class _JournalPageState extends State<JournalPage> {
               ),
             ],
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 8),
           Row(
             children: [
               // ringkasan eksekusi: keambil vs miss (permintaan user)
@@ -1091,7 +1096,7 @@ class _JournalPageState extends State<JournalPage> {
               style: txt(context, 11, color: p.dim),
             ),
           ],
-          const SizedBox(height: 10),
+          const SizedBox(height: 12),
 
           // ---- drawdown ----
           _ddCard(p, s),
@@ -1135,15 +1140,12 @@ class _JournalPageState extends State<JournalPage> {
           ),
           const SizedBox(height: 10),
           if (_entries.isEmpty)
-            ObsCard(
-              color: p.surface1,
-              children: [
-                Text(
+            const StateView(
+              icon: Icons.receipt_long,
+              title: 'Belum ada trade',
+              message:
                   'Belum ada trade. Catat trade pertamamu di form atas — '
                   'tandai hasilnya TP/SL dan apakah keambil atau miss.',
-                  style: txt(context, 12.5, color: p.muted, height: 1.5),
-                ),
-              ],
             )
           else
             ..._listCards(p, s),
@@ -1157,39 +1159,41 @@ class _JournalPageState extends State<JournalPage> {
   Widget _buanganCard(Palette p, JournalStats s) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: p.card,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(width: 1, color: p.redsoft),
-      ),
-      child: Column(
+      padding: const EdgeInsets.fromLTRB(14, 14, 16, 14),
+      decoration: cardDecoration(p),
+      child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            children: [
-              Icon(Icons.output_rounded, size: 15, color: p.red),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
+          IconBubble(
+            Icons.output_rounded,
+            color: p.red,
+            size: 42,
+            square: true,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
                   'TOTAL BUANGAN',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: labelSm(context, color: p.muted),
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          Text(
-            idr(s.buangan),
-            style: mono(context, 22, w: FontWeight.w600, color: p.red),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            'Akumulasi balance terbuang dari trade yang turun rules — '
-            'di luar nominal SL.',
-            style: txt(context, 10.5, color: p.dim, height: 1.35),
+                const SizedBox(height: 4),
+                Text(
+                  idr(s.buangan),
+                  style: mono(context, 20, w: FontWeight.w600, color: p.red),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Akumulasi balance terbuang dari trade yang turun rules — '
+                  'di luar nominal SL.',
+                  style: txt(context, 11, color: p.muted, height: 1.4),
+                ),
+              ],
+            ),
           ),
         ],
       ),
@@ -1197,101 +1201,134 @@ class _JournalPageState extends State<JournalPage> {
   }
 
   Widget _balanceCard(Palette p, JournalStats s, int netPnl) {
-    return ObsCard(
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'BALANCE SEKARANG',
-                    style: labelSm(context, color: p.muted),
-                  ),
-                  const SizedBox(height: 5),
-                  Text(
-                    idr(s.balanceNow),
-                    style: mono(context, 22, w: FontWeight.w600, color: p.gold),
-                  ),
-                ],
-              ),
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-              decoration: BoxDecoration(
-                color: netPnl >= 0 ? p.goodsoft : p.redsoft,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                '${netPnl >= 0 ? '+' : '−'}${idr(netPnl.abs()).substring(2)}',
-                style: mono(
-                  context,
-                  12.5,
-                  w: FontWeight.w600,
-                  color: netPnl >= 0 ? p.mint : p.red,
-                ),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        Row(
-          children: [
-            Text('MULAI DARI RULE', style: labelSm(context, color: p.dim)),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10),
-                decoration: BoxDecoration(
-                  color: p.surface1,
-                  borderRadius: BorderRadius.circular(9),
-                  border: Border.all(width: 1, color: p.line),
-                ),
-                child: DropdownButtonHideUnderline(
-                  child: DropdownButton<int>(
-                    value: _startRule,
-                    isExpanded: true,
-                    dropdownColor: p.card,
-                    borderRadius: BorderRadius.circular(10),
-                    icon: Icon(Icons.expand_more, size: 17, color: p.muted),
-                    style: mono(context, 12.5, w: FontWeight.w600),
-                    items: [
-                      for (int n = 1; n <= kRuleBalances.length; n++)
-                        DropdownMenuItem(
-                          value: n,
-                          child: FittedBox(
-                            fit: BoxFit.scaleDown,
-                            alignment: Alignment.centerLeft,
-                            // Nominal PERSIS — sama dgn dropdown rules.
-                            child: Text('Rule $n · ${idr(ruleBal(n))}'),
-                          ),
+    return HeroCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const HeroChip(
+                      'BALANCE SEKARANG',
+                      icon: Icons.account_balance_wallet_outlined,
+                    ),
+                    const SizedBox(height: 12),
+                    FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        idr(s.balanceNow),
+                        style: mono(
+                          context,
+                          32,
+                          w: FontWeight.w600,
+                          color: p.onHero,
+                          ls: -1,
                         ),
-                    ],
-                    onChanged: (v) {
-                      if (v == null) return;
-                      setState(() => _startRule = v);
-                      _persist();
-                    },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                decoration: BoxDecoration(
+                  color: netPnl >= 0 ? p.onHero.withAlpha(235) : p.redSolid,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Text(
+                  '${netPnl >= 0 ? '+' : '−'}${idr(netPnl.abs()).substring(2)}',
+                  style: mono(
+                    context,
+                    12.5,
+                    w: FontWeight.w600,
+                    color: netPnl >= 0 ? p.mintSolid : p.onRed,
                   ),
                 ),
               ),
-            ),
-          ],
-        ),
-      ],
+            ],
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Text(
+                'MULAI DARI RULE',
+                style: labelSm(context, color: p.onHeroMuted),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  decoration: BoxDecoration(
+                    color: p.onHero.withAlpha(36),
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(width: 1, color: p.onHero.withAlpha(50)),
+                  ),
+                  child: DropdownButtonHideUnderline(
+                    child: DropdownButton<int>(
+                      value: _startRule,
+                      isExpanded: true,
+                      dropdownColor: p.card,
+                      borderRadius: BorderRadius.circular(14),
+                      icon: Icon(Icons.expand_more, size: 17, color: p.onHero),
+                      style: mono(context, 12.5, w: FontWeight.w600),
+                      // Tampilan nilai terpilih di atas hero: teks putih.
+                      // Item menu tetap memakai warna teks tema.
+                      selectedItemBuilder: (ctx) => [
+                        for (int n = 1; n <= kRuleBalances.length; n++)
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              alignment: Alignment.centerLeft,
+                              child: Text(
+                                'Rule $n · ${idr(ruleBal(n))}',
+                                style: mono(
+                                  ctx,
+                                  12.5,
+                                  w: FontWeight.w600,
+                                  color: p.onHero,
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                      items: [
+                        for (int n = 1; n <= kRuleBalances.length; n++)
+                          DropdownMenuItem(
+                            value: n,
+                            child: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              alignment: Alignment.centerLeft,
+                              // Nominal PERSIS — sama dgn dropdown rules.
+                              child: Text('Rule $n · ${idr(ruleBal(n))}'),
+                            ),
+                          ),
+                      ],
+                      onChanged: (v) {
+                        if (v == null) return;
+                        setState(() => _startRule = v);
+                        _persist();
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
   Widget _mini(Palette p, String label, String val, Color c) {
     return Expanded(
       child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
-        decoration: BoxDecoration(
-          color: p.card,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(width: 1, color: p.lineSoft),
-        ),
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 8),
+        decoration: cardDecoration(p, radius: 18),
         child: Column(
           children: [
             Text(
@@ -1313,47 +1350,114 @@ class _JournalPageState extends State<JournalPage> {
     );
   }
 
-  Widget _ddCard(Palette p, JournalStats s) {
-    Widget cell(String label, Dd d, Color c) => Expanded(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+  /// Donut komposisi hasil — HANYA menampilkan angka s.tp / s.sl / s.miss /
+  /// s.total yang sudah dihitung computeJournalStats (tanpa hitungan baru).
+  Widget _compositionCard(Palette p, JournalStats s) {
+    Widget legend(Color c, String t, int n) => Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: p.surface1,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Text(label, style: labelSm(context, color: p.dim)),
-          const SizedBox(height: 4),
-          Text(
-            shortIdr(d.rp.toDouble()),
-            style: mono(context, 14, w: FontWeight.w600, color: c),
+          Container(
+            width: 10,
+            height: 10,
+            decoration: BoxDecoration(
+              color: c,
+              borderRadius: BorderRadius.circular(3),
+            ),
           ),
-          const SizedBox(height: 2),
-          Text(
-            '${d.pct.toStringAsFixed(1).replaceFirst('.', ',')}%',
-            style: mono(context, 10.5, color: p.muted),
-          ),
+          const SizedBox(width: 6),
+          Text('$t · $n', style: txt(context, 12, w: FontWeight.w500)),
         ],
       ),
     );
-    return ObsCard(
+    return SectionCard(
+      title: 'Komposisi Hasil Trade',
+      subtitle: 'Take profit, stop loss & trade yang di-miss',
+      icon: Icons.donut_large,
+      children: [
+        Center(
+          child: SegmentDonut(
+            size: 176,
+            segments: [
+              DonutSegment(s.tp.toDouble(), p.goldSolid, 'TP'),
+              DonutSegment(s.sl.toDouble(), p.redSolid, 'SL'),
+              DonutSegment(s.miss.toDouble(), p.rim, 'Miss'),
+            ],
+            center: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Total Trade', style: txt(context, 12, color: p.muted)),
+                Text(
+                  '${s.total}',
+                  style: mono(context, 34, w: FontWeight.w600, ls: -1),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          alignment: WrapAlignment.center,
+          children: [
+            legend(p.goldSolid, 'Take Profit', s.tp),
+            legend(p.redSolid, 'Stop Loss', s.sl),
+            legend(p.rim, 'Miss', s.miss),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _ddCard(Palette p, JournalStats s) {
+    Widget cell(String label, Dd d, Color c) => Expanded(
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: p.surface1,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(label, style: labelSm(context, color: p.dim)),
+            const SizedBox(height: 4),
+            Text(
+              shortIdr(d.rp.toDouble()),
+              style: mono(context, 14, w: FontWeight.w600, color: c),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              '${d.pct.toStringAsFixed(1).replaceFirst('.', ',')}%',
+              style: mono(context, 10.5, color: p.muted),
+            ),
+          ],
+        ),
+      ),
+    );
+    return SectionCard(
+      title: 'Drawdown',
+      subtitle: 'Periode SL terburuk',
+      icon: Icons.waterfall_chart,
       children: [
         Row(
           children: [
-            Icon(Icons.waterfall_chart, size: 15, color: p.gold),
-            const SizedBox(width: 7),
-            Text('DRAWDOWN', style: labelSm(context, color: p.muted)),
-          ],
-        ),
-        const SizedBox(height: 12),
-        Row(
-          children: [
             cell('HARIAN', s.daily, p.red),
-            const SizedBox(width: 12),
+            const SizedBox(width: 10),
             cell('MINGGUAN', s.weekly, p.red),
           ],
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 10),
         Row(
           children: [
             cell('BULANAN', s.monthly, p.red),
-            const SizedBox(width: 12),
+            const SizedBox(width: 10),
             cell('TOTAL', s.all, p.red),
           ],
         ),
@@ -1383,10 +1487,11 @@ class _JournalPageState extends State<JournalPage> {
           )
         : null;
 
-    return ObsCard(
+    return SectionCard(
+      title: 'Catat Trade Baru',
+      subtitle: 'Tanggal, pair, harga entry, rules & hasil',
+      icon: Icons.edit_note,
       children: [
-        SectionHead(Icons.edit_note, 'Catat Trade Baru'),
-        const SizedBox(height: 12),
         Row(
           children: [
             Expanded(
@@ -1475,7 +1580,7 @@ class _JournalPageState extends State<JournalPage> {
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
             decoration: BoxDecoration(
               color: p.surface1,
-              borderRadius: BorderRadius.circular(10),
+              borderRadius: BorderRadius.circular(14),
               border: Border.all(width: 1, color: p.line),
             ),
             child: Row(
@@ -1526,7 +1631,7 @@ class _JournalPageState extends State<JournalPage> {
         Container(
           decoration: BoxDecoration(
             color: p.surface1,
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(14),
             border: Border.all(width: 1, color: p.line),
           ),
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -1560,7 +1665,7 @@ class _JournalPageState extends State<JournalPage> {
           padding: const EdgeInsets.symmetric(horizontal: 10),
           decoration: BoxDecoration(
             color: p.surface1,
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(14),
             border: Border.all(width: 1, color: p.line),
           ),
           child: DropdownButtonHideUnderline(
@@ -1568,7 +1673,7 @@ class _JournalPageState extends State<JournalPage> {
               value: v,
               isExpanded: true,
               dropdownColor: p.card,
-              borderRadius: BorderRadius.circular(10),
+              borderRadius: BorderRadius.circular(14),
               icon: Icon(Icons.expand_more, size: 17, color: p.muted),
               hint: Text('Rule…', style: mono(context, 12.5, color: p.dim)),
               style: mono(context, 12.5, w: FontWeight.w600),
@@ -1631,7 +1736,7 @@ class _JournalPageState extends State<JournalPage> {
           padding: const EdgeInsets.all(3),
           decoration: BoxDecoration(
             color: p.surface1,
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(14),
             border: Border.all(width: 1, color: p.line),
           ),
           child: Row(
@@ -1646,7 +1751,7 @@ class _JournalPageState extends State<JournalPage> {
                       padding: const EdgeInsets.symmetric(vertical: 7),
                       decoration: BoxDecoration(
                         color: active ? cAct : Colors.transparent,
-                        borderRadius: BorderRadius.circular(8),
+                        borderRadius: BorderRadius.circular(12),
                       ),
                       child: Text(
                         name,
@@ -1722,7 +1827,7 @@ class _JournalPageState extends State<JournalPage> {
           padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(
             color: p.card,
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(16),
             border: Border.all(width: 1, color: p.lineSoft),
           ),
           child: Row(

@@ -581,7 +581,7 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
         Container(
           decoration: BoxDecoration(
             color: p.surface1,
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(14),
             border: Border.all(width: 1, color: p.line),
           ),
           padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -592,13 +592,15 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
               icon: Icon(Icons.expand_more, size: 18, color: p.dim),
               dropdownColor: p.surface1,
               items: kServerOptions
-                  .map((o) => DropdownMenuItem<String>(
-                        value: o.value,
-                        child: Text(
-                          o.label,
-                          style: mono(context, 14, w: FontWeight.w600),
-                        ),
-                      ))
+                  .map(
+                    (o) => DropdownMenuItem<String>(
+                      value: o.value,
+                      child: Text(
+                        o.label,
+                        style: mono(context, 14, w: FontWeight.w600),
+                      ),
+                    ),
+                  )
                   .toList(),
               onChanged: (v) {
                 if (v == null || v == _serverSel) return;
@@ -631,7 +633,7 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
         Container(
           decoration: BoxDecoration(
             color: p.surface1,
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(14),
             border: Border.all(width: 1, color: p.line),
           ),
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -648,8 +650,7 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
               hintStyle: mono(context, 13, color: p.dim),
               suffixIcon: IconButton(
                 padding: EdgeInsets.zero,
-                constraints:
-                    const BoxConstraints(minWidth: 32, minHeight: 32),
+                constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
                 icon: Icon(
                   _obscurePass
                       ? Icons.visibility_outlined
@@ -657,8 +658,7 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
                   size: 18,
                   color: p.dim,
                 ),
-                onPressed: () =>
-                    setState(() => _obscurePass = !_obscurePass),
+                onPressed: () => setState(() => _obscurePass = !_obscurePass),
               ),
             ),
             cursorColor: p.goldSolid,
@@ -675,7 +675,7 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
   Widget _connectForm(Palette p) {
     final backendMissing = !AppConfig.hasApiBaseUrl;
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -790,8 +790,8 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
                     Expanded(
                       child: Text(
                         'MEMVERIFIKASI — backend sedang memverifikasi '
-                            'kredensial dan mencoba login read-only ke '
-                            'server broker…',
+                        'kredensial dan mencoba login read-only ke '
+                        'server broker…',
                         style: txt(context, 11.5, color: p.muted),
                       ),
                     ),
@@ -822,7 +822,7 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
         Container(
           decoration: BoxDecoration(
             color: p.surface1,
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(14),
             border: Border.all(width: 1, color: p.line),
           ),
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -853,7 +853,15 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
     switch (_phase) {
       case _Phase.boot:
       case _Phase.loading:
-        return const Center(child: CircularProgressIndicator(strokeWidth: 2));
+        return const SingleChildScrollView(
+          padding: EdgeInsets.fromLTRB(16, 6, 16, 24),
+          child: StateView(
+            icon: Icons.cloud_sync_outlined,
+            title: 'Memuat Jurnal MT5',
+            message: 'Mengambil status akun & riwayat trade (read-only)…',
+            loading: true,
+          ),
+        );
       case _Phase.connectForm:
         return _connectForm(p);
       case _Phase.error:
@@ -870,7 +878,7 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
           onRefresh: refreshAll,
           child: SingleChildScrollView(
             physics: const AlwaysScrollableScrollPhysics(),
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+            padding: const EdgeInsets.fromLTRB(16, 6, 16, 24),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -915,13 +923,10 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
                     ),
                   ),
                 if (_trades.isEmpty)
-                  ObsCard(
-                    children: [
-                      Text(
-                        'Belum ada trade pada rentang ini.',
-                        style: txt(context, 13, color: p.muted),
-                      ),
-                    ],
+                  const StateView(
+                    icon: Icons.inbox_outlined,
+                    title: 'Belum ada trade pada rentang ini.',
+                    message: 'Coba ubah rentang tanggal di filter atas.',
                   ),
               ],
             ),
@@ -937,7 +942,7 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
   Widget _invalidRangeView(Palette p) {
     return SingleChildScrollView(
       physics: const AlwaysScrollableScrollPhysics(),
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -945,31 +950,16 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
           const SizedBox(height: 14),
           _filterRow(p),
           const SizedBox(height: 14),
-          ObsCard(
-            children: [
-              Row(
-                children: [
-                  Icon(Icons.info_outline, size: 17, color: p.warm),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'RENTANG TANGGAL BELUM LENGKAP',
-                      style: labelSm(context, color: p.muted),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              Text(
-                'Pilih tanggal MULAI dan AKHIR untuk rentang custom. '
+          StateView(
+            icon: Icons.date_range_outlined,
+            title: 'RENTANG TANGGAL BELUM LENGKAP',
+            message:
+                ('Pilih tanggal MULAI dan AKHIR untuk rentang custom. '
                 'Tanggal akhir dihitung penuh sampai tengah malam '
                 '(interval [mulai, akhir + 1 hari) di zona $_tz).\n\n'
                 'Statistik sengaja tidak ditampilkan agar tidak tertukar '
                 'dengan hasil rentang sebelumnya. Pilih preset lain di atas '
-                'untuk kembali memuat data.',
-                style: txt(context, 13, color: p.muted, height: 1.5),
-              ),
-            ],
+                'untuk kembali memuat data.'),
           ),
         ],
       ),
@@ -978,49 +968,38 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
 
   Widget _errorView(Palette p) {
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SectionHead(Icons.cloud_sync_outlined, 'Jurnal MT5 Otomatis'),
           const SizedBox(height: 14),
-          ObsCard(
-            children: [
-              Row(
-                children: [
-                  Icon(Icons.cloud_off, size: 17, color: p.red),
-                  const SizedBox(width: 8),
-                  Text(
-                    'GAGAL TERHUBUNG',
-                    style: labelSm(context, color: p.muted),
+          StateView(
+            icon: Icons.cloud_off,
+            color: p.red,
+            title: 'GAGAL TERHUBUNG',
+            message: _error ?? '-',
+            action: Row(
+              children: [
+                Expanded(
+                  child: GhostButton(
+                    'COBA LAGI',
+                    icon: Icons.refresh,
+                    expanded: true,
+                    onTap: refreshAll,
                   ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Text(_error ?? '-', style: txt(context, 13)),
-              const SizedBox(height: 14),
-              Row(
-                children: [
-                  Expanded(
-                    child: GhostButton(
-                      'COBA LAGI',
-                      icon: Icons.refresh,
-                      expanded: true,
-                      onTap: refreshAll,
-                    ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: GhostButton(
+                    'PUTUSKAN KONEKSI',
+                    icon: Icons.link_off,
+                    expanded: true,
+                    onTap: _disconnecting ? null : _confirmDisconnect,
                   ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: GhostButton(
-                      'PUTUSKAN KONEKSI',
-                      icon: Icons.link_off,
-                      expanded: true,
-                      onTap: _disconnecting ? null : _confirmDisconnect,
-                    ),
-                  ),
-                ],
-              ),
-            ],
+                ),
+              ],
+            ),
           ),
         ],
       ),
@@ -1041,9 +1020,10 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
             Icon(Icons.report, size: 17, color: p.red),
             const SizedBox(width: 8),
             Expanded(
-              child: Text('GAGAL — VERIFIKASI BROKER BELUM BERHASIL',
-                  style: txt(context, 13,
-                      w: FontWeight.w600, color: p.red)),
+              child: Text(
+                'GAGAL — VERIFIKASI BROKER BELUM BERHASIL',
+                style: txt(context, 13, w: FontWeight.w600, color: p.red),
+              ),
             ),
           ],
         ),
@@ -1054,7 +1034,9 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
         ),
         const SizedBox(height: 10),
         GhostButton(
-          _stage == _ConnectStage.preparing ? 'MEMERIKSA…' : 'COBA VERIFIKASI ULANG',
+          _stage == _ConnectStage.preparing
+              ? 'MEMERIKSA…'
+              : 'COBA VERIFIKASI ULANG',
           icon: Icons.sync,
           onTap: _stage == _ConnectStage.preparing ? null : _reverify,
         ),
@@ -1075,8 +1057,8 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
     final label = conn
         ? 'TERHUBUNG'
         : preparing
-            ? 'MENYIAPKAN TERMINAL'
-            : 'TERPUTUS';
+        ? 'MENYIAPKAN TERMINAL'
+        : 'TERPUTUS';
     final stateColor = conn ? p.mint : (preparing ? p.warm : p.red);
     return ObsCard(
       children: [
@@ -1087,12 +1069,7 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
             Expanded(
               child: Text(
                 label,
-                style: txt(
-                  context,
-                  14,
-                  w: FontWeight.w600,
-                  color: stateColor,
-                ),
+                style: txt(context, 14, w: FontWeight.w600, color: stateColor),
               ),
             ),
             GhostButton(
@@ -1110,12 +1087,12 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
               ? 'Provider ${st?.provider ?? '-'} · sinkron terakhir: '
                     '${_fmtIso(last) ?? 'belum ada'}'
               : (st?.terminalStatus == 'provisioning'
-                  ? 'Terminal MT5 sedang disiapkan di server '
-                      '(provisioning) — status akan diperbarui otomatis.'
-                  : (reason ??
-                      (preparing
-                          ? 'Menunggu verifikasi live ke server broker…'
-                          : 'Status belum diketahui.'))),
+                    ? 'Terminal MT5 sedang disiapkan di server '
+                          '(provisioning) — status akan diperbarui otomatis.'
+                    : (reason ??
+                          (preparing
+                              ? 'Menunggu verifikasi live ke server broker…'
+                              : 'Status belum diketahui.'))),
           style: txt(context, 12, color: p.muted),
         ),
         const SizedBox(height: 10),
@@ -1690,14 +1667,14 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
       padding: const EdgeInsets.only(bottom: 8),
       child: Material(
         color: p.card,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(16),
         child: InkWell(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(16),
           onTap: () => _openDetail(t),
           child: Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(16),
               border: Border.all(width: 1, color: p.lineSoft),
             ),
             child: Row(
@@ -1941,7 +1918,7 @@ class _Mt5JournalPageState extends State<Mt5JournalPage> {
                   padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
                     color: p.card,
-                    borderRadius: BorderRadius.circular(10),
+                    borderRadius: BorderRadius.circular(14),
                     border: Border.all(width: 1, color: p.lineSoft),
                   ),
                   child: Text(

@@ -27,6 +27,7 @@ import 'mt5_page.dart';
 import 'sticky_table.dart';
 import 'tables_build.dart';
 import 'theme.dart';
+import 'ui/app_theme.dart';
 import 'ui_kit.dart';
 
 void main() {
@@ -70,109 +71,9 @@ class _TranscendenceAppState extends State<TranscendenceApp> {
 // konsisten dan perubahan tema langsung terlihat tanpa restart.
 // ---------------------------------------------------------------------------
 
-ThemeData _darkTheme() {
-  final p = Palette.dark;
-  return ThemeData(
-    brightness: Brightness.dark,
-    useMaterial3: true,
-    scaffoldBackgroundColor: p.canvas,
-    cardColor: p.card,
-    dividerColor: p.lineSoft,
-    splashFactory: InkSparkle.splashFactory,
-    colorScheme: ColorScheme.dark(
-      primary: p.goldSolid,
-      onPrimary: p.onGold,
-      secondary: p.mintSolid,
-      onSecondary: p.onMint,
-      error: p.redSolid,
-      onError: p.onRed,
-      surface: p.card,
-      onSurface: p.ink,
-      surfaceContainerHighest: p.cardHi,
-      outlineVariant: p.line,
-    ),
-    textTheme: TextTheme(
-      bodyMedium: TextStyle(
-        fontFamily: kBodyFont,
-        fontSize: 14,
-        height: 1.5,
-        color: p.ink,
-      ),
-    ),
-    sliderTheme: SliderThemeData(
-      activeTrackColor: p.goldSolid,
-      inactiveTrackColor: p.cardHighest,
-      thumbColor: p.gold,
-      overlayColor: p.goldsoft,
-      trackHeight: 4,
-      thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 8),
-    ),
-    switchTheme: SwitchThemeData(
-      thumbColor: WidgetStateProperty.resolveWith(
-        (s) => s.contains(WidgetState.selected) ? p.onGold : p.muted,
-      ),
-      trackColor: WidgetStateProperty.resolveWith(
-        (s) => s.contains(WidgetState.selected) ? p.goldSolid : p.cardHighest,
-      ),
-    ),
-    bottomSheetTheme: BottomSheetThemeData(
-      backgroundColor: p.surface1,
-      modalBackgroundColor: p.surface1,
-    ),
-  );
-}
+ThemeData _darkTheme() => appDarkTheme();
 
-ThemeData _lightTheme() {
-  final p = Palette.light;
-  return ThemeData(
-    brightness: Brightness.light,
-    useMaterial3: true,
-    scaffoldBackgroundColor: p.canvas,
-    cardColor: p.card,
-    dividerColor: p.lineSoft,
-    splashFactory: InkSparkle.splashFactory,
-    colorScheme: ColorScheme.light(
-      primary: p.goldSolid,
-      onPrimary: p.onGold,
-      secondary: p.mintSolid,
-      onSecondary: p.onMint,
-      error: p.redSolid,
-      onError: p.onRed,
-      surface: p.card,
-      onSurface: p.ink,
-      surfaceContainerHighest: p.cardHi,
-      outlineVariant: p.line,
-    ),
-    textTheme: TextTheme(
-      bodyMedium: TextStyle(
-        fontFamily: kBodyFont,
-        fontSize: 14,
-        height: 1.5,
-        color: p.ink,
-      ),
-    ),
-    sliderTheme: SliderThemeData(
-      activeTrackColor: p.goldSolid,
-      inactiveTrackColor: p.cardHighest,
-      thumbColor: p.gold,
-      overlayColor: p.goldsoft,
-      trackHeight: 4,
-      thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 8),
-    ),
-    switchTheme: SwitchThemeData(
-      thumbColor: WidgetStateProperty.resolveWith(
-        (s) => s.contains(WidgetState.selected) ? p.onGold : p.muted,
-      ),
-      trackColor: WidgetStateProperty.resolveWith(
-        (s) => s.contains(WidgetState.selected) ? p.goldSolid : p.cardHighest,
-      ),
-    ),
-    bottomSheetTheme: BottomSheetThemeData(
-      backgroundColor: p.surface1,
-      modalBackgroundColor: p.surface1,
-    ),
-  );
-}
+ThemeData _lightTheme() => appLightTheme();
 
 // ---------------------------------------------------------------------------
 
@@ -752,183 +653,63 @@ class _HomeScreenState extends State<HomeScreen> {
       backgroundColor: p.canvas,
       body: Column(
         children: [
-          SafeArea(bottom: false, child: _topBar(p)),
+          SafeArea(bottom: false, child: _header(p)),
           Expanded(
             child: IndexedStack(index: tab, children: pages),
           ),
-          Container(
-            decoration: BoxDecoration(
-              color: p.track.withAlpha(242),
-              border: Border(top: BorderSide(width: 1, color: p.lineSoft)),
-            ),
-            padding: EdgeInsets.only(
-              bottom: MediaQuery.of(context).padding.bottom,
-            ),
-            child: SizedBox(
-              height: 64,
-              child: Row(
-                children: [
-                  _navItem(p, 0, Icons.calculate_outlined, 'Kalkulator'),
-                  _navItem(p, 1, Icons.grid_view_outlined, 'Matrix Risiko'),
-                  _navItem(p, 2, Icons.trending_up, 'Simulasi'),
-                  _navItem(p, 3, Icons.menu_book_outlined, 'Jurnal'),
-                  _navItem(p, 4, Icons.cloud_sync_outlined, 'MT5'),
-                ],
+          PillNavBar(
+            index: tab,
+            onTap: (i) => setState(() => tab = i),
+            items: const [
+              PillNavItem(
+                Icons.space_dashboard_outlined,
+                Icons.space_dashboard,
+                'Kalkulator',
               ),
-            ),
+              PillNavItem(
+                Icons.grid_view_outlined,
+                Icons.grid_view,
+                'Matrix Risiko',
+              ),
+              PillNavItem(Icons.insights_outlined, Icons.insights, 'Simulasi'),
+              PillNavItem(Icons.menu_book_outlined, Icons.menu_book, 'Jurnal'),
+              PillNavItem(Icons.cloud_sync_outlined, Icons.cloud_sync, 'MT5'),
+            ],
           ),
         ],
       ),
     );
   }
 
-  Widget _navItem(Palette p, int i, IconData icon, String label) {
-    final active = tab == i;
-    final color = active ? p.gold : p.muted;
-    return Expanded(
-      child: InkWell(
-        onTap: () => setState(() => tab = i),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(active ? _filled(icon) : icon, size: 22, color: color),
-            const SizedBox(height: 3),
-            Text(
-              label,
-              style: TextStyle(
-                fontFamily: kBodyFont,
-                fontSize: 11,
-                fontWeight: active ? FontWeight.w600 : FontWeight.w400,
-                letterSpacing: 0.3,
-                color: color,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  // ---- header: sapaan di dashboard, header halaman di tab lain ----
 
-  IconData _filled(IconData i) {
-    if (i == Icons.calculate_outlined) return Icons.calculate;
-    if (i == Icons.grid_view_outlined) return Icons.grid_view;
-    if (i == Icons.menu_book_outlined) return Icons.menu_book;
-    if (i == Icons.cloud_sync_outlined) return Icons.cloud_sync;
-    return i;
-  }
-
-  // ---- top bar ----
-
-  Widget _topBar(Palette p) {
-    final tabNames = const [
-      'Kalkulator',
+  Widget _header(Palette p) {
+    void openTheme() => showThemePickerSheet(context);
+    if (tab == 0) {
+      final h = DateTime.now().hour;
+      final greet = h < 11
+          ? 'Selamat pagi,'
+          : (h < 15
+                ? 'Selamat siang,'
+                : (h < 19 ? 'Selamat sore,' : 'Selamat malam,'));
+      return GreetingHeader(
+        greeting: greet,
+        title: 'Transcendence',
+        subtitle: 'LIVE GOLD · XAUUSD · Kalkulator Lot',
+        onTheme: openTheme,
+      );
+    }
+    const titles = [
+      '',
       'Matrix Risiko',
-      'Simulasi',
-      'Jurnal',
-      'MT5',
+      'Simulasi Monte Carlo',
+      'Jurnal Trading',
+      'Jurnal MT5',
     ];
-    return Container(
-      height: 64,
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      decoration: BoxDecoration(
-        color: p.canvas.withAlpha(204),
-        border: Border(bottom: BorderSide(width: 1, color: p.lineSoft)),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 34,
-            height: 34,
-            decoration: BoxDecoration(
-              color: p.cardHi,
-              borderRadius: BorderRadius.circular(9),
-            ),
-            clipBehavior: Clip.antiAlias,
-            child: Image.asset(
-              'assets/icon/icon.png',
-              fit: BoxFit.cover,
-              errorBuilder: (_, _, _) =>
-                  Icon(Icons.auto_graph, color: p.gold, size: 18),
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        'Transcendence',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: txt(context, 16, w: FontWeight.w600, ls: -0.2),
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    BadgePill('XAUUSD', color: p.gold, bg: p.cardHi),
-                  ],
-                ),
-                const SizedBox(height: 2),
-                Row(
-                  children: [
-                    PulseDot(p.mint, size: 5),
-                    const SizedBox(width: 5),
-                    Text(
-                      'LIVE GOLD',
-                      style: TextStyle(
-                        fontFamily: kMonoFont,
-                        fontSize: 9.5,
-                        fontWeight: FontWeight.w600,
-                        letterSpacing: 1.1,
-                        color: p.mint,
-                      ),
-                    ),
-                    Text(
-                      '  ${tabNames[tab]}',
-                      style: TextStyle(
-                        fontFamily: kMonoFont,
-                        fontSize: 9.5,
-                        letterSpacing: 0.6,
-                        color: p.warm,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          Container(
-            width: 32,
-            height: 32,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: p.cardHi,
-              border: Border.all(width: 1, color: p.line),
-            ),
-            child: IconButton(
-              padding: EdgeInsets.zero,
-              iconSize: 16,
-              tooltip: 'Tema tampilan',
-              icon: Icon(Icons.palette_outlined, color: p.muted),
-              onPressed: () => showThemePickerSheet(context),
-            ),
-          ),
-          const SizedBox(width: 8),
-          Container(
-            width: 32,
-            height: 32,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: p.goldSolid,
-              border: Border.all(width: 2, color: p.gold),
-            ),
-            child: Icon(Icons.person, size: 17, color: p.onGold),
-          ),
-        ],
-      ),
+    return PageHeader(
+      title: titles[tab],
+      onBack: () => setState(() => tab = 0),
+      onTheme: openTheme,
     );
   }
 
@@ -938,68 +719,83 @@ class _HomeScreenState extends State<HomeScreen> {
     final b0 = bal;
     final d = ruleSel != null ? ruleData(ruleSel!) : null;
 
+    // Nilai tampilan dihitung PERSIS seperti versi lama (hanya dipindah
+    // ke kartu baru) — tidak ada rumus baru.
+    final tgtVal = d != null
+        ? '+${shortIdr(d.next.toDouble())}'
+        : (b0 != null ? '+${shortIdr(b0 * 0.2)}' : '–');
+    final tgtSub = d != null
+        ? (d.n < 35 ? 'Ke Rule ${d.n + 1}' : 'Di luar tabel')
+        : 'Pola +20%';
+    final slVal = d != null
+        ? '−${shortIdr(d.sl.toDouble())}'
+        : (b0 != null ? '−${shortIdr(b0 * 0.1)}' : '–');
+    final slSub = d != null
+        ? 'Sisa ${shortIdr(d.after.toDouble())}'
+        : 'Pola −10%';
+    final bgVal = d != null ? riX : '–';
+    final bgSub = d != null ? '+${shortIdr(d.diff.toDouble())}' : 'Pilih Rule';
+
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 28),
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 28),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _stageBanner(p, d),
-          const SizedBox(height: 12),
           // PENTING: jangan pakai CrossAxisAlignment.stretch di dalam
           // SingleChildScrollView (tinggi tak terbatas → constraint
           // h=Infinity menggagalkan layout, bug sama seperti commit d2d847b).
+          _stageBanner(p, d),
+          const SizedBox(height: 16),
+          _lotHero(p),
+          const SizedBox(height: 16),
           Row(
             children: [
-              _miniCard(
-                p,
-                icon: Icons.arrow_upward,
-                iconColor: p.mint,
-                label: 'TARGET +20%',
-                value: d != null
-                    ? '+${shortIdr(d.next.toDouble())}'
-                    : (b0 != null ? '+${shortIdr(b0 * 0.2)}' : '–'),
-                sub: d != null
-                    ? (d.n < 35 ? 'Ke Rule ${d.n + 1}' : 'Di luar tabel')
-                    : 'Pola +20%',
-                valueColor: p.mint,
+              Expanded(
+                child: StatCard(
+                  label: 'Target +20%',
+                  value: tgtVal,
+                  valueColor: p.ink,
+                  icon: Icons.north_east,
+                  iconColor: p.mint,
+                  note: tgtSub,
+                  noteIcon: Icons.trending_up,
+                  noteColor: p.mint,
+                ),
               ),
-              const SizedBox(width: 8),
-              _miniCard(
-                p,
-                icon: Icons.arrow_downward,
-                iconColor: p.red,
-                label: 'SL MAX 10%',
-                value: d != null
-                    ? '−${shortIdr(d.sl.toDouble())}'
-                    : (b0 != null ? '−${shortIdr(b0 * 0.1)}' : '–'),
-                sub: d != null
-                    ? 'Sisa ${shortIdr(d.after.toDouble())}'
-                    : 'Pola −10%',
-                valueColor: p.red,
-              ),
-              const SizedBox(width: 8),
-              _miniCard(
-                p,
-                icon: Icons.restart_alt,
-                iconColor: p.gold,
-                label: 'BUANGAN',
-                value: d != null ? riX : '–',
-                sub: d != null
-                    ? '+${shortIdr(d.diff.toDouble())}'
-                    : 'Pilih Rule',
-                valueColor: p.gold,
+              const SizedBox(width: 12),
+              Expanded(
+                child: StatCard(
+                  label: 'SL Maks 10%',
+                  value: slVal,
+                  valueColor: p.ink,
+                  icon: Icons.south_east,
+                  iconColor: p.red,
+                  note: slSub,
+                  noteIcon: Icons.trending_down,
+                  noteColor: p.red,
+                ),
               ),
             ],
           ),
           const SizedBox(height: 12),
-          _lotHero(p),
+          _listRowCard(
+            p,
+            icon: Icons.restart_alt,
+            iconColor: p.gold,
+            title: 'Buangan Rule',
+            sub: bgSub,
+            value: bgVal,
+            valueColor: p.gold,
+          ),
+          const SizedBox(height: 22),
+          _sectionLabel(p, 'Pengaturan Posisi'),
           const SizedBox(height: 12),
           _slInputCard(p),
           const SizedBox(height: 12),
           _kursCard(p, b0),
           const SizedBox(height: 12),
           _recoveryCard(p),
-          const SizedBox(height: 16),
+          const SizedBox(height: 18),
           GoldButton(
             'Lihat Tabel Rekomendasi Lot',
             icon: Icons.table_chart_outlined,
@@ -1010,7 +806,62 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ---- banner trading plan stage ----
+  /// Judul seksi di luar kartu ("Transaction" pada referensi).
+  Widget _sectionLabel(Palette p, String text, {Widget? trailing}) => Row(
+    children: [
+      Expanded(
+        child: Text(
+          text,
+          style: txt(context, 17, w: FontWeight.w600, ls: -0.3),
+        ),
+      ),
+      ?trailing,
+    ],
+  );
+
+  /// Kartu baris gaya daftar transaksi referensi.
+  Widget _listRowCard(
+    Palette p, {
+    required IconData icon,
+    required Color iconColor,
+    required String title,
+    required String sub,
+    required String value,
+    required Color valueColor,
+  }) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 14, 16, 14),
+      decoration: cardDecoration(p),
+      child: Row(
+        children: [
+          IconBubble(icon, color: iconColor, size: 42, square: true),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: txt(context, 14, w: FontWeight.w600)),
+                const SizedBox(height: 2),
+                Text(
+                  sub,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: txt(context, 12, color: p.muted),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          Text(
+            value,
+            style: mono(context, 15, w: FontWeight.w600, color: valueColor),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ---- banner trading plan stage (gaya kolom pencarian referensi) ----
 
   Widget _stageBanner(Palette p, RuleData? d) {
     final b0 = bal;
@@ -1018,133 +869,92 @@ class _HomeScreenState extends State<HomeScreen> {
         ? 'Rule ${d.n} · ${idr(d.b)}'
         : (b0 != null ? 'Manual · ${shortIdr(b0)}' : 'Manual · isi balance');
     final rec = ruleMode == 'rec' && ruleSel != null;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: p.surface1,
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: InkWell(
-              onTap: _openRuleSheet,
-              borderRadius: BorderRadius.circular(8),
-              child: Row(
-                children: [
-                  PulseDot(p.gold, size: 7),
-                  const SizedBox(width: 9),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'TRADING PLAN STAGE',
-                          style: labelSm(context, color: p.warm),
-                        ),
-                        const SizedBox(height: 1),
-                        Row(
-                          children: [
-                            Flexible(
-                              child: Text(
-                                value,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: txt(context, 15.5, w: FontWeight.w600),
-                              ),
-                            ),
-                            Icon(Icons.expand_more, size: 18, color: p.gold),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
+    return Material(
+      color: p.isDark ? p.card : p.surface1,
+      borderRadius: BorderRadius.circular(999),
+      child: InkWell(
+        onTap: _openRuleSheet,
+        borderRadius: BorderRadius.circular(999),
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(8, 8, 10, 8),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(width: 1, color: p.line),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: p.goldSolid,
+                  shape: BoxShape.circle,
+                ),
+                alignment: Alignment.center,
+                child: Icon(Icons.flag_outlined, size: 19, color: p.onGold),
               ),
-            ),
+              const SizedBox(width: 11),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'TRADING PLAN STAGE',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontFamily: kBodyFont,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 1.0,
+                        color: p.muted,
+                      ),
+                    ),
+                    const SizedBox(height: 1),
+                    Text(
+                      value,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: txt(context, 14.5, w: FontWeight.w600),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                decoration: BoxDecoration(
+                  color: rec ? p.goldsoft : p.goodsoft,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      rec
+                          ? Icons.change_circle_outlined
+                          : Icons.shield_outlined,
+                      size: 12,
+                      color: rec ? p.gold : p.mint,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      rec ? 'RECOVERY 1:1' : 'COMPOUNDING',
+                      style: TextStyle(
+                        fontFamily: kBodyFont,
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.6,
+                        color: rec ? p.gold : p.mint,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 4),
+              Icon(Icons.expand_more, size: 20, color: p.muted),
+            ],
           ),
-          const SizedBox(width: 8),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-            decoration: BoxDecoration(
-              color: rec ? p.goldsoft : p.cardHi,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Row(
-              children: [
-                Icon(
-                  rec ? Icons.change_circle_outlined : Icons.shield_outlined,
-                  size: 13,
-                  color: rec ? p.gold : p.mint,
-                ),
-                const SizedBox(width: 5),
-                Text(
-                  rec ? 'RECOVERY 1:1' : 'COMPOUNDING',
-                  style: TextStyle(
-                    fontFamily: kBodyFont,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 0.8,
-                    color: rec ? p.gold : p.mint,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _miniCard(
-    Palette p, {
-    required IconData icon,
-    required Color iconColor,
-    required String label,
-    required String value,
-    required String sub,
-    required Color valueColor,
-  }) {
-    return Expanded(
-      child: Container(
-        padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(
-          color: p.card,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(width: 1, color: p.lineSoft),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(icon, size: 13, color: iconColor),
-                const SizedBox(width: 4),
-                Expanded(
-                  child: Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: labelSm(context, color: p.warm),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Text(
-              value,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: mono(context, 13, w: FontWeight.w600, color: valueColor),
-            ),
-            const SizedBox(height: 2),
-            Text(
-              sub,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: txt(context, 10.5, color: p.muted.withAlpha(210)),
-            ),
-          ],
         ),
       ),
     );
@@ -1191,160 +1001,197 @@ class _HomeScreenState extends State<HomeScreen> {
     // dilewati. Warning merah lot > 10.00 tetap tampil.
     final showSub = auto.big != '0.00';
 
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: p.cardHi,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(width: 1, color: p.line),
-      ),
-      child: Stack(
+    return HeroCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Positioned(
-            right: -30,
-            top: -30,
-            child: CornerGlow(color: Color(0x1AF59E0B), size: 120),
-          ),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          Row(
             children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Row(
-                      children: [
-                        Flexible(
-                          child: Text(
-                            'RECOMMENDED LOT SIZE',
-                            overflow: TextOverflow.ellipsis,
-                            style: labelSm(context, color: p.warm),
-                          ),
+              const Expanded(
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: HeroChip(
+                    'RECOMMENDED LOT SIZE',
+                    icon: Icons.auto_graph,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              if (!empty && !bad)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: p.onHero.withAlpha(235),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Row(
+                    children: [
+                      PulseDot(p.mintSolid, size: 6),
+                      const SizedBox(width: 5),
+                      Text(
+                        'Safe Floor',
+                        style: TextStyle(
+                          fontFamily: kMonoFont,
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w600,
+                          color: p.heroA,
                         ),
-                        const SizedBox(width: 6),
-                        BadgePill('XAUUSD', color: p.gold, bg: p.cardHighest),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
-                  if (!empty && !bad)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        color: p.card,
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                      child: Row(
-                        children: [
-                          PulseDot(p.mint, size: 6),
-                          const SizedBox(width: 5),
-                          Text(
-                            'Safe Floor',
-                            style: TextStyle(
-                              fontFamily: kMonoFont,
-                              fontSize: 10.5,
-                              fontWeight: FontWeight.w500,
-                              color: p.mint,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  if (bad)
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        color: p.redsoft,
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                      child: Row(
-                        children: [
-                          PulseDot(p.red, size: 6),
-                          const SizedBox(width: 5),
-                          Text(
-                            'Melebihi Batas',
-                            style: TextStyle(
-                              fontFamily: kMonoFont,
-                              fontSize: 10.5,
-                              fontWeight: FontWeight.w500,
-                              color: p.red,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                ],
-              ),
-              const SizedBox(height: 10),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.baseline,
-                textBaseline: TextBaseline.alphabetic,
-                children: [
-                  Text(
-                    auto.big,
-                    style: mono(
-                      context,
-                      46,
-                      w: FontWeight.w600,
-                      color: bad ? p.red : p.gold,
-                      ls: -1.2,
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    'LOT',
-                    style: TextStyle(
-                      fontFamily: kMonoFont,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
-                      letterSpacing: 1.6,
-                      color: bad ? p.red.withAlpha(200) : p.gold.withAlpha(200),
-                    ),
-                  ),
-                ],
-              ),
-              if (showSub) ...[
-                const SizedBox(height: 4),
-                Text(
-                  subText,
-                  style: txt(context, 12, color: p.muted, height: 1.45),
                 ),
-              ],
-              const SizedBox(height: 12),
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: p.card.withAlpha(160),
-                  borderRadius: BorderRadius.circular(12),
+              if (bad)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: p.redSolid,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Row(
+                    children: [
+                      PulseDot(p.onRed, size: 6),
+                      const SizedBox(width: 5),
+                      Text(
+                        'Melebihi Batas',
+                        style: TextStyle(
+                          fontFamily: kMonoFont,
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w600,
+                          color: p.onRed,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    _heroFact(
-                      p,
-                      'Risiko Aktual',
-                      riskVal,
-                      riskSub,
-                      p.ink,
-                      p.mint,
-                    ),
-                    const SizedBox(width: 10),
-                    _heroFact(p, 'Jarak TP', tpVal, tpSub, p.mint, p.mint),
-                    const SizedBox(width: 10),
-                    _heroFact(p, 'Target R:R', rrVal, rrSub, p.gold, p.muted),
-                  ],
+            ],
+          ),
+          const SizedBox(height: 14),
+          Text(
+            'Ukuran lot XAUUSD yang direkomendasikan',
+            style: txt(context, 13, color: p.onHeroMuted),
+          ),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.baseline,
+            textBaseline: TextBaseline.alphabetic,
+            children: [
+              Text(
+                auto.big,
+                style: mono(
+                  context,
+                  52,
+                  w: FontWeight.w600,
+                  color: p.onHero,
+                  ls: -1.6,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'LOT',
+                style: TextStyle(
+                  fontFamily: kMonoFont,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                  letterSpacing: 1.6,
+                  color: p.onHeroMuted,
                 ),
               ),
             ],
+          ),
+          if (showSub) ...[
+            const SizedBox(height: 4),
+            Text(
+              subText,
+              style: txt(
+                context,
+                12,
+                color: bad ? p.onHero : p.onHeroMuted,
+                height: 1.45,
+              ),
+            ),
+          ],
+          const SizedBox(height: 14),
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: p.onHero.withAlpha(30),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(width: 1, color: p.onHero.withAlpha(36)),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _heroFact(
+                  p,
+                  'Risiko Aktual',
+                  riskVal,
+                  riskSub,
+                  p.onHero,
+                  p.onHeroMuted,
+                ),
+                const SizedBox(width: 10),
+                _heroFact(p, 'Jarak TP', tpVal, tpSub, p.onHero, p.onHeroMuted),
+                const SizedBox(width: 10),
+                _heroFact(
+                  p,
+                  'Target R:R',
+                  rrVal,
+                  rrSub,
+                  p.onHero,
+                  p.onHeroMuted,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+          InkWell(
+            onTap: () => setState(() => tab = 1),
+            borderRadius: BorderRadius.circular(8),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Flexible(
+                    child: Text(
+                      'Lihat Tabel Rekomendasi Lot',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: txt(
+                        context,
+                        12.5,
+                        w: FontWeight.w600,
+                        color: p.onHero,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Icon(Icons.chevron_right, size: 18, color: p.onHero),
+                ],
+              ),
+            ),
           ),
         ],
       ),
     );
   }
+
+  /// Lingkaran dekoratif lembut di kartu hero biru.
+  Widget _heroOrb(Palette p, double size) => IgnorePointer(
+    child: Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: p.onHero.withAlpha(p.isDark ? 18 : 26),
+      ),
+    ),
+  );
 
   Widget _heroFact(
     Palette p,
@@ -1362,7 +1209,7 @@ class _HomeScreenState extends State<HomeScreen> {
             label,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: txt(context, 11, color: p.muted),
+            style: txt(context, 11, color: p.onHeroMuted),
           ),
           const SizedBox(height: 3),
           Text(
@@ -1390,32 +1237,21 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _slInputCard(Palette p) {
     final planV = numPlain(plan.text)?.round();
     const presets = ['15', '20', '25', '30', '40'];
-    return ObsCard(
+    return SectionCard(
+      title: 'Maksimal Stop Loss',
+      subtitle: 'Jarak SL dalam pips · 1 pip = 0.10 \$',
+      icon: Icons.straighten,
       children: [
-        Row(
-          children: [
-            Expanded(
-              child: Text(
-                'MAKSIMAL STOP LOSS (PIPS)',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: labelSm(context),
-              ),
-            ),
-            const SizedBox(width: 8),
-            Text('1 pip = 0.10 \$', style: mono(context, 11.5, color: p.gold)),
-          ],
-        ),
-        const SizedBox(height: 10),
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           decoration: BoxDecoration(
-            color: p.cardHi,
-            borderRadius: BorderRadius.circular(12),
+            color: p.surface1,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(width: 1, color: p.isDark ? p.line : p.lineSoft),
           ),
           child: Row(
             children: [
-              Icon(Icons.straighten, size: 20, color: p.muted),
+              Icon(Icons.straighten, size: 20, color: p.gold),
               const SizedBox(width: 10),
               Expanded(
                 child: TextField(
@@ -1466,15 +1302,15 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _stepBtn(Palette p, IconData icon, VoidCallback onTap) {
     return Material(
-      color: p.surface1,
-      borderRadius: BorderRadius.circular(8),
+      color: p.isDark ? p.cardHighest : p.card,
+      shape: CircleBorder(side: BorderSide(color: p.line)),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
+        customBorder: const CircleBorder(),
         child: SizedBox(
-          width: 34,
-          height: 34,
-          child: Icon(icon, size: 17, color: p.ink),
+          width: 36,
+          height: 36,
+          child: Icon(icon, size: 18, color: p.ink),
         ),
       ),
     );
@@ -1497,8 +1333,9 @@ class _HomeScreenState extends State<HomeScreen> {
     return Container(
       decoration: BoxDecoration(
         color: p.card,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(width: 1, color: p.lineSoft),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(width: 1, color: p.isDark ? p.lineSoft : p.line),
+        boxShadow: p.cardShadow,
       ),
       clipBehavior: Clip.antiAlias,
       child: Column(
@@ -1509,8 +1346,17 @@ class _HomeScreenState extends State<HomeScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
               child: Row(
                 children: [
-                  Icon(Icons.tune, size: 17, color: p.gold),
-                  const SizedBox(width: 9),
+                  Container(
+                    width: 30,
+                    height: 30,
+                    decoration: BoxDecoration(
+                      color: p.goldsoft,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    alignment: Alignment.center,
+                    child: Icon(Icons.tune, size: 16, color: p.gold),
+                  ),
+                  const SizedBox(width: 10),
                   Expanded(
                     child: Text(
                       'Parameter Kurs & Saldo',
@@ -1522,7 +1368,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     style: mono(
                       context,
                       11.5,
-                      color: p.mint,
+                      color: kursBad ? p.red : p.gold,
                       w: FontWeight.w500,
                     ),
                   ),
@@ -1663,7 +1509,7 @@ class _HomeScreenState extends State<HomeScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       decoration: BoxDecoration(
         color: p.surface1,
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(14),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1764,83 +1610,79 @@ class _HomeScreenState extends State<HomeScreen> {
           );
 
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 28),
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 28),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          SectionCard(
+            title: 'Matrix Setup & SL Pips',
+            subtitle: 'Rekomendasi ukuran lot vs toleransi SL',
+            trailing: GhostButton(
+              'CSV',
+              icon: Icons.download,
+              onTap: _exportCsv,
+            ),
             children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+              // segmented control
+              Container(
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                  color: p.isDark ? p.surface1 : p.track,
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                child: Row(
                   children: [
-                    Row(
-                      children: [
-                        PulseDot(p.gold, size: 6),
-                        const SizedBox(width: 7),
-                        Flexible(
-                          child: Text(
-                            'Matrix Setup & SL Pips',
-                            style: txt(
-                              context,
-                              19,
-                              w: FontWeight.w600,
-                              ls: -0.3,
-                            ),
-                          ),
-                        ),
-                      ],
+                    _segTab(
+                      p,
+                      0,
+                      Icons.show_chart,
+                      'Rekomendasi 1:${ratio.text}',
                     ),
-                    const SizedBox(height: 3),
-                    Text(
-                      'Rekomendasi ukuran lot vs toleransi SL',
-                      style: txt(context, 12, color: p.muted),
-                    ),
+                    const SizedBox(width: 4),
+                    _segTab(p, 1, Icons.tune, 'Matrix % Risiko'),
                   ],
                 ),
               ),
-              const SizedBox(width: 10),
-              GhostButton('CSV', icon: Icons.download, onTap: _exportCsv),
             ],
           ),
           const SizedBox(height: 14),
-          // segmented control
-          Container(
-            padding: const EdgeInsets.all(4),
-            decoration: BoxDecoration(
-              color: p.track,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Row(
-              children: [
-                _segTab(p, 0, Icons.show_chart, 'Rekomendasi 1:${ratio.text}'),
-                const SizedBox(width: 4),
-                _segTab(p, 1, Icons.tune, 'Matrix % Risiko'),
-              ],
-            ),
-          ),
-          const SizedBox(height: 12),
           _setupCard(p, b0, ra, pl),
+          const SizedBox(height: 22),
+          _sectionLabel(
+            p,
+            matrixMode == 0 ? 'Tabel Rekomendasi Lot' : 'Matrix % Risiko',
+            trailing: BadgePill('XAUUSD', color: p.gold, bg: p.goldsoft),
+          ),
           const SizedBox(height: 12),
-          AnimatedSwitcher(
-            duration: const Duration(milliseconds: 160),
-            child: KeyedSubtree(
-              key: ValueKey(matrixMode),
-              child: matrixMode == 0 ? mainTable : matrixTable,
+          Container(
+            padding: const EdgeInsets.all(6),
+            decoration: cardDecoration(p),
+            clipBehavior: Clip.antiAlias,
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 160),
+              child: KeyedSubtree(
+                key: ValueKey(matrixMode),
+                child: matrixMode == 0 ? mainTable : matrixTable,
+              ),
             ),
           ),
-          const SizedBox(height: 8),
-          Text(
-            matrixMode == 0
-                ? 'Baris emas = lot terbesar yang masih muat untuk rencana SL-mu. Baris pudar: SL < 10 pips — terlalu sempit untuk emas (spread saja 2–4 pips).'
-                : 'Kolom berwarna = risk % yang kamu isi. Kotak bergaris emas = lot terbesar yang masih muat di tiap persentase.',
-            style: txt(context, 11.5, color: p.muted, height: 1.5),
+          const SizedBox(height: 10),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Text(
+              matrixMode == 0
+                  ? 'Baris biru = lot terbesar yang masih muat untuk rencana SL-mu. Baris pudar: SL < 10 pips — terlalu sempit untuk emas (spread saja 2–4 pips).'
+                  : 'Kolom berwarna = risk % yang kamu isi. Kotak bergaris biru = lot terbesar yang masih muat di tiap persentase.',
+              style: txt(context, 11.5, color: p.muted, height: 1.5),
+            ),
           ),
           const SizedBox(height: 14),
           if (tCalc != null && tCalc!.ok) _marginBanner(p),
           const SizedBox(height: 14),
-          _legendRow(p),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: _legendRow(p),
+          ),
         ],
       ),
     );
@@ -1850,17 +1692,17 @@ class _HomeScreenState extends State<HomeScreen> {
     final active = matrixMode == i;
     return Expanded(
       child: Material(
-        color: active ? p.cardHi : Colors.transparent,
-        borderRadius: BorderRadius.circular(9),
+        color: active ? p.goldSolid : Colors.transparent,
+        borderRadius: BorderRadius.circular(999),
         child: InkWell(
           onTap: () => setState(() => matrixMode = i),
-          borderRadius: BorderRadius.circular(9),
+          borderRadius: BorderRadius.circular(999),
           child: Container(
-            padding: const EdgeInsets.symmetric(vertical: 9),
+            padding: const EdgeInsets.symmetric(vertical: 10),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(icon, size: 15, color: active ? p.gold : p.muted),
+                Icon(icon, size: 15, color: active ? p.onGold : p.muted),
                 const SizedBox(width: 6),
                 Flexible(
                   child: Text(
@@ -1868,10 +1710,10 @@ class _HomeScreenState extends State<HomeScreen> {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontFamily: kMonoFont,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                      color: active ? p.gold : p.muted,
+                      fontFamily: kBodyFont,
+                      fontSize: 12.5,
+                      fontWeight: active ? FontWeight.w600 : FontWeight.w500,
+                      color: active ? p.onGold : p.muted,
                     ),
                   ),
                 ),
@@ -1894,10 +1736,11 @@ class _HomeScreenState extends State<HomeScreen> {
     Widget tile(String label, String value, String unit, Color lc, Color vc) =>
         Expanded(
           child: Container(
-            padding: const EdgeInsets.all(10),
+            padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: p.surface1,
-              borderRadius: BorderRadius.circular(10),
+              color: p.onHero.withAlpha(30),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(width: 1, color: p.onHero.withAlpha(36)),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1928,60 +1771,46 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                     ),
                     const SizedBox(width: 4),
-                    Text(
-                      unit,
-                      style: txt(context, 10.5, color: vc.withAlpha(160)),
-                    ),
+                    Text(unit, style: txt(context, 10.5, color: p.onHeroMuted)),
                   ],
                 ),
               ],
             ),
           ),
         );
-    return Container(
-      padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: p.card,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(width: 1, color: p.lineSoft),
-      ),
+    return HeroCard(
+      padding: const EdgeInsets.all(18),
       child: Stack(
         children: [
-          const Positioned(
-            right: -28,
-            top: -28,
-            child: CornerGlow(color: Color(0x14F59E0B), size: 100),
-          ),
           Column(
             children: [
               Row(
                 children: [
-                  Icon(Icons.verified_outlined, size: 16, color: p.gold),
-                  const SizedBox(width: 7),
                   Expanded(
-                    child: Text(
-                      'SETUP PILIHAN · AKUN ${b0 != null ? shortIdr(b0) : '–'}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: labelSm(context, color: p.gold),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: HeroChip(
+                        'SETUP PILIHAN · AKUN ${b0 != null ? shortIdr(b0) : '–'}',
+                        icon: Icons.verified_outlined,
+                      ),
                     ),
                   ),
                   const SizedBox(width: 8),
                   BadgePill(
                     'R:R 1:${ra ?? '–'}',
-                    color: p.mint,
-                    bg: p.goodsoft,
+                    color: p.heroA,
+                    bg: p.onHero.withAlpha(235),
                   ),
                 ],
               ),
-              const SizedBox(height: 10),
+              const SizedBox(height: 14),
               Row(
                 children: [
-                  tile('Lot Optimal', lotOpt, 'lot', p.muted, p.ink),
+                  tile('Lot Optimal', lotOpt, 'lot', p.onHeroMuted, p.onHero),
                   const SizedBox(width: 8),
-                  tile('Maks SL', maksSl, 'pips', p.red, p.red),
+                  tile('Maks SL', maksSl, 'pips', p.onHeroMuted, p.onHero),
                   const SizedBox(width: 8),
-                  tile('Target TP', tgtTp, 'pips', p.mint, p.mint),
+                  tile('Target TP', tgtTp, 'pips', p.onHeroMuted, p.onHero),
                 ],
               ),
             ],
@@ -1992,11 +1821,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _emptyTableHint(Palette p, String msg) => Container(
-    height: 48,
+    height: 52,
     decoration: BoxDecoration(
       color: p.card,
-      border: Border.all(width: 1, color: p.lineSoft),
-      borderRadius: BorderRadius.circular(12),
+      border: Border.all(width: 1, color: p.isDark ? p.lineSoft : p.line),
+      borderRadius: BorderRadius.circular(16),
     ),
     alignment: Alignment.centerLeft,
     padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -2007,20 +1836,21 @@ class _HomeScreenState extends State<HomeScreen> {
     final rp = numPlain(risk.text) ?? 0;
     final frac = (rp / 20).clamp(0.05, 1.0);
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: p.card,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(width: 1, color: p.lineSoft),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(width: 1, color: p.isDark ? p.lineSoft : p.line),
+        boxShadow: p.cardShadow,
       ),
       child: Row(
         children: [
           Container(
-            width: 36,
-            height: 36,
+            width: 38,
+            height: 38,
             decoration: BoxDecoration(
               color: p.goodsoft,
-              borderRadius: BorderRadius.circular(9),
+              borderRadius: BorderRadius.circular(12),
             ),
             child: Icon(Icons.shield_outlined, size: 19, color: p.mint),
           ),
@@ -2106,16 +1936,21 @@ class _HomeScreenState extends State<HomeScreen> {
       p.mint,
     );
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(16, 14, 16, 28),
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 28),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _mcHero(p),
-          const SizedBox(height: 12),
+          const SizedBox(height: 14),
           _fanCard(p, cc),
           const SizedBox(height: 12),
-          if (mcStats.isNotEmpty) _metricTiles(p),
-          const SizedBox(height: 12),
+          if (mcStats.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            _sectionLabel(p, 'Ringkasan Skenario'),
+            const SizedBox(height: 12),
+            _metricTiles(p),
+          ],
+          const SizedBox(height: 14),
           _paramCard(p),
           const SizedBox(height: 16),
           GoldButton(
@@ -2125,23 +1960,10 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           const SizedBox(height: 12),
           if (mc != null) ...[
-            ObsCard(
-              children: [
-                Row(
-                  children: [
-                    Icon(Icons.equalizer, size: 16, color: p.gold),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        'Sebaran Balance Akhir',
-                        style: txt(context, 14.5, w: FontWeight.w600),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                HistChart(mc: mc!, c: cc),
-              ],
+            SectionCard(
+              title: 'Sebaran Balance Akhir',
+              subtitle: 'Distribusi saldo di akhir seluruh simulasi',
+              children: [HistChart(mc: mc!, c: cc)],
             ),
             const SizedBox(height: 12),
           ],
@@ -2163,36 +1985,37 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _mcHero(Palette p) {
     final has = mc != null && mcVerdictNum != '';
     final good = mcVerdictGood;
-    final accent = has ? (good ? p.mint : p.red) : p.muted;
+    final accent = p.onHero;
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: p.cardHi,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(width: 1, color: p.line),
+        gradient: p.heroGradient,
+        borderRadius: BorderRadius.circular(24),
+        boxShadow: [
+          BoxShadow(
+            color: p.goldSolid.withAlpha(p.isDark ? 38 : 70),
+            blurRadius: 26,
+            spreadRadius: -10,
+            offset: const Offset(0, 10),
+          ),
+        ],
       ),
+      clipBehavior: Clip.antiAlias,
       child: Stack(
+        clipBehavior: Clip.none,
         children: [
-          const Positioned(
-            right: -32,
-            top: -32,
-            child: CornerGlow(color: Color(0x1A10B981), size: 130),
-          ),
-          const Positioned(
-            left: 60,
-            bottom: -40,
-            child: CornerGlow(color: Color(0x0DF59E0B), size: 110),
-          ),
+          Positioned(right: -70, top: -80, child: _heroOrb(p, 180)),
+          Positioned(left: 70, bottom: -100, child: _heroOrb(p, 140)),
           Column(
             children: [
               Row(
                 children: [
-                  PulseDot(p.mint, size: 7),
+                  PulseDot(p.onHero, size: 7),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
                       'MONTE CARLO ENGINE',
-                      style: labelSm(context, color: p.warm),
+                      style: labelSm(context, color: p.onHeroMuted),
                     ),
                   ),
                   Container(
@@ -2201,7 +2024,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       vertical: 3,
                     ),
                     decoration: BoxDecoration(
-                      color: p.goodsoft,
+                      color: p.onHero.withAlpha(40),
                       borderRadius: BorderRadius.circular(999),
                     ),
                     child: Text(
@@ -2209,7 +2032,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       style: mono(
                         context,
                         10.5,
-                        color: p.mint,
+                        color: p.onHero,
                         w: FontWeight.w600,
                       ),
                     ),
@@ -2228,7 +2051,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           has
                               ? 'Peluang Profit (${mc!.n} Trade)'
                               : 'Peluang Profit',
-                          style: txt(context, 12.5, color: p.muted),
+                          style: txt(context, 12.5, color: p.onHeroMuted),
                         ),
                         const SizedBox(height: 2),
                         Row(
@@ -2246,20 +2069,39 @@ class _HomeScreenState extends State<HomeScreen> {
                               ),
                             ),
                             if (has) ...[
-                              const SizedBox(width: 8),
-                              Icon(
-                                good ? Icons.trending_up : Icons.trending_down,
-                                size: 14,
-                                color: accent,
-                              ),
-                              const SizedBox(width: 3),
-                              Text(
-                                _verdictLabel(),
-                                style: mono(
-                                  context,
-                                  11,
-                                  color: accent,
-                                  w: FontWeight.w600,
+                              const SizedBox(width: 10),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 3,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: good
+                                      ? p.onHero.withAlpha(235)
+                                      : p.redSolid,
+                                  borderRadius: BorderRadius.circular(999),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      good
+                                          ? Icons.trending_up
+                                          : Icons.trending_down,
+                                      size: 13,
+                                      color: good ? p.mintSolid : p.onRed,
+                                    ),
+                                    const SizedBox(width: 3),
+                                    Text(
+                                      _verdictLabel(),
+                                      style: mono(
+                                        context,
+                                        10.5,
+                                        color: good ? p.heroA : p.onRed,
+                                        w: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
                             ],
@@ -2280,14 +2122,14 @@ class _HomeScreenState extends State<HomeScreen> {
                           child: CustomPaint(
                             painter: _DonutPainter(
                               frac: has ? mc!.pProfit : 0,
-                              track: p.cardHighest,
+                              track: p.onHero.withAlpha(50),
                               arc: has
-                                  ? (good ? p.mintSolid : p.redSolid)
-                                  : p.cardHighest,
+                                  ? (good ? p.onHero : p.redSolid)
+                                  : p.onHero.withAlpha(50),
                             ),
                           ),
                         ),
-                        Icon(Icons.insights, size: 20, color: p.gold),
+                        Icon(Icons.insights, size: 20, color: p.onHero),
                       ],
                     ),
                   ),
@@ -2298,20 +2140,25 @@ class _HomeScreenState extends State<HomeScreen> {
                 padding: const EdgeInsets.only(top: 10),
                 decoration: BoxDecoration(
                   border: Border(
-                    top: BorderSide(width: 1, color: p.lineSoft.withAlpha(120)),
+                    top: BorderSide(width: 1, color: p.onHero.withAlpha(40)),
                   ),
                 ),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Icon(Icons.auto_awesome, size: 14, color: p.gold),
+                    Icon(Icons.auto_awesome, size: 14, color: p.onHero),
                     const SizedBox(width: 7),
                     Expanded(
                       child: Text(
                         has
                             ? 'Ekspektasi ${mc!.exp >= 0 ? '+' : ''}${mc!.exp.toStringAsFixed(2)}R per trade · Impas (BEP): ${(mc!.beWr * 100).toStringAsFixed(1)}% WR'
                             : 'Lengkapi parameter di bawah untuk menjalankan simulasi.',
-                        style: txt(context, 11.5, color: p.muted, height: 1.45),
+                        style: txt(
+                          context,
+                          11.5,
+                          color: p.onHeroMuted,
+                          height: 1.45,
+                        ),
                       ),
                     ),
                   ],
@@ -2323,7 +2170,12 @@ class _HomeScreenState extends State<HomeScreen> {
                   padding: const EdgeInsets.only(left: 21),
                   child: Text(
                     mcSub,
-                    style: txt(context, 10.5, color: p.dim, height: 1.4),
+                    style: txt(
+                      context,
+                      10.5,
+                      color: p.onHeroMuted,
+                      height: 1.4,
+                    ),
                   ),
                 ),
               ],
@@ -2336,49 +2188,29 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Widget _fanCard(Palette p, ChartColors cc) {
     final m = mc;
-    return ObsCard(
-      children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Perjalanan Saldo',
-                    style: txt(context, 15, w: FontWeight.w600),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    'Rentang probabilitas skenario masa depan',
-                    style: txt(context, 11.5, color: p.muted),
-                  ),
-                ],
-              ),
-            ),
-            Material(
-              color: p.cardHi,
-              borderRadius: BorderRadius.circular(8),
-              child: InkWell(
-                onTap: recalcMcOnly,
-                borderRadius: BorderRadius.circular(8),
-                child: SizedBox(
-                  width: 32,
-                  height: 32,
-                  child: Icon(Icons.shuffle, size: 16, color: p.muted),
-                ),
-              ),
-            ),
-          ],
+    return SectionCard(
+      title: 'Perjalanan Saldo',
+      subtitle: 'Rentang probabilitas skenario masa depan',
+      trailing: Material(
+        color: p.goldsoft,
+        shape: const CircleBorder(),
+        child: InkWell(
+          onTap: recalcMcOnly,
+          customBorder: const CircleBorder(),
+          child: SizedBox(
+            width: 38,
+            height: 38,
+            child: Icon(Icons.shuffle, size: 17, color: p.gold),
+          ),
         ),
-        const SizedBox(height: 10),
+      ),
+      children: [
         if (m != null) ...[
           Container(
-            padding: const EdgeInsets.all(10),
+            padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: p.canvas.withAlpha(120),
-              borderRadius: BorderRadius.circular(10),
+              color: p.surface1,
+              borderRadius: BorderRadius.circular(16),
             ),
             child: Column(
               children: [
@@ -2411,11 +2243,7 @@ class _HomeScreenState extends State<HomeScreen> {
             runSpacing: 6,
             children: [
               _legendItem(p, dot: p.gold, text: 'Median Saldo'),
-              _legendItem(
-                p,
-                square: p.mint.withAlpha(120),
-                text: 'Skenario 5–95%',
-              ),
+              _legendItem(p, square: p.band2, text: 'Skenario 5–95%'),
               _legendItem(p, line: p.red, text: 'Batas DD'),
             ],
           ),
@@ -2476,59 +2304,13 @@ class _HomeScreenState extends State<HomeScreen> {
       required String sub,
       required Color valueColor,
     }) {
-      return Container(
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: p.card,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(width: 1, color: p.lineSoft),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    label,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: txt(context, 11, color: p.muted),
-                  ),
-                ),
-                Container(
-                  width: 20,
-                  height: 20,
-                  decoration: BoxDecoration(
-                    color: iconBg,
-                    borderRadius: BorderRadius.circular(5),
-                  ),
-                  child: Icon(icon, size: 12, color: iconColor),
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Text(
-              value,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: mono(
-                context,
-                14.5,
-                w: FontWeight.w600,
-                color: valueColor,
-                ls: -0.2,
-              ),
-            ),
-            const SizedBox(height: 2),
-            Text(
-              sub,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: txt(context, 10.5, color: p.muted.withAlpha(200)),
-            ),
-          ],
-        ),
+      return StatCard(
+        label: label,
+        value: value,
+        valueColor: valueColor,
+        icon: icon,
+        iconColor: iconColor,
+        note: sub,
       );
     }
 
@@ -2628,35 +2410,17 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _paramCard(Palette p) {
     final wrV = (numPlain(wr.text) ?? 50).clamp(1, 100).toDouble();
     final nTrV = (numPlain(nTr.text)?.round() ?? 100).clamp(10, 2000);
-    return ObsCard(
+    return SectionCard(
+      title: 'Parameter Uji Acak',
+      subtitle: 'Atur win rate, jumlah trade & simulasi',
+      icon: Icons.tune,
+      trailing: GhostButton(
+        'Reset',
+        icon: Icons.restart_alt,
+        textColor: p.muted,
+        onTap: _resetMcParams,
+      ),
       children: [
-        Row(
-          children: [
-            Icon(Icons.tune, size: 17, color: p.gold),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                'Parameter Uji Acak',
-                style: txt(context, 15, w: FontWeight.w600),
-              ),
-            ),
-            InkWell(
-              onTap: _resetMcParams,
-              borderRadius: BorderRadius.circular(6),
-              child: Padding(
-                padding: const EdgeInsets.all(4),
-                child: Row(
-                  children: [
-                    Icon(Icons.restart_alt, size: 13, color: p.muted),
-                    const SizedBox(width: 4),
-                    Text('Reset', style: txt(context, 11.5, color: p.muted)),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 14),
         // Win rate slider
         Row(
           children: [
@@ -2737,7 +2501,7 @@ class _HomeScreenState extends State<HomeScreen> {
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           decoration: BoxDecoration(
             color: p.cardHi.withAlpha(150),
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(14),
           ),
           child: ToggleRow(
             title: 'Compounding Dinamis',
@@ -2779,7 +2543,7 @@ class _HomeScreenState extends State<HomeScreen> {
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
           decoration: BoxDecoration(
             color: p.cardHi,
-            borderRadius: BorderRadius.circular(10),
+            borderRadius: BorderRadius.circular(14),
           ),
           child: Row(
             children: [
@@ -2798,10 +2562,10 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _miniStep(Palette p, IconData icon, VoidCallback onTap) {
     return Material(
       color: p.cardHighest,
-      borderRadius: BorderRadius.circular(6),
+      borderRadius: BorderRadius.circular(10),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(10),
         child: SizedBox(
           width: 26,
           height: 26,
@@ -2816,7 +2580,7 @@ class _HomeScreenState extends State<HomeScreen> {
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: p.track,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(18),
         border: Border.all(width: 1, color: p.lineSoft),
       ),
       child: Row(
@@ -2858,7 +2622,7 @@ class _HomeScreenState extends State<HomeScreen> {
       context: context,
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
       ),
       builder: (ctx) {
         final p = Palette.of(ctx);
@@ -2910,20 +2674,20 @@ class _HomeScreenState extends State<HomeScreen> {
                         padding: const EdgeInsets.symmetric(vertical: 3),
                         child: Material(
                           color: selected ? p.cardHi : p.card,
-                          borderRadius: BorderRadius.circular(12),
+                          borderRadius: BorderRadius.circular(18),
                           child: InkWell(
                             onTap: () {
                               Navigator.pop(ctx);
                               _onRuleSelChanged(manual ? -1 : n);
                             },
-                            borderRadius: BorderRadius.circular(12),
+                            borderRadius: BorderRadius.circular(18),
                             child: Container(
                               padding: const EdgeInsets.symmetric(
                                 horizontal: 12,
                                 vertical: 10,
                               ),
                               decoration: BoxDecoration(
-                                borderRadius: BorderRadius.circular(12),
+                                borderRadius: BorderRadius.circular(18),
                                 border: Border.all(
                                   width: selected ? 1 : 0,
                                   color: selected ? p.gold : Colors.transparent,

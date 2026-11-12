@@ -70,24 +70,66 @@ Future<ThemeMode?> showThemePickerSheet(BuildContext context) {
       final p = Palette.of(ctx);
       Widget row(String label, String hint, ThemeMode m, IconData icon) {
         final active = current == m;
-        return ListTile(
-          dense: true,
-          leading: Icon(icon, size: 20, color: active ? p.gold : p.muted),
-          title: Text(
-            label,
-            style: mono(
-              ctx,
-              13.5,
-              w: FontWeight.w600,
-              color: active ? p.gold : p.ink,
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
+          child: Material(
+            color: active ? p.goldsoft : p.card,
+            borderRadius: BorderRadius.circular(18),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(18),
+              onTap: () {
+                Navigator.pop(ctx, m);
+                themeController.setMode(m); // terapkan + simpan
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 12,
+                ),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(
+                    width: active ? 1.4 : 1,
+                    color: active ? p.goldSolid : p.lineSoft,
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 38,
+                      height: 38,
+                      decoration: BoxDecoration(
+                        color: active ? p.goldSolid : p.cardHi,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      alignment: Alignment.center,
+                      child: Icon(
+                        icon,
+                        size: 19,
+                        color: active ? p.onGold : p.muted,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            label,
+                            style: txt(ctx, 14.5, w: FontWeight.w600),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(hint, style: txt(ctx, 12, color: p.muted)),
+                        ],
+                      ),
+                    ),
+                    if (active)
+                      Icon(Icons.check_circle, size: 20, color: p.goldSolid),
+                  ],
+                ),
+              ),
             ),
           ),
-          subtitle: Text(hint, style: txt(ctx, 11, color: p.dim)),
-          trailing: active ? Icon(Icons.check, size: 18, color: p.gold) : null,
-          onTap: () {
-            Navigator.pop(ctx, m);
-            themeController.setMode(m); // terapkan + simpan
-          },
         );
       }
 
@@ -95,18 +137,27 @@ Future<ThemeMode?> showThemePickerSheet(BuildContext context) {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const SizedBox(height: 12),
+            const SizedBox(height: 10),
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: p.rim,
+                borderRadius: BorderRadius.circular(4),
+              ),
+            ),
+            const SizedBox(height: 14),
             Text('TEMA TAMPILAN', style: labelSm(ctx, color: p.muted)),
-            const SizedBox(height: 4),
+            const SizedBox(height: 10),
             row(
               'Gelap',
-              'Obsidian — latar navy gelap, aksen emas',
+              'Hitam pekat dengan aksen biru elektrik',
               ThemeMode.dark,
               Icons.dark_mode_outlined,
             ),
             row(
               'Terang',
-              'Latar putih lembut, teks navy',
+              'Putih bersih dengan aksen biru',
               ThemeMode.light,
               Icons.light_mode_outlined,
             ),
@@ -116,7 +167,7 @@ Future<ThemeMode?> showThemePickerSheet(BuildContext context) {
               ThemeMode.system,
               Icons.settings_suggest_outlined,
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 14),
           ],
         ),
       );
