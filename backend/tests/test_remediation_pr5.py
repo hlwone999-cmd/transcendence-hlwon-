@@ -456,7 +456,7 @@ def test_t4_cleanup_job_tidak_menyentuh_terminal_yang_tidak_dibuatnya():
     assert _post(app, 50505051).status_code == 201
     conn = dbmod.get_db(cfg)
     coord = app.extensions["mt5_coordinator"]
-    t = conn.execute("SELECT id FROM mt5_terminals").fetchone()
+    t = conn.execute("SELECT id, customer_id FROM mt5_terminals").fetchone()
     job = {"id": "x", "customer_id": None, "account_id": None,
            "created_account": 0, "created_terminal": 0,
            "terminal_id": t["id"], "provision_id": None,
@@ -464,7 +464,8 @@ def test_t4_cleanup_job_tidak_menyentuh_terminal_yang_tidak_dibuatnya():
     coord.cleanup(conn, job)
     assert _n(cfg, "SELECT COUNT(*) AS n FROM mt5_terminals") == 1
     # provision_id SALAH -> remove_terminal menolak menghapus
-    assert coord.remove_terminal(conn, int(t["id"]), "0" * 32) is False
+    assert coord.remove_terminal(conn, int(t["id"]), "0" * 32,
+                                 customer_id=t["customer_id"]) is False
     assert _n(cfg, "SELECT COUNT(*) AS n FROM mt5_terminals") == 1
 
 

@@ -43,7 +43,7 @@ def env(pg):
     owner_uri = pg.get_uri().replace("/postgres?", f"/{name}?")
     app_uri = owner_uri.replace("postgres:@", f"{APP_ROLE}:@")
     owner = dbmod.connect_postgres(owner_uri)
-    assert dbmod.migrate(owner) == [1, 2, 3, 4, 5]
+    assert dbmod.migrate(owner) == [1, 2, 3, 4, 5, 6, 7, 8]
     owner.close()
     yield owner_uri, app_uri
     dbmod.close_db()

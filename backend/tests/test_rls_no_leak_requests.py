@@ -65,6 +65,9 @@ def pg_cfg(pg_server, tmp_path):
     # registrasi portal diaktifkan eksplisit (default produksi juga aktif)
     cfg.public_register_enabled = True
     cfg.db_url = pg_server.get_uri().replace("/postgres?", f"/{name}?")
+    # B12.2: role sistem wajib eksplisit (tidak ada fallback DSN owner)
+    cfg.db_system_url = cfg.db_url.replace("postgres:@",
+                                           "transcendence_system:@", 1)
     cfg.db_path = str(tmp_path / "unused.db")
     cfg.api_token = "TESTTOKEN"
     cfg.mt5_enabled = True

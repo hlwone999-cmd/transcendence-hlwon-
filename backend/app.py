@@ -67,6 +67,11 @@ def create_app(config: Config | None = None,
             if n:
                 logging.getLogger(__name__).warning(
                     "%d job provisioning terputus dipulihkan", n)
+            # F2: terminal yang tertahan karena timeout/sibuk helper
+            m = coordinator.retry_uncertain_removals(dbmod.get_db(config))
+            if m:
+                logging.getLogger(__name__).warning(
+                    "%d terminal tertahan (timeout helper) dibersihkan", m)
     except Exception:  # noqa: BLE001 - startup tidak boleh gagal karenanya
         logging.getLogger(__name__).exception("pemulihan job gagal")
 
@@ -102,6 +107,19 @@ def create_app(config: Config | None = None,
             logging.getLogger(__name__).debug(
                 "cleanup scope RLS gagal (koneksi mungkin sudah tertutup)",
                 exc_info=True)
+        # B12.1: koneksi ROLE SISTEM thread ini (bila dipakai request) juga
+        # dikembalikan ke keadaan bersih: tanpa transaksi, tanpa customer
+        # context — tidak ada scope tertinggal untuk request berikutnya.
+        try:
+            dbmod.clear_system_context(config)
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "cleanup koneksi sistem gagal — koneksi dibuang",
+                exc_info=True)
+            try:
+                dbmod._drop_system_slot(dbmod._local.sysconn)
+            except Exception:  # noqa: BLE001
+                pass
         return None
 
     return app

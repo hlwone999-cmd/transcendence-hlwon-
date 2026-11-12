@@ -149,7 +149,7 @@ def test_migrasi_tertunda_dengan_role_app_gagal_jelas(dbs):
     with pytest.raises(dbmod.MigrationPrivilegeError) as ei:
         dbmod.migrate(conn)
     # semua migrasi tertunda tercantum TEPAT (PR #4: "[3]")
-    assert "DSN OWNER" in str(ei.value) and "[3, 4, 5]" in str(ei.value)
+    assert "DSN OWNER" in str(ei.value) and "[3, 4, 5, 6, 7, 8]" in str(ei.value)
     conn.close()
 
 

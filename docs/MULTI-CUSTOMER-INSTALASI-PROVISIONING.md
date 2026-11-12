@@ -36,6 +36,9 @@ cp .env.example .env   # lalu isi (lihat bagian 3)
 ```ini
 # Backend sehari-hari MEMAKAI ROLE NON-OWNER (RLS aktif).
 DATABASE_URL=postgresql://transcendence_app:PASSWORD_APP@127.0.0.1:5432/transcendence
+# B12.1: operasi sistem (worker/pemulihan/scheduler/pra-auth/admin) memakai
+# role TERPISAH (migrasi 008), password SENDIRI. Wajib di produksi.
+DATABASE_SYSTEM_URL=postgresql://transcendence_system:PASSWORD_SYSTEM@127.0.0.1:5432/transcendence
 MT5_CRED_KEY=<Fernet key: python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())">
 MT5_ENABLED=true
 MAX_CUSTOMERS=4
@@ -68,6 +71,52 @@ Backend (role `transcendence_app`) **tidak** menjalankan DDL saat start bila
 semua migrasi sudah diterapkan. Bila ada migrasi tertunda, backend berhenti
 dengan `MigrationPrivilegeError` — jalankan langkah di atas dengan DSN owner
 dulu, lalu start ulang backend.
+
+### 4.1 Role sistem (B12.1, migrasi 008)
+
+Migrasi 008 membuat role `transcendence_system` (LOGIN, NOBYPASSRLS, tanpa
+password). Setelah migrasi, dengan DSN owner:
+
+```sql
+ALTER ROLE transcendence_system PASSWORD '<PASSWORD_SYSTEM>';
+-- pastikan TIDAK ada keanggotaan silang:
+SELECT pg_has_role('transcendence_app','transcendence_system','MEMBER');  -- false
+```
+
+B12.2 — backend MEMVERIFIKASI identitas koneksi sistem setiap kali
+koneksi dibuka dan menolak (`SystemDbConfigError`, koneksi ditutup) bila:
+`current_user`/`session_user` bukan `transcendence_system` (termasuk opsi
+`role=` di DSN / SET ROLE), role SUPERUSER/BYPASSRLS/CREATEROLE/CREATEDB/
+REPLICATION/INHERIT atau tanpa LOGIN, role anggota role lain, role aplikasi
+dapat memakai role sistem, atau role memiliki objek/database.
+`DATABASE_SYSTEM_URL` WAJIB bila `DATABASE_URL` berpassword — tidak ada
+fallback ke DSN aplikasi/owner. Migrasi 008 memperbaiki atribut role yang
+sudah ada (hanya mencabut hak) atau BERHENTI dengan pesan eksplisit bila
+keanggotaan/kepemilikan tidak aman (cabut manual, lalu ulangi).
+
+Hak role sistem = daftar tabel eksplisit (bukan ALL TABLES, tanpa DEFAULT
+PRIVILEGES); `audit_logs`/`sync_logs` append-only. DEFAULT PRIVILEGES role
+aplikasi dari 002 dicabut: **migrasi baru wajib `GRANT` eksplisit** (dan
+ENABLE RLS bila tabel ber-customer) — tabel baru tidak lagi otomatis
+terbuka bagi role mana pun.
+
+B12.3 — kepemilikan: role sistem tidak boleh memiliki objek APA PUN
+(schema, function/procedure, type/domain/enum, relasi, collation, default
+ACL, objek di database lain, database/tablespace). Runtime menolak koneksi
+dan migrasi 008 BERHENTI (versi 8 tidak dicatat) dengan daftar objek;
+kepemilikan TIDAK dipindahkan otomatis — pindahkan manual
+(`ALTER ... OWNER TO <owner aplikasi>`) lalu ulangi migrasi.
+Default privileges: 008 mencabut, untuk SETIAP creator di `pg_default_acl`
+(global maupun per schema, via `FOR ROLE`), hak otomatis kepada role
+aplikasi/sistem dan PUBLIC pada tabel/sequence; keadaan pra-008 disimpan di
+schema owner-only `transcendence_meta` dan dipulihkan persis oleh rollback.
+Migrasi harus dijalankan oleh superuser atau anggota setiap creator yang
+punya default privileges terkait (selain itu migrasi berhenti eksplisit).
+
+Rollback 008 (manual, DSN owner, bersama rollback KODE ke B12):
+`backend/migrations/postgres/rollback/008_system_role_rls.down.sql`.
+Rollback 007 hanya setelah rollback 008:
+`backend/migrations/postgres/rollback/007_rls_tenant_tables.down.sql`.
 
 ## 5. Provisioning terminal per customer (otomatis saat bind)
 

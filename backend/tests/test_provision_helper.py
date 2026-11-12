@@ -43,7 +43,8 @@ def hcfg(tmp_path):
     return H.HelperConfig(base_dir=tmp_path / "terminals", template_dir=tpl,
                           unit_dir=tmp_path / "units",
                           service_user="transcendence", port_base=18812,
-                          max_slots=4, proc_root=tmp_path / "proc")
+                          max_slots=4, proc_root=tmp_path / "proc",
+                          lock_dir=tmp_path / "locks")
 
 
 @pytest.mark.parametrize("argv", [
@@ -160,6 +161,31 @@ def test_helper_main_menolak_non_root(capsys):
 
 
 # ------------------------------------------------- klien sudo di API
+class FakePopen:
+    """Pengganti subprocess.Popen (klien API memakai Popen sejak F2)."""
+    script = {"rc": 0, "out": '{"ok": true}'}
+    seen = []
+
+    def __init__(self, argv, **kw):
+        FakePopen.seen.append((argv, kw))
+        self.argv, self.kw, self.pid = argv, kw, 999999
+        self.returncode = None
+
+    def communicate(self, timeout=None):
+        self.returncode = FakePopen.script["rc"]
+        return FakePopen.script["out"], ""
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
+def _fake_popen(monkeypatch, rc=0, out='{"ok": true}'):
+    FakePopen.script = {"rc": rc, "out": out}
+    FakePopen.seen = []
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    return FakePopen.seen
+
+
 class _Cfg:
     rpyc_port_base = 18812
     max_customers = 4
@@ -169,14 +195,10 @@ class _Cfg:
 
 
 def test_klien_sudo_argv_terbatas_tanpa_shell(monkeypatch):
-    seen = {}
-
-    def fake_run(argv, **kw):
-        seen["argv"], seen["kw"] = argv, kw
-        return subprocess.CompletedProcess(argv, 0, '{"ok": true}', "")
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    calls = _fake_popen(monkeypatch)
     hp = P.HelperProvisioner(_Cfg())
     hp.install(P.TerminalSpec("C007", 18813, PID_A))
+    seen = {"argv": calls[0][0], "kw": calls[0][1]}
     assert seen["argv"] == ["/usr/bin/sudo", "-n",
                             "/usr/local/sbin/transcendence-mt5-provision",
                             "install", "--code", "C007", "--port", "18813",
@@ -186,7 +208,7 @@ def test_klien_sudo_argv_terbatas_tanpa_shell(monkeypatch):
 
 
 def test_klien_sudo_validasi_sebelum_memanggil(monkeypatch):
-    called = []
+    called = _fake_popen(monkeypatch)
     monkeypatch.setattr(subprocess, "run",
                         lambda *a, **k: called.append(a))
     hp = P.HelperProvisioner(_Cfg())
@@ -199,17 +221,14 @@ def test_klien_sudo_validasi_sebelum_memanggil(monkeypatch):
 
 
 def test_klien_sudo_exit_3_jadi_ownership_error(monkeypatch):
-    monkeypatch.setattr(subprocess, "run", lambda argv, **k:
-                        subprocess.CompletedProcess(
-                            argv, 3, '{"ok": false, "error": "x"}', ""))
+    _fake_popen(monkeypatch, rc=3, out='{"ok": false, "error": "x"}')
     with pytest.raises(P.OwnershipError):
         P.HelperProvisioner(_Cfg()).remove(P.TerminalSpec("C007", 18813,
                                                           PID_A))
 
 
 def test_klien_sudo_rpc_mode_tervalidasi(monkeypatch):
-    called = []
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: called.append(a))
+    called = _fake_popen(monkeypatch)
     with pytest.raises(P.ProvisionError):
         P.HelperProvisioner(_Cfg()).install(
             P.TerminalSpec("C007", 18813, PID_A, rpc_mode="eval"))

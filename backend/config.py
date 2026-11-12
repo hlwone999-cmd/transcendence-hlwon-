@@ -49,6 +49,8 @@ class Config:
     # PostgreSQL produksi (brief multi-customer §2/§5). Jika diisi
     # (postgres://...) engine PG dipakai; selain itu SQLite (dev/test).
     db_url: str = field(default="", repr=False)  # DSN bisa berisi password
+    # B12.1: DSN role SISTEM PostgreSQL (transcendence_system, migrasi 008)
+    db_system_url: str = field(default="", repr=False)
 
     # --- auth multi-customer (brief §7) ---
     auth_token_ttl_hours: int = 168        # 7 hari
@@ -126,6 +128,10 @@ class Config:
     provisioner_helper: str = "/usr/local/sbin/transcendence-mt5-provision"
     provisioner_sudo: str = "/usr/bin/sudo"
     provisioner_timeout_seconds: float = 60.0
+    # F2: setelah timeout, SIGTERM ke sudo (diteruskan ke helper) lalu tunggu
+    # grace ini; keadaan nyata diperiksa dengan `helper inspect`.
+    provisioner_term_grace_seconds: float = 10.0
+    provisioner_inspect_timeout_seconds: float = 15.0
     # Tahap 4: secret HMAC token layanan RPC read-only (MT5_PROVIDER=mt5ro).
     # SECRET — hanya di .env (0600) & konfigurasi helper root-only.
     mt5_rpc_secret: str = field(default="", repr=False)
@@ -204,6 +210,7 @@ def load_config(env_file: str | None = None) -> Config:
         api_port=int(os.getenv("API_PORT", "8000")),
         db_path=os.getenv("JOURNAL_DB_PATH", "data/journal.db"),
         db_url=os.getenv("DATABASE_URL", os.getenv("JOURNAL_DB_URL", "")).strip(),
+        db_system_url=os.getenv("DATABASE_SYSTEM_URL", "").strip(),
         auth_token_ttl_hours=max(1, int(os.getenv("AUTH_TOKEN_TTL_HOURS", "168"))),
         max_failed_logins=max(1, int(os.getenv("AUTH_MAX_FAILED_LOGINS", "5"))),
         lockout_seconds=max(30, int(os.getenv("AUTH_LOCKOUT_SECONDS", "900"))),
@@ -241,6 +248,10 @@ def load_config(env_file: str | None = None) -> Config:
         provisioner_sudo=os.getenv("PROVISIONER_SUDO", "/usr/bin/sudo").strip(),
         provisioner_timeout_seconds=max(5.0, float(os.getenv(
             "PROVISIONER_TIMEOUT_SECONDS", "60"))),
+        provisioner_term_grace_seconds=min(60.0, max(1.0, float(os.getenv(
+            "PROVISIONER_TERM_GRACE_SECONDS", "10")))),
+        provisioner_inspect_timeout_seconds=min(60.0, max(2.0, float(
+            os.getenv("PROVISIONER_INSPECT_TIMEOUT_SECONDS", "15")))),
         mt5_rpc_secret=os.getenv("MT5_RPC_SECRET", ""),
         mt5_rpc_mode_default=(
             "ro" if os.getenv("MT5_RPC_MODE_DEFAULT", "classic").strip()
