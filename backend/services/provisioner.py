@@ -41,10 +41,16 @@ CODE_RE = re.compile(r"^C[0-9]{3,9}$")
 PID_RE = re.compile(r"^[0-9a-f]{32}$")
 MARKER = ".provision_id"
 COMPLETE = ".install_complete"
+MID_RE = re.compile(r"^[0-9a-f]{32}$")
+NONCE_RE = re.compile(r"^[0-9a-f]{64}$")
 EXIT_ARGS, EXIT_OWNERSHIP, EXIT_FAIL = 2, 3, 4
 EXIT_INTERRUPTED, EXIT_BUSY, EXIT_UNCLEAN = 5, 6, 7
+# MT5 RPC Hardening: fence migrasi ditolak / kebijakan produksi dilanggar.
+# Helper mengembalikan keduanya SEBELUM perubahan apa pun (pasti, bukan
+# keadaan tidak pasti).
+EXIT_FENCE, EXIT_POLICY = 8, 9
 KNOWN_EXITS = (0, EXIT_ARGS, EXIT_OWNERSHIP, EXIT_FAIL, EXIT_INTERRUPTED,
-               EXIT_BUSY)
+               EXIT_BUSY, EXIT_FENCE, EXIT_POLICY)
 INTERNAL_ERROR = "kegagalan internal"     # helper main(): pengecualian tak terduga
 
 
@@ -64,6 +70,17 @@ class ProvisionBusy(ProvisionError):
 class ProvisionIncomplete(ProvisionError):
     """Helper berhenti sendiri (batas waktu/sinyal, exit 5): operasi TIDAK
     lengkap, helper sudah tidak berjalan."""
+
+
+class FenceError(ProvisionError):
+    """Helper exit 8: fence migrasi menolak operasi (worker generasi lama,
+    migrasi lain memegang terminal, atau fence belum di-advance). Tidak
+    ada yang diubah oleh panggilan ini."""
+
+
+class PolicyError(ProvisionError):
+    """Helper exit 9: kebijakan produksi dilanggar (mis. classic di
+    produksi, konfigurasi produksi tidak lengkap). Tidak ada yang diubah."""
 
 
 class ProvisionTimeout(ProvisionError):
@@ -96,7 +113,16 @@ class TerminalSpec:
     code: str
     port: int
     provision_id: str | None
+    # CATATAN: default 'classic' DIPERTAHANKAN di kelompok 1 karena
+    # api/routes.py (di luar cakupan kelompok ini) membuat TerminalSpec tanpa
+    # rpc_mode. Peralihan default ke 'ro' dilakukan di kelompok 2 bersama
+    # config.py & routes.py. Produksi tetap aman: helper production=true
+    # menolak install/start classic (exit 9).
     rpc_mode: str = "classic"
+    # MT5 RPC Hardening (opsional; dipakai worker migrasi kelompok 3):
+    migration_id: str | None = None      # fence: id migrasi (32 hex)
+    fence: int | None = None             # fence: generation (>= 1)
+    expect_mode: str | None = None       # start: mode yang wajib tercatat
 
 
 def validate_spec(cfg, spec: TerminalSpec, need_pid: bool) -> None:
@@ -110,6 +136,18 @@ def validate_spec(cfg, spec: TerminalSpec, need_pid: bool) -> None:
         raise OwnershipError("provision_id tidak sah / tidak ada")
     if spec.rpc_mode not in ("classic", "ro"):
         raise ProvisionError("rpc_mode tidak sah")
+    if spec.expect_mode is not None and spec.expect_mode not in ("classic",
+                                                                 "ro"):
+        raise ProvisionError("expect_mode tidak sah")
+    has_mid = spec.migration_id is not None
+    if has_mid != (spec.fence is not None):
+        raise ProvisionError("migration_id & fence wajib berpasangan")
+    if has_mid and not MID_RE.fullmatch(spec.migration_id or ""):
+        raise ProvisionError("migration_id tidak sah")
+    if spec.fence is not None and (isinstance(spec.fence, bool) or
+                                   not isinstance(spec.fence, int) or
+                                   spec.fence < 1):
+        raise ProvisionError("fence tidak sah")
 
 
 class MockProvisioner:
@@ -127,6 +165,8 @@ class MockProvisioner:
         self.calls: list[tuple[str, str]] = []
         self._lock = threading.Lock()
         self._running: set[str] = set()
+        # paritas aturan fence helper (dev/test)
+        self.fences: dict[str, dict] = {}
 
     def _base(self, code: str) -> Path:
         return Path(self._cfg.term_base_dir) / code
@@ -139,8 +179,30 @@ class MockProvisioner:
         if self.fail.get(op):
             raise ProvisionError(f"mock: {op} gagal")
 
+    def _check_fence(self, spec: TerminalSpec) -> None:
+        """Aturan check_fence helper (exit 8 -> FenceError)."""
+        with self._lock:
+            stored = self.fences.get(spec.code)
+        if spec.migration_id is None:
+            if stored is not None and not stored["released"]:
+                raise FenceError("terminal sedang dipegang migrasi RPC")
+            return
+        if stored is None or stored["released"] or \
+                stored["migration_id"] != spec.migration_id or \
+                stored["gen"] != spec.fence:
+            raise FenceError("fence migrasi tidak cocok")
+
+    def _expect_pid(self, spec: TerminalSpec) -> None:
+        if spec.provision_id and PID_RE.fullmatch(spec.provision_id):
+            base = self._base(spec.code)
+            marker = base / MARKER
+            if base.exists() and (not marker.exists() or
+                                  marker.read_text() != spec.provision_id):
+                raise OwnershipError("marker instalasi tidak cocok")
+
     def install(self, spec: TerminalSpec) -> None:
         validate_spec(self._cfg, spec, need_pid=True)
+        self._check_fence(spec)
         base = self._base(spec.code)
         marker = base / MARKER
         if marker.exists() and marker.read_text() != spec.provision_id:
@@ -155,6 +217,8 @@ class MockProvisioner:
 
     def start(self, spec: TerminalSpec) -> None:
         validate_spec(self._cfg, spec, need_pid=False)
+        self._check_fence(spec)
+        self._expect_pid(spec)
         self._step("start", spec)
         base = self._base(spec.code)
         if not (base / MARKER).exists() or not (base / COMPLETE).exists():
@@ -163,12 +227,15 @@ class MockProvisioner:
             self._running.add(spec.code)
 
     def stop(self, spec: TerminalSpec) -> None:
+        self._check_fence(spec)
+        self._expect_pid(spec)
         self._step("stop", spec)
         with self._lock:
             self._running.discard(spec.code)
 
     def remove(self, spec: TerminalSpec) -> None:
         validate_spec(self._cfg, spec, need_pid=True)
+        self._check_fence(spec)
         self._step("remove", spec)
         base = self._base(spec.code)
         marker = base / MARKER
@@ -193,7 +260,80 @@ class MockProvisioner:
             phase = "complete"
         else:
             phase = "incomplete"
-        return {"ok": True, "busy": False, "phase": phase}
+        marker = base / MARKER
+        with self._lock:
+            f = self.fences.get(spec.code)
+        return {"ok": True, "busy": False, "phase": phase,
+                "marker": marker.read_text() if marker.exists() else None,
+                "fence": dict(f) if f else None}
+
+    # ---- MT5 RPC Hardening (paritas helper) ----------------------------
+    def fence_advance(self, spec: TerminalSpec) -> dict:
+        validate_spec(self._cfg, spec, need_pid=False)
+        if spec.migration_id is None:
+            raise ProvisionError("fence_advance butuh migration_id/fence")
+        with self._lock:
+            st = self.fences.get(spec.code)
+            if st is not None:
+                same = st["migration_id"] == spec.migration_id
+                if st["released"] and same:
+                    raise FenceError("fence migrasi ini sudah dilepas")
+                if not st["released"] and not same:
+                    raise FenceError("migrasi lain masih memegang fence")
+                if not st["released"] and spec.fence < st["gen"]:
+                    raise FenceError("generasi lebih kecil")
+            if st is None or st["released"] or spec.fence > st["gen"]:
+                self.fences[spec.code] = {"migration_id": spec.migration_id,
+                                          "gen": spec.fence,
+                                          "released": False}
+        return self.inspect(spec)
+
+    def fence_release(self, spec: TerminalSpec) -> dict:
+        validate_spec(self._cfg, spec, need_pid=False)
+        with self._lock:
+            st = self.fences.get(spec.code)
+            if st is None or st["migration_id"] != spec.migration_id or \
+                    st["gen"] != spec.fence:
+                raise FenceError("fence bukan milik migrasi ini")
+            st["released"] = True
+            return {"ok": True, "fence": dict(st)}
+
+    def selfcheck(self, nonce: str | None = None) -> dict:
+        """Mock: tidak pernah produksi; bukti secret memakai MT5_RPC_SECRET
+        API sendiri (paritas format helper)."""
+        from security import rpc_policy
+        secret = getattr(self._cfg, "mt5_rpc_secret", "") or ""
+        out = {"ok": True, "production": False, "service_user_mode": "mock",
+               "ro_service": True, "broker_allow_mode": "any",
+               "wine_python_ok": False,
+               "secret_ok": rpc_policy.secret_strength_problem(secret)
+               is None,
+               "op_timeout_seconds": 0.0, "lock_wait_seconds": 0.0,
+               "lock_dir_ok": True, "unclean_count": 0,
+               "production_problems": ["mock_provisioner"]}
+        if nonce is not None:
+            if not NONCE_RE.fullmatch(nonce):
+                raise ProvisionError("nonce tidak sah")
+            out["secret_proof"] = (rpc_policy.selfcheck_proof(secret, nonce)
+                                   if secret else None)
+        return out
+
+    def audit_all(self) -> dict:
+        root = Path(self._cfg.term_base_dir)
+        terms = []
+        if root.is_dir():
+            for d in sorted(root.iterdir()):
+                if not CODE_RE.fullmatch(d.name):
+                    continue
+                spec = TerminalSpec(code=d.name,
+                                    port=int(self._cfg.rpyc_port_base),
+                                    provision_id=None)
+                info = self.inspect(spec)
+                terms.append({"code": d.name, "phase": info["phase"],
+                              "marker": info["marker"],
+                              "fence": info["fence"]})
+        return {"ok": True, "production": False, "terminals": terms,
+                "unknown_entries": [], "user_orphans": [], "listeners": []}
 
 
 class HelperProvisioner:
@@ -217,6 +357,18 @@ class HelperProvisioner:
             argv += ["--provision-id", spec.provision_id]
         if op == "install":
             argv += ["--rpc-mode", spec.rpc_mode]
+        # Hardening: identitas instalasi diverifikasi helper SEBELUM
+        # start/stop/status (marker == provision_id spec) — bila spec
+        # membawa provision_id yang sah.
+        if op in ("start", "stop", "status") and spec.provision_id and \
+                PID_RE.fullmatch(spec.provision_id):
+            argv += ["--expect-pid", spec.provision_id]
+        if op == "start" and spec.expect_mode is not None:
+            argv += ["--expect-mode", spec.expect_mode]
+        if op in ("install", "start", "stop", "remove") and \
+                spec.migration_id is not None:
+            argv += ["--migration-id", spec.migration_id,
+                     "--fence", str(int(spec.fence))]
         return argv
 
     def _spawn(self, argv, timeout):
@@ -314,6 +466,10 @@ class HelperProvisioner:
             raise OwnershipError(str(out.get("error")))
         if rc == EXIT_BUSY:
             raise ProvisionBusy(str(out.get("error") or "helper sibuk"))
+        if rc == EXIT_FENCE:
+            raise FenceError(str(out.get("error") or "fence ditolak"))
+        if rc == EXIT_POLICY:
+            raise PolicyError(str(out.get("error") or "kebijakan ditolak"))
         if rc == EXIT_INTERRUPTED:
             raise ProvisionIncomplete(str(out.get("error")
                                           or f"helper {op} dihentikan"))
@@ -356,6 +512,64 @@ class HelperProvisioner:
         if out.get("busy"):              # operasi lain berjalan: fail-closed
             out = dict(out, running=False)
         return out
+
+    # ---- MT5 RPC Hardening ---------------------------------------------
+    def _simple(self, argv: list, timeout: float, what: str) -> dict:
+        """Panggil op helper tanpa resource (fence/selfcheck/audit)."""
+        res = self._spawn(argv, timeout)
+        if res[0] == "timeout":
+            raise ProvisionTimeout(f"helper {what} timeout",
+                                   "helper_running" if res[1] else "unknown")
+        try:
+            out = json.loads((res[1] or "").strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            out = {"ok": False, "error": "keluaran helper tidak sah"}
+        rc = res[0]
+        if rc == EXIT_FENCE:
+            raise FenceError(str(out.get("error") or "fence ditolak"))
+        if rc == EXIT_POLICY:
+            raise PolicyError(str(out.get("error") or "kebijakan ditolak"))
+        if rc == EXIT_BUSY:
+            raise ProvisionBusy(str(out.get("error") or "helper sibuk"))
+        if rc == EXIT_OWNERSHIP:
+            raise OwnershipError(str(out.get("error")))
+        if rc not in KNOWN_EXITS or rc == EXIT_UNCLEAN:
+            raise ProvisionAbnormalExit(
+                f"helper {what} berakhir tidak normal (rc={rc})", "unknown")
+        if rc != 0 or out.get("ok") is not True:
+            raise ProvisionError(str(out.get("error") or f"{what} gagal"))
+        return out
+
+    def _fence_argv(self, op: str, spec: TerminalSpec) -> list:
+        validate_spec(self._cfg, spec, need_pid=False)
+        if spec.migration_id is None:
+            raise ProvisionError(f"{op} butuh migration_id/fence")
+        return [self._sudo, "-n", self._helper, op, "--code", spec.code,
+                "--migration-id", spec.migration_id,
+                "--gen", str(int(spec.fence))]
+
+    def fence_advance(self, spec: TerminalSpec) -> dict:
+        """K1: majukan fence DI BAWAH flock helper; mengembalikan inspect
+        yang dibaca di dalam lock yang sama. Timeout pemanggilan memakai
+        batas helper normal (helper menunggu operasi lama selesai)."""
+        return self._simple(self._fence_argv("fence-advance", spec),
+                            self._timeout, "fence-advance")
+
+    def fence_release(self, spec: TerminalSpec) -> dict:
+        return self._simple(self._fence_argv("fence-release", spec),
+                            self._timeout, "fence-release")
+
+    def selfcheck(self, nonce: str | None = None) -> dict:
+        argv = [self._sudo, "-n", self._helper, "selfcheck"]
+        if nonce is not None:
+            if not NONCE_RE.fullmatch(nonce):
+                raise ProvisionError("nonce tidak sah")
+            argv += ["--nonce", nonce]
+        return self._simple(argv, self._inspect_timeout, "selfcheck")
+
+    def audit_all(self) -> dict:
+        return self._simple([self._sudo, "-n", self._helper, "audit-all"],
+                            self._timeout, "audit-all")
 
 
 def build_provisioner(cfg):

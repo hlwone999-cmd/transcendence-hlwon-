@@ -88,11 +88,40 @@ TOMB_DIR = ".tombstones"          # di bawah base_dir (satu filesystem), root 07
 
 CODE_RE = re.compile(r"^C[0-9]{3,9}$")
 PID_RE = re.compile(r"^[0-9a-f]{32}$")
-OPS = ("install", "start", "stop", "remove", "status", "inspect")
-LOCKED_OPS = ("install", "start", "stop", "remove")
+OPS = ("install", "start", "stop", "remove", "status", "inspect",
+       "fence-advance", "fence-release", "selfcheck", "audit-all")
+LOCKED_OPS = ("install", "start", "stop", "remove", "fence-advance",
+              "fence-release")
+# Operasi mengubah keadaan terminal yang tunduk pada fence migrasi.
+FENCED_OPS = ("install", "start", "stop", "remove")
+# Operasi tanpa kode customer (global, read-only).
+GLOBAL_OPS = ("selfcheck", "audit-all")
+# Operasi read-only yang tetap diizinkan walau konfigurasi produksi
+# tidak lolos (agar operator dapat mendiagnosis).
+DIAG_OPS = ("status", "inspect", "selfcheck", "audit-all")
 
 EXIT_OK, EXIT_ARGS, EXIT_OWNERSHIP, EXIT_FAIL = 0, 2, 3, 4
 EXIT_INTERRUPTED, EXIT_BUSY, EXIT_UNCLEAN = 5, 6, 7
+# MT5 RPC Hardening: fence migrasi ditolak (worker generasi lama / migrasi
+# lain memegang terminal) dan kebijakan produksi dilanggar. Keduanya
+# dikembalikan SEBELUM perubahan apa pun.
+EXIT_FENCE, EXIT_POLICY = 8, 9
+
+# ---- PARITAS backend/security/rpc_policy.py (diuji
+# tests/test_rpc_policy_parity.py) — helper stdlib-only, tidak mengimpor
+# modul backend.
+HELPER_PRODUCTION_RPC_MODES = ("ro",)
+HELPER_KNOWN_RPC_MODES = ("classic", "ro")
+SELFCHECK_DOMAIN = "transcendence-selfcheck-v2|"
+SECRET_MIN_BYTES = 32
+SECRET_PLACEHOLDERS = frozenset({
+    "", "changeme", "change-me", "secret", "<openssl rand -hex 32>",
+    "<random>", "xxx", "todo",
+})
+FENCE_DIR = ".fence"              # di bawah base_dir (persisten), root 0700
+FENCE_VERSION = 1
+MID_RE = re.compile(r"^[0-9a-f]{32}$")
+NONCE_RE = re.compile(r"^[0-9a-f]{64}$")
 
 # ------------------------------------------------------------- templates
 # Server RPyC (mt5server) HANYA bind 127.0.0.1 — lihat docs/RPYC-SECURITY.md
@@ -197,6 +226,11 @@ class HelperConfig:
     # (main) MENOLAK install dengan mode shared kecuali kunci ini true
     # (hanya untuk lingkungan uji; JANGAN di staging/produksi).
     allow_shared_service_user: bool = False
+    # MT5 RPC Hardening: true = mode produksi. Operasi yang mengubah
+    # keadaan DITOLAK (exit 9) kecuali per_customer + ro_service + secret
+    # kuat + wine_python + broker_allow CIDR; classic tidak pernah boleh
+    # di-install/di-start; allow_shared_service_user diabaikan.
+    production: bool = False
 
     @staticmethod
     def load(path: str = CONFIG_PATH) -> "HelperConfig":
@@ -227,7 +261,8 @@ class HelperConfig:
             op_timeout_seconds=float(raw.get("op_timeout_seconds", 45.0)),
             lock_wait_seconds=float(raw.get("lock_wait_seconds", 5.0)),
             allow_shared_service_user=raw.get(
-                "allow_shared_service_user", False) is True)
+                "allow_shared_service_user", False) is True,
+            production=raw.get("production", False) is True)
 
 
 # ------------------------------------------------------------- validasi
@@ -256,6 +291,28 @@ def validate(cfg: HelperConfig, op: str, code: str, port: int | None,
     for exe in (cfg.systemctl, cfg.wine_bin, cfg.useradd, cfg.userdel):
         if not os.path.isabs(exe):
             raise HelperError(EXIT_FAIL, "binary konfigurasi wajib absolut")
+    validate_global(cfg, op)
+
+
+def validate_global(cfg: HelperConfig, op: str) -> None:
+    """Validasi konfigurasi yang tidak bergantung pada kode customer.
+
+    - broker_allow SELALU divalidasi (disisipkan ke unit systemd):
+      karakter kontrol/baris baru/hostname -> ditolak (exit 4).
+    - production=true: operasi yang mengubah keadaan ditolak (exit 9)
+      bila production_problems() tidak kosong. Operasi diagnostik
+      (status/inspect/selfcheck/audit-all) tetap diizinkan."""
+    if op not in OPS:
+        raise HelperError(EXIT_ARGS, "operasi tidak sah")
+    try:
+        parse_broker_allow(cfg.broker_allow, production=False)
+    except ValueError as e:
+        raise HelperError(EXIT_FAIL, f"broker_allow tidak sah: {e}") from None
+    if cfg.production and op not in DIAG_OPS:
+        probs = production_problems(cfg)
+        if probs:
+            raise HelperError(EXIT_POLICY, "konfigurasi produksi ditolak: "
+                                           + ", ".join(probs))
 
 
 def paths(cfg: HelperConfig, code: str) -> dict:
@@ -1047,6 +1104,9 @@ def op_install(cfg, code, port, provision_id, runner, chown=True,
                rpc_mode: str = "classic") -> dict:
     if rpc_mode not in ("classic", "ro"):
         raise HelperError(EXIT_ARGS, "rpc-mode tidak sah")
+    if cfg.production and rpc_mode not in HELPER_PRODUCTION_RPC_MODES:
+        # Produksi: classic (RPyC tanpa autentikasi) TIDAK PERNAH di-install
+        raise HelperError(EXIT_POLICY, "mode classic dilarang di produksi")
     if rpc_mode == "ro" and not cfg.ro_service:
         raise HelperError(EXIT_FAIL, "mode ro tidak diizinkan konfigurasi")
     p = paths(cfg, code)
@@ -1068,7 +1128,8 @@ def op_install(cfg, code, port, provision_id, runner, chown=True,
             install_complete(p, provision_id) is not None:
         return {"ok": True, "idempotent": True}
     if chown and cfg.service_user_mode != "per_customer" and \
-            _HELPER_PROCESS and not cfg.allow_shared_service_user:
+            (cfg.production or (_HELPER_PROCESS and
+                                not cfg.allow_shared_service_user)):
         # B8/S5: tanpa UID per customer, proses terminal customer lain
         # ber-UID sama -> tidak ada isolasi. Ditolak SEBELUM perubahan.
         raise HelperError(EXIT_FAIL, "service_user_mode 'shared' ditolak — "
@@ -1198,21 +1259,59 @@ def _write_unit(p: dict, text: str) -> None:
     os.replace(p["unit_tmp"], p["unit_file"])
 
 
-def op_start(cfg, code, port, runner) -> dict:
+def op_start(cfg, code, port, runner, expect_pid: str | None = None,
+             expect_mode: str | None = None) -> dict:
+    """Start HANYA instalasi lengkap. Hardening: marker WAJIB sama dengan
+    expect_pid (bila diberikan; wajib di produksi), mode yang tercatat di
+    .install_complete WAJIB sama dengan expect_mode, dan produksi menolak
+    instalasi yang bukan 'ro' (termasuk unit classic sisa lama)."""
     p = paths(cfg, code)
     owner = read_marker(p)
-    if owner is None or install_complete(p, owner) is None:
+    if cfg.production and expect_pid is None:
+        raise HelperError(EXIT_ARGS, "--expect-pid wajib di produksi")
+    if expect_pid is not None and owner != expect_pid:
+        raise HelperError(EXIT_OWNERSHIP, "marker instalasi tidak cocok "
+                                          "dengan --expect-pid")
+    data = install_complete(p, owner) if owner is not None else None
+    if data is None:
         raise HelperError(EXIT_OWNERSHIP, "terminal belum di-install lengkap")
+    mode = data.get("rpc_mode")
+    if mode not in HELPER_KNOWN_RPC_MODES:
+        mode = None                       # format lama: mode TIDAK diketahui
+    if expect_mode is not None and mode != expect_mode:
+        raise HelperError(EXIT_OWNERSHIP, "mode instalasi tidak cocok "
+                                          "dengan --expect-mode")
+    if cfg.production and mode not in HELPER_PRODUCTION_RPC_MODES:
+        raise HelperError(EXIT_POLICY, "instalasi bukan mode ro — start "
+                                       "ditolak di produksi")
     runner.run([cfg.systemctl, "enable", "--now", p["unit"] + ".service"])
     return {"ok": True}
 
 
-def op_stop(cfg, code, runner) -> dict:
+def op_stop(cfg, code, runner, expect_pid: str | None = None) -> dict:
+    """Stop unit. Hardening: bila expect_pid diberikan (wajib di produksi)
+    marker WAJIB sama; instalasi yang sudah tidak ada (phase absent) =
+    idempoten ok."""
     p = paths(cfg, code)
+    if cfg.production and expect_pid is None:
+        raise HelperError(EXIT_ARGS, "--expect-pid wajib di produksi")
+    if expect_pid is not None:
+        owner = read_marker(p)
+        absent = not p["base"].exists() and not p["unit_file"].exists()
+        if not absent and owner != expect_pid:
+            raise HelperError(EXIT_OWNERSHIP, "marker instalasi tidak cocok "
+                                              "dengan --expect-pid")
+    out = {"ok": True}
     if p["unit_file"].exists():
+        if expect_pid is not None:
+            # hanya jalur baru (berfence/berpid) yang melaporkan keadaan
+            # sebelumnya — urutan panggilan jalur lama tidak berubah
+            out["was_active"] = runner.run(
+                [cfg.systemctl, "is-active", "--quiet",
+                 p["unit"] + ".service"], check=False) == 0
         runner.run([cfg.systemctl, "disable", "--now",
                     p["unit"] + ".service"], check=False)
-    return {"ok": True}
+    return out
 
 
 def _stop_and_check(cfg, code, p, runner, port) -> None:
@@ -1333,14 +1432,37 @@ def _listening_inode(proc_root: Path, port: int) -> str | None:
     return None
 
 
+# ::1 di /proc/net/tcp6 (urutan byte per kata 32-bit, little-endian host)
+_TCP6_LOOPBACK = "00000000000000000000000001000000"
+
+
+def _listening_inodes(proc_root: Path, port: int) -> list[str]:
+    """Inode LISTEN pada 127.0.0.1:port (tcp) DAN [::1]:port (tcp6).
+    Hardening: listener IPv6 loopback ikut diperhitungkan."""
+    out: list[str] = []
+    v4 = _listening_inode(proc_root, port)
+    if v4 is not None:
+        out.append(v4)
+    want = f"{_TCP6_LOOPBACK}:{port:04X}"
+    try:
+        lines = (proc_root / "net" / "tcp6").read_text().splitlines()[1:]
+    except OSError:
+        lines = []
+    for ln in lines:
+        f = ln.split()
+        if len(f) > 9 and f[1] == want and f[3] == "0A":
+            out.append(f[9])
+    return out
+
+
 def socket_owned_by_unit(cfg: HelperConfig, unit: str, port: int) -> bool:
-    """True bila listener 127.0.0.1:port dimiliki proses dalam cgroup unit
-    customer ini — mencegah verifikasi berbicara dengan terminal milik
-    customer LAIN yang kebetulan memakai port (Tahap 3D)."""
-    inode = _listening_inode(cfg.proc_root, port)
-    if inode is None:
+    """True bila listener 127.0.0.1:port (atau [::1]:port) dimiliki proses
+    dalam cgroup unit customer ini — mencegah verifikasi berbicara dengan
+    terminal milik customer LAIN yang kebetulan memakai port (Tahap 3D)."""
+    inodes = _listening_inodes(cfg.proc_root, port)
+    if not inodes:
         return False
-    target = f"socket:[{inode}]"
+    targets = {f"socket:[{i}]" for i in inodes}
     for pid_dir in cfg.proc_root.iterdir():
         if not pid_dir.name.isdigit():
             continue
@@ -1349,24 +1471,45 @@ def socket_owned_by_unit(cfg: HelperConfig, unit: str, port: int) -> bool:
             if f"/{unit}.service" not in cg:
                 continue
             for fd in (pid_dir / "fd").iterdir():
-                if os.readlink(fd) == target:
+                if os.readlink(fd) in targets:
                     return True
         except OSError:
             continue
     return False
 
 
-def op_status(cfg, code, port, runner) -> dict:
+def op_status(cfg, code, port, runner,
+              expect_pid: str | None = None) -> dict:
+    """Status terminal. Hardening: di produksi --expect-pid WAJIB (sama
+    seperti start/stop) — status tanpa identitas instalasi tidak boleh
+    dipakai sebagai bukti terminal yang benar sedang berjalan."""
+    if cfg.production and expect_pid is None:
+        raise HelperError(EXIT_ARGS, "--expect-pid wajib di produksi")
     p = paths(cfg, code)
     busy = lock_busy(cfg, code)
     installed = phase_of(p, tombs_for(cfg, code)) == "complete"
+    marker = read_marker(p)
+    marker_match = None if expect_pid is None else marker == expect_pid
+    if expect_pid is not None and not marker_match:
+        installed = False                 # bukan instalasi yang diharapkan
     active = installed and not busy and runner.run(
         [cfg.systemctl, "is-active", "--quiet", p["unit"] + ".service"],
         check=False) == 0
     owned = active and socket_owned_by_unit(cfg, p["unit"], port)
-    return {"ok": True, "installed": installed, "active": active,
-            "busy": busy, "listener_owned": owned,
-            "running": bool(active and owned)}
+    out = {"ok": True, "installed": installed, "active": active,
+           "busy": busy, "listener_owned": owned,
+           "running": bool(active and owned)}
+    if expect_pid is not None:
+        out["marker_match"] = bool(marker_match)
+        out["rpc_mode"] = _complete_mode(p, marker)
+    return out
+
+
+def _complete_mode(p: dict, marker: str | None) -> str | None:
+    """Mode RPC yang tercatat di .install_complete milik marker ini."""
+    data = read_complete(p, marker) if marker is not None else None
+    mode = data.get("rpc_mode") if data else None
+    return mode if mode in HELPER_KNOWN_RPC_MODES else None
 
 
 def op_inspect(cfg, code, provision_id) -> dict:
@@ -1382,31 +1525,682 @@ def op_inspect(cfg, code, provision_id) -> dict:
             # penghapusan berjalan: bukti = manifest tombstone milik pid ini
             match = read_manifest(tomb_paths(cfg, code, provision_id)[1],
                                   code, provision_id)
+    marker = read_marker(p)
     return {"ok": True, "busy": lock_busy(cfg, code),
             "phase": phase_of(p, tombs), "owner_match": match,
             "unit_file": p["unit_file"].exists(),
-            "partial": p["partial"].exists(), "tombstones": len(tombs)}
+            "partial": p["partial"].exists(), "tombstones": len(tombs),
+            # Hardening (tambahan, read-only): identitas & mode instalasi,
+            # fence migrasi, dan proses tersisa.
+            "marker": marker, "rpc_mode": _complete_mode(p, marker),
+            "fence": _fence_public(cfg, code),
+            "unclean": unclean_alive(cfg, code)}
+
+
+# =================================================== MT5 RPC Hardening (G1)
+# ---- kebijakan (PARITAS backend/security/rpc_policy.py) ----------------
+def parse_broker_allow(raw, *, production: bool) -> list:
+    """Salinan PARITAS rpc_policy.parse_broker_allow (lihat docstring di
+    sana). Diuji identik oleh tests/test_rpc_policy_parity.py."""
+    import ipaddress
+    if not isinstance(raw, str):
+        raise ValueError("broker_allow harus string")
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in raw):
+        raise ValueError("broker_allow memuat karakter kontrol")
+    toks = raw.split()
+    if not toks:
+        raise ValueError("broker_allow kosong")
+    if toks == ["any"]:
+        if production:
+            raise ValueError("broker_allow 'any' dilarang di produksi")
+        return ["any"]
+    out = []
+    for t in toks:
+        if t == "any":
+            raise ValueError("'any' tidak boleh dicampur CIDR")
+        try:
+            net = ipaddress.ip_network(t, strict=False)
+        except ValueError:
+            raise ValueError(f"broker_allow bukan IP/CIDR: {t[:40]!r}") \
+                from None
+        if str(net) not in out:
+            out.append(str(net))
+    return out
+
+
+def _decode_secret_bytes(secret: str):
+    import base64
+    import binascii
+    s = secret.strip()
+    if re.fullmatch(r"[0-9a-fA-F]+", s) and len(s) % 2 == 0:
+        try:
+            return binascii.unhexlify(s)
+        except binascii.Error:
+            return None
+    if re.fullmatch(r"[A-Za-z0-9_\-]+=*", s):
+        try:
+            pad = "=" * (-len(s.rstrip("=")) % 4)
+            return base64.urlsafe_b64decode(s.rstrip("=") + pad)
+        except (binascii.Error, ValueError):
+            return None
+    return None
+
+
+def secret_strength_problem(secret) -> str | None:
+    """PARITAS rpc_policy.secret_strength_problem (tanpa forbid_equal_to:
+    helper tidak mengenal secret API lain)."""
+    if not isinstance(secret, str):
+        return "secret_missing"
+    s = secret.strip()
+    if s.lower() in SECRET_PLACEHOLDERS:
+        return "secret_placeholder"
+    raw = _decode_secret_bytes(s)
+    if raw is None:
+        return "secret_encoding"
+    if len(raw) < SECRET_MIN_BYTES:
+        return "secret_too_short"
+    if len(set(raw)) < 8:
+        return "secret_low_entropy"
+    return None
+
+
+def selfcheck_proof(secret: str, nonce_hex: str) -> str:
+    """PARITAS rpc_policy.selfcheck_proof: HMAC-SHA256(secret,
+    DOMAIN || nonce). Membuktikan kecocokan secret TANPA mengirimnya."""
+    import hashlib
+    import hmac
+    if not isinstance(nonce_hex, str) or not NONCE_RE.fullmatch(nonce_hex):
+        raise ValueError("nonce harus 64 hex huruf kecil")
+    if not isinstance(secret, str) or not secret:
+        raise ValueError("secret kosong")
+    msg = (SELFCHECK_DOMAIN + nonce_hex).encode("utf-8")
+    return hmac.new(secret.encode("utf-8"), msg, hashlib.sha256).hexdigest()
+
+
+def production_problems(cfg: HelperConfig) -> list:
+    """Daftar pelanggaran kebijakan produksi (kosong = siap). TANPA nilai
+    rahasia — hanya kode masalah."""
+    probs = []
+    if cfg.service_user_mode != "per_customer":
+        probs.append("service_user_mode_bukan_per_customer")
+    if cfg.ro_service is not True:
+        probs.append("ro_service_nonaktif")
+    sp = secret_strength_problem(cfg.rpc_secret)
+    if sp is not None:
+        probs.append(sp)
+    if not cfg.wine_python or not os.path.isabs(cfg.wine_python):
+        probs.append("wine_python_tidak_absolut")
+    try:
+        parse_broker_allow(cfg.broker_allow, production=True)
+    except ValueError:
+        probs.append("broker_allow_bukan_cidr")
+    return probs
+
+
+def broker_allow_mode(cfg: HelperConfig) -> str:
+    try:
+        nets = parse_broker_allow(cfg.broker_allow, production=False)
+    except ValueError:
+        return "invalid"
+    return "any" if nets == ["any"] else "cidr"
+
+
+# ---- fence migrasi (K1) -------------------------------------------------
+def _fence_root(cfg: HelperConfig) -> Path:
+    """<base_dir>/.fence — PERSISTEN (bukan /run): fence wajib bertahan
+    melewati reboot. Root-only 0700, seperti direktori tombstone."""
+    d = cfg.base_dir / FENCE_DIR
+    try:
+        d.mkdir(mode=0o700, parents=False)
+    except FileExistsError:
+        pass
+    st = os.lstat(d)
+    if (not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid()
+            or st.st_mode & 0o077):
+        raise HelperError(EXIT_FAIL, "direktori fence tidak aman")
+    return d
+
+
+def _fence_path(cfg: HelperConfig, code: str) -> Path:
+    if not CODE_RE.fullmatch(code):
+        raise HelperError(EXIT_ARGS, "kode customer tidak sah")
+    return cfg.base_dir / FENCE_DIR / code
+
+
+def read_fence(cfg: HelperConfig, code: str) -> dict | None:
+    """Fence tersimpan untuk kode ini, atau None bila belum pernah ada.
+    Berkas rusak / bukan milik root / format tak dikenal -> HelperError
+    EXIT_FENCE (fail-closed: tidak ada operasi berfence yang dilanjutkan)."""
+    path = _fence_path(cfg, code)
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or \
+            st.st_mode & 0o077:
+        raise HelperError(EXIT_FENCE, "berkas fence tidak sah")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise HelperError(EXIT_FENCE, "berkas fence rusak") from None
+    ok = (isinstance(data, dict) and data.get("v") == FENCE_VERSION and
+          isinstance(data.get("migration_id"), str) and
+          MID_RE.fullmatch(data["migration_id"]) and
+          isinstance(data.get("gen"), int) and
+          not isinstance(data.get("gen"), bool) and data["gen"] >= 1 and
+          isinstance(data.get("released"), bool))
+    if not ok:
+        raise HelperError(EXIT_FENCE, "format fence tidak dikenal")
+    return data
+
+
+def _fence_public(cfg: HelperConfig, code: str) -> dict | None:
+    """Ringkasan fence untuk inspect/audit (read-only, tidak melempar)."""
+    try:
+        f = read_fence(cfg, code)
+    except HelperError:
+        return {"invalid": True}
+    if f is None:
+        return None
+    return {"migration_id": f["migration_id"], "gen": f["gen"],
+            "released": f["released"]}
+
+
+def _write_fence(cfg: HelperConfig, code: str, migration_id: str, gen: int,
+                 released: bool) -> None:
+    _fence_root(cfg)
+    _atomic_write(_fence_path(cfg, code), json.dumps(
+        {"v": FENCE_VERSION, "migration_id": migration_id, "gen": gen,
+         "released": released}), 0o600)
+
+
+def check_fence(cfg: HelperConfig, code: str, migration_id: str | None,
+                gen: int | None) -> None:
+    """Dipanggil DI BAWAH flock, SEBELUM operasi apa pun (FENCED_OPS).
+
+    - Dengan --migration-id/--fence: fence tersimpan WAJIB ada, belum
+      dilepas, migration_id sama, dan gen PERSIS sama. gen lebih kecil =
+      worker basi; lebih besar = fence-advance belum dijalankan. Selain
+      itu exit 8.
+    - Tanpa argumen fence (jalur provisioning biasa): ditolak exit 8 bila
+      ada migrasi AKTIF (fence tersimpan, belum dilepas) atas kode ini."""
+    stored = read_fence(cfg, code)
+    if migration_id is None and gen is None:
+        if stored is not None and not stored["released"]:
+            raise HelperError(EXIT_FENCE, "terminal sedang dipegang migrasi "
+                                          "RPC — operasi tanpa fence ditolak")
+        return
+    if stored is None:
+        raise HelperError(EXIT_FENCE, "fence belum di-advance untuk "
+                                      "migrasi ini")
+    if stored["released"]:
+        raise HelperError(EXIT_FENCE, "fence migrasi sudah dilepas")
+    if stored["migration_id"] != migration_id:
+        raise HelperError(EXIT_FENCE, "fence milik migrasi lain")
+    if stored["gen"] != gen:
+        raise HelperError(EXIT_FENCE, "generasi fence tidak sama (worker "
+                                      "basi atau advance belum dijalankan)")
+
+
+def op_fence_advance(cfg, code, migration_id: str, gen: int) -> dict:
+    """K1: dijalankan DI BAWAH flock — operasi generasi lama yang sedang
+    memegang lock PASTI selesai dulu; operasi generasi lama yang mendapat
+    lock SESUDAHNYA ditolak check_fence (exit 8). Mengembalikan inspect
+    lengkap yang dibaca DI DALAM lock yang sama (dasar keputusan worker
+    baru). Idempoten untuk (migration_id, gen) yang sama."""
+    stored = read_fence(cfg, code)
+    if stored is not None:
+        same = stored["migration_id"] == migration_id
+        if stored["released"]:
+            if same:
+                raise HelperError(EXIT_FENCE, "fence migrasi ini sudah "
+                                              "dilepas")
+        elif not same:
+            raise HelperError(EXIT_FENCE, "migrasi lain masih memegang "
+                                          "fence")
+        elif gen < stored["gen"]:
+            raise HelperError(EXIT_FENCE, "generasi lebih kecil dari fence "
+                                          "tersimpan")
+    if stored is None or stored["released"] or gen > stored["gen"]:
+        _write_fence(cfg, code, migration_id, gen, False)
+    out = op_inspect_unlocked(cfg, code, None)
+    out["fence"] = _fence_public(cfg, code)
+    return out
+
+
+def op_fence_release(cfg, code, migration_id: str, gen: int) -> dict:
+    """Lepas fence saat migrasi FINAL (done/cancelled/failed_credentials).
+    Hanya pemegang (migration_id, gen) terkini; idempoten."""
+    stored = read_fence(cfg, code)
+    if stored is None or stored["migration_id"] != migration_id:
+        raise HelperError(EXIT_FENCE, "fence bukan milik migrasi ini")
+    if stored["gen"] != gen:
+        raise HelperError(EXIT_FENCE, "generasi fence tidak sama")
+    if not stored["released"]:
+        _write_fence(cfg, code, migration_id, gen, True)
+    return {"ok": True, "fence": _fence_public(cfg, code)}
+
+
+def op_inspect_unlocked(cfg, code, provision_id) -> dict:
+    """inspect TANPA mencoba lock (dipanggil ketika lock sudah dipegang
+    proses ini — flock pada fd baru di proses yang sama akan bentrok)."""
+    p = paths(cfg, code)
+    tombs = tombs_for(cfg, code)
+    marker = read_marker(p)
+    return {"ok": True, "busy": False, "phase": phase_of(p, tombs),
+            "owner_match": None if provision_id is None
+            else marker == provision_id,
+            "unit_file": p["unit_file"].exists(),
+            "partial": p["partial"].exists(), "tombstones": len(tombs),
+            "marker": marker, "rpc_mode": _complete_mode(p, marker),
+            "fence": _fence_public(cfg, code)}
+
+
+# ---- selfcheck (T4) & audit-all (K3) -----------------------------------
+def op_selfcheck(cfg: HelperConfig, nonce: str | None) -> dict:
+    """Read-only. TIDAK PERNAH mengembalikan secret; kecocokan secret
+    dibuktikan lewat secret_proof = HMAC(secret, DOMAIN||nonce)."""
+    lock_dir_ok = True
+    unclean = 0
+    try:
+        d = _lock_dir(cfg)
+        for n in os.listdir(d):
+            if n.endswith(".unclean") and CODE_RE.fullmatch(n[:-8]) and \
+                    unclean_alive(cfg, n[:-8]):
+                unclean += 1
+    except (HelperError, OSError):
+        lock_dir_ok = False
+    out = {"ok": True, "production": bool(cfg.production),
+           "service_user_mode": cfg.service_user_mode,
+           "ro_service": bool(cfg.ro_service),
+           "broker_allow_mode": broker_allow_mode(cfg),
+           "wine_python_ok": bool(cfg.wine_python) and
+           os.path.isabs(cfg.wine_python),
+           "secret_ok": secret_strength_problem(cfg.rpc_secret) is None,
+           "op_timeout_seconds": float(cfg.op_timeout_seconds),
+           "lock_wait_seconds": float(cfg.lock_wait_seconds),
+           "lock_dir_ok": lock_dir_ok, "unclean_count": unclean,
+           "production_problems": production_problems(cfg)}
+    if nonce is not None:
+        if not NONCE_RE.fullmatch(nonce):
+            raise HelperError(EXIT_ARGS, "nonce tidak sah")
+        out["secret_proof"] = (selfcheck_proof(cfg.rpc_secret, nonce)
+                               if cfg.rpc_secret else None)
+    return out
+
+
+def _render_run_script(cfg: HelperConfig, code: str, port: int,
+                       kind: str) -> str:
+    p = paths(cfg, code)
+    fmt = {"code": code, "port": port, "user": service_user_for(cfg, code),
+           "base": p["base"], "terminal_dir": p["terminal"],
+           "wine_prefix": p["wine_prefix"], "wine_bin": cfg.wine_bin,
+           "broker_allow": cfg.broker_allow,
+           "wine_python": cfg.wine_python}
+    tpl = RUN_TEMPLATE_RO if kind == "ro" else RUN_TEMPLATE
+    return tpl.format(**fmt)
+
+
+def _run_script_kind(cfg: HelperConfig, code: str, port: int | None) -> str:
+    """'ro' / 'classic' bila skrip run SAMA PERSIS dengan template yang
+    dirender helper; 'missing' bila tidak ada; selain itu 'unknown'."""
+    path = paths(cfg, code)["terminal"] / "run-terminal.sh"
+    try:
+        st = os.lstat(path)
+        if not stat.S_ISREG(st.st_mode):
+            return "unknown"
+        txt = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
+        return "unknown"
+    if port is None:
+        return "unknown"
+    for kind in ("ro", "classic"):
+        try:
+            if txt == _render_run_script(cfg, code, port, kind):
+                return kind
+        except (KeyError, IndexError, ValueError):
+            continue
+    return "unknown"
+
+
+def _code_from_unit_name(name: str) -> str | None:
+    if not (name.startswith(UNIT_PREFIX) and name.endswith(".service")):
+        return None
+    code = name[len(UNIT_PREFIX):-len(".service")].upper()
+    return code if CODE_RE.fullmatch(code) else None
+
+
+class _Inv:
+    """Pencatat galat inventaris audit-all (FAIL-CLOSED).
+
+    Setiap sumber yang TIDAK dapat dibaca lengkap (izin ditolak, berkas
+    hilang, /proc tidak tersedia, pwd gagal) dicatat sebagai kode galat
+    — TIDAK PERNAH ditelan. audit_complete = tidak ada galat. Readiness
+    (API) wajib merah bila audit tidak lengkap."""
+
+    def __init__(self):
+        self.errors: list = []
+
+    def add(self, source: str, exc: BaseException | str) -> None:
+        kind = exc if isinstance(exc, str) else type(exc).__name__
+        item = f"{source}:{kind}"
+        if item not in self.errors:
+            self.errors.append(item)
+
+    def listdir(self, source: str, d: Path, *, required: bool) -> list:
+        """Isi direktori terurut. Tidak ada + required -> galat; tidak ada
+        + opsional -> []; symlink / bukan direktori / gagal baca -> galat."""
+        try:
+            st = os.lstat(d)
+        except FileNotFoundError:
+            if required:
+                self.add(source, "tidak_ada")
+            return []
+        except OSError as e:
+            self.add(source, e)
+            return []
+        if not stat.S_ISDIR(st.st_mode):
+            self.add(source, "bukan_direktori")
+            return []
+        try:
+            return sorted(os.listdir(d))
+        except OSError as e:
+            self.add(source, e)
+            return []
+
+    def read_text(self, source: str, path: Path) -> str | None:
+        try:
+            return path.read_text()
+        except FileNotFoundError:
+            self.add(source, "tidak_ada")
+        except OSError as e:
+            self.add(source, e)
+        return None
+
+
+_PROC_NET_SL_RE = re.compile(r"\d+:")
+_PROC_NET_ADDR_RE = {"tcp": re.compile(r"[0-9A-Fa-f]{8}:[0-9A-Fa-f]{4}"),
+                     "tcp6": re.compile(r"[0-9A-Fa-f]{32}:[0-9A-Fa-f]{4}")}
+_PROC_NET_ST_RE = re.compile(r"[0-9A-Fa-f]{2}")
+_PROC_NET_MIN_FIELDS = 10          # sl local rem st tx:rx tr:tm rt uid to inode
+# Header persis seperti kernel Linux (net/ipv4/tcp_ipv4.c tcp4_seq_show,
+# net/ipv6/tcp_ipv6.c tcp6_seq_show); dibandingkan per token sehingga
+# padding spasi tidak berpengaruh.
+_PROC_NET_HEADER = {
+    "tcp": ("sl", "local_address", "rem_address", "st", "tx_queue",
+            "rx_queue", "tr", "tm->when", "retrnsmt", "uid", "timeout",
+            "inode"),
+    "tcp6": ("sl", "local_address", "remote_address", "st", "tx_queue",
+             "rx_queue", "tr", "tm->when", "retrnsmt", "uid", "timeout",
+             "inode"),
+}
+
+
+def _listening_ports_checked(proc_root: Path, lo: int, hi: int,
+                             inv: _Inv) -> dict:
+    """{port: [inode,...]} untuk SEMUA alamat (tcp & tcp6) pada rentang
+    port [lo, hi). /proc/net/tcp & tcp6 yang hilang atau tidak terbaca
+    DICATAT sebagai galat (bukan dilewati).
+
+    FAIL-CLOSED per baris: SETIAP baris non-header (apa pun state-nya)
+    divalidasi. Kolom < 10 -> "kolom_tidak_lengkap"; sl/alamat lokal/
+    alamat remote/state/inode tidak sesuai format -> "baris_rusak".
+    Header baris pertama WAJIB sama per token dengan header kernel;
+    berbeda -> "header_rusak", baris pertama berupa data ->
+    "header_tidak_ada".
+    Baris yang tidak valid tidak pernah dilewati diam-diam: inventaris
+    dianggap tidak lengkap (audit_complete=false)."""
+    found: dict[int, list[str]] = {}
+    for name in ("tcp", "tcp6"):
+        src = f"proc_net_{name}"
+        txt = inv.read_text(src, proc_root / "net" / name)
+        if txt is None:
+            continue
+        lines = txt.splitlines()
+        if not lines:
+            inv.add(src, "kosong")
+            continue
+        addr_re = _PROC_NET_ADDR_RE[name]
+        hdr = lines[0].split()
+        if tuple(hdr) == _PROC_NET_HEADER[name]:
+            rows = lines[1:]
+        elif hdr and _PROC_NET_SL_RE.fullmatch(hdr[0]):
+            # baris pertama berupa baris data: header HILANG. Tetap
+            # dipindai sebagai data (tidak ada listener yang hilang),
+            # tetapi inventaris tidak lengkap.
+            inv.add(src, "header_tidak_ada")
+            rows = lines
+        else:
+            inv.add(src, "header_rusak")
+            rows = lines[1:]
+        for ln in rows:
+            f = ln.split()
+            if len(f) < _PROC_NET_MIN_FIELDS:
+                inv.add(src, "kolom_tidak_lengkap")
+                continue
+            if not (_PROC_NET_SL_RE.fullmatch(f[0])
+                    and addr_re.fullmatch(f[1])
+                    and addr_re.fullmatch(f[2])
+                    and _PROC_NET_ST_RE.fullmatch(f[3])
+                    and f[9].isascii() and f[9].isdigit()):
+                inv.add(src, "baris_rusak")
+                continue
+            if f[3].upper() != "0A":
+                continue
+            port = int(f[1].rsplit(":", 1)[1], 16)
+            if lo <= port < hi:
+                found.setdefault(port, []).append(f[9])
+    return found
+
+
+def _proc_socket_owners(proc_root: Path, inodes: set, inv: _Inv) -> dict:
+    """{inode: set(unit)} untuk socket [inodes] dari /proc/<pid>/fd +
+    cgroup. /proc tidak terbaca -> galat. Proses yang KELUAR saat dipindai
+    (FileNotFoundError/ProcessLookupError) wajar dan dilewati; izin ditolak
+    pada fd/cgroup proses lain -> galat (inventaris tidak lengkap)."""
+    owners: dict[str, set] = {i: set() for i in inodes}
+    if not inodes:
+        return owners
+    targets = {f"socket:[{i}]": i for i in inodes}
+    names = inv.listdir("proc", proc_root, required=True)
+    for name in names:
+        if not name.isdigit():
+            continue
+        pid_dir = proc_root / name
+        try:
+            fds = [os.readlink(fd) for fd in (pid_dir / "fd").iterdir()]
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError as e:
+            inv.add("proc_pid_fd", e)
+            continue
+        hit = [targets[x] for x in fds if x in targets]
+        if not hit:
+            continue
+        try:
+            cg = (pid_dir / "cgroup").read_text()
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except OSError as e:
+            inv.add("proc_pid_cgroup", e)
+            continue
+        m = re.search(r"/(" + re.escape(UNIT_PREFIX) + r"[a-z0-9]+)\.service",
+                      cg)
+        for i in hit:
+            owners[i].add(m.group(1) if m else "?")
+    return owners
+
+
+def op_audit_all(cfg: HelperConfig, runner) -> dict:
+    """Inventaris READ-ONLY lengkap (K3) untuk rekonsiliasi dua arah di
+    API. Tidak mengklasifikasikan sehat/tidak — itu tugas API (dengan DB).
+    Setiap entri yang tidak dikenali dilaporkan di unknown_entries.
+
+    FAIL-CLOSED: setiap sumber yang tidak terbaca lengkap masuk
+    inventory_errors dan audit_complete=false (readiness wajib merah)."""
+    inv = _Inv()
+    codes: set = set()
+    unknown: list = []
+    known_base = {TOMB_DIR, FENCE_DIR}
+    for n in inv.listdir("base_dir", cfg.base_dir, required=True):
+        if n in known_base:
+            continue
+        if CODE_RE.fullmatch(n):
+            codes.add(n)
+        else:
+            unknown.append(f"base:{n}")
+    for n in inv.listdir("unit_dir", cfg.unit_dir, required=True):
+        if not n.startswith(UNIT_PREFIX) and \
+                not n.startswith("." + UNIT_PREFIX):
+            continue
+        c = _code_from_unit_name(n)
+        if c is None:
+            unknown.append(f"unit:{n}")
+        else:
+            codes.add(c)
+    for n in inv.listdir("tombstone_dir", cfg.base_dir / TOMB_DIR,
+                         required=False):
+        c = n.split(".", 1)[0]
+        if CODE_RE.fullmatch(c):
+            codes.add(c)
+        else:
+            unknown.append(f"tombstone:{n}")
+    for n in inv.listdir("fence_dir", cfg.base_dir / FENCE_DIR,
+                         required=False):
+        if CODE_RE.fullmatch(n):
+            codes.add(n)
+        elif not n.startswith("."):
+            unknown.append(f"fence:{n}")
+    # lock_dir (tmpfs /run) boleh belum ada setelah reboot: opsional
+    for n in inv.listdir("lock_dir", cfg.lock_dir, required=False):
+        stem, _, ext = n.partition(".")
+        if ext in ("lock", "unclean") and CODE_RE.fullmatch(stem):
+            if ext == "unclean":
+                codes.add(stem)
+        elif not n.startswith("."):
+            unknown.append(f"lock:{n}")
+    users_orphan: list = []
+    try:
+        import pwd
+        entries = pwd.getpwall()
+    except Exception as e:  # noqa: BLE001 — DICATAT, tidak ditelan
+        inv.add("pwd", e)
+        entries = []
+    for pw in entries:
+        if pw.pw_name.startswith("mt5-"):
+            c = pw.pw_name[4:].upper()
+            if CODE_RE.fullmatch(c):
+                if cfg.service_user_mode == "per_customer":
+                    codes.add(c)
+            else:
+                users_orphan.append(pw.pw_name)
+    user_names = {pw.pw_name for pw in entries}
+    lo, hi = cfg.port_base, cfg.port_base + cfg.max_slots
+    ports = _listening_ports_checked(cfg.proc_root, lo, hi, inv)
+    all_inodes = {i for v in ports.values() for i in v}
+    owners = _proc_socket_owners(cfg.proc_root, all_inodes, inv)
+    terminals = []
+    for c in sorted(codes):
+        try:
+            p = paths(cfg, c)
+            tombs = tombs_for(cfg, c)
+            marker = read_marker(p)
+            complete = read_complete(p, marker) if marker else None
+            unit_exists = p["unit_file"].exists()
+        except (OSError, HelperError) as e:
+            inv.add(f"terminal_{c}", e)
+            terminals.append({"code": c, "error": True})
+            continue
+        unit_port = _unit_port(p) if unit_exists else None
+        port = (complete or {}).get("port") if complete else None
+        port = port if isinstance(port, int) else unit_port
+        unit_active = None
+        if unit_exists:
+            try:
+                unit_active = runner.run(
+                    [cfg.systemctl, "is-active", "--quiet",
+                     p["unit"] + ".service"], check=False) == 0
+            except Exception as e:  # noqa: BLE001 — DICATAT
+                inv.add(f"systemctl_{c}", e)
+        listener_owned = False
+        if port is not None and port in ports:
+            listener_owned = any(p["unit"] in owners.get(i, set())
+                                 for i in ports[port])
+        try:
+            unclean = unclean_alive(cfg, c)
+        except OSError as e:
+            inv.add(f"unclean_{c}", e)
+            unclean = True
+        terminals.append({
+            "code": c, "phase": phase_of(p, tombs),
+            "base_exists": p["base"].exists(), "marker": marker,
+            "complete": None if complete is None else {
+                "provision_id": complete.get("provision_id"),
+                "port": complete.get("port"),
+                "rpc_mode": complete.get("rpc_mode")},
+            "partial": p["partial"].exists(), "tombstones": len(tombs),
+            "unit_file": unit_exists, "unit_port": unit_port,
+            "unit_active": unit_active,
+            "run_script_kind": _run_script_kind(cfg, c, port),
+            "listener_owned": bool(listener_owned and unit_active),
+            "unclean": unclean,
+            "fence": _fence_public(cfg, c),
+            "service_user_exists": (service_user_for(cfg, c) in user_names)
+            if cfg.service_user_mode == "per_customer" and entries
+            else None})
+    listeners = [{"port": port, "owner_units": sorted(
+        {u for i in inodes for u in owners.get(i, set())})}
+        for port, inodes in sorted(ports.items())]
+    return {"ok": True, "production": bool(cfg.production),
+            "port_window": [lo, hi],
+            "audit_complete": not inv.errors,
+            "inventory_errors": list(inv.errors),
+            "terminals": terminals, "unknown_entries": unknown,
+            "user_orphans": users_orphan, "listeners": listeners}
 
 
 def dispatch(cfg: HelperConfig, argv: list[str], runner=None) -> dict:
     ap = argparse.ArgumentParser(prog="transcendence-mt5-provision",
                                  add_help=False, allow_abbrev=False)
     ap.add_argument("op", choices=OPS)
-    ap.add_argument("--code", required=True)
+    ap.add_argument("--code")
     ap.add_argument("--port", type=int)
     ap.add_argument("--provision-id")
-    ap.add_argument("--rpc-mode", choices=("classic", "ro"),
-                    default="classic")
+    # Hardening: TANPA default di parser. Produksi: install WAJIB menyebut
+    # mode (dan harus ro). Non-produksi: default lama 'classic' dipertahankan
+    # agar perilaku dev/test tidak berubah (API selalu mengirim eksplisit).
+    ap.add_argument("--rpc-mode", choices=("classic", "ro"))
+    ap.add_argument("--expect-pid")
+    ap.add_argument("--expect-mode", choices=("classic", "ro"))
+    ap.add_argument("--migration-id")
+    ap.add_argument("--fence", type=int)
+    ap.add_argument("--gen", type=int)
+    ap.add_argument("--nonce")
     try:
         a = ap.parse_args(argv)
     except SystemExit as e:
         raise HelperError(EXIT_ARGS, "argumen tidak sah") from e
+    _validate_hardening_args(a)
+    if a.op == "install" and a.rpc_mode is None:
+        if cfg.production:
+            raise HelperError(EXIT_ARGS, "--rpc-mode wajib untuk install "
+                                         "di produksi")
+        a.rpc_mode = "classic"            # default lama, HANYA non-produksi
+    runner = runner or Runner()
+    if a.op in GLOBAL_OPS:
+        validate_global(cfg, a.op)
+        if a.op == "selfcheck":
+            return op_selfcheck(cfg, a.nonce)
+        return op_audit_all(cfg, runner)
+    if a.code is None:
+        raise HelperError(EXIT_ARGS, "--code wajib")
     validate(cfg, a.op, a.code, a.port, a.provision_id)
     if a.op == "inspect" and a.provision_id is not None and \
             not PID_RE.fullmatch(a.provision_id):
         raise HelperError(EXIT_ARGS, "provision-id tidak sah")
     global _UNCLEAN_SINK
-    runner = runner or Runner()
 
     held = {"lock": False}        # True selama lock operasi dipegang
 
@@ -1420,7 +2214,8 @@ def dispatch(cfg: HelperConfig, argv: list[str], runner=None) -> dict:
     if a.op == "inspect":
         return op_inspect(cfg, a.code, a.provision_id)
     if a.op == "status":
-        return op_status(cfg, a.code, a.port, runner)
+        return op_status(cfg, a.code, a.port, runner,
+                         expect_pid=a.expect_pid)
     if _HELPER_PROCESS and not _SUBREAPER_OK:
         # M1: tanpa subreaper, turunan yang keluar dari process group tidak
         # dapat dijamin berhenti -> TOLAK sebelum lock & sebelum perubahan
@@ -1431,17 +2226,60 @@ def dispatch(cfg: HelperConfig, argv: list[str], runner=None) -> dict:
     held["lock"] = True
     try:
         runner.pass_fds = (lock_fd,)
+        if a.op == "fence-advance":
+            return op_fence_advance(cfg, a.code, a.migration_id, a.gen)
+        if a.op == "fence-release":
+            return op_fence_release(cfg, a.code, a.migration_id, a.gen)
+        # K1: fence diperiksa DI BAWAH lock, SEBELUM perubahan apa pun
+        check_fence(cfg, a.code, a.migration_id, a.fence)
         if a.op == "install":
             return op_install(cfg, a.code, a.port, a.provision_id, runner,
                               rpc_mode=a.rpc_mode)
         if a.op == "start":
-            return op_start(cfg, a.code, a.port, runner)
+            return op_start(cfg, a.code, a.port, runner,
+                            expect_pid=a.expect_pid,
+                            expect_mode=a.expect_mode)
         if a.op == "stop":
-            return op_stop(cfg, a.code, runner)
+            return op_stop(cfg, a.code, runner, expect_pid=a.expect_pid)
         return op_remove(cfg, a.code, a.provision_id, runner)
     finally:
         held["lock"] = False
         os.close(lock_fd)
+
+
+def _validate_hardening_args(a) -> None:
+    """Validasi bentuk argumen baru (sebelum lock & sebelum perubahan)."""
+    if a.expect_pid is not None:
+        if a.op not in ("start", "stop", "status") or \
+                not PID_RE.fullmatch(a.expect_pid):
+            raise HelperError(EXIT_ARGS, "--expect-pid tidak sah")
+    if a.expect_mode is not None and a.op != "start":
+        raise HelperError(EXIT_ARGS, "--expect-mode hanya untuk start")
+    has_mid = a.migration_id is not None
+    if has_mid and not MID_RE.fullmatch(a.migration_id):
+        raise HelperError(EXIT_ARGS, "--migration-id tidak sah")
+    for name, v in (("--fence", a.fence), ("--gen", a.gen)):
+        if v is not None and (isinstance(v, bool) or v < 1 or v > 10**18):
+            raise HelperError(EXIT_ARGS, f"{name} tidak sah")
+    if a.op in ("fence-advance", "fence-release"):
+        if not has_mid or a.gen is None or a.fence is not None:
+            raise HelperError(EXIT_ARGS, "--migration-id dan --gen wajib")
+    elif a.gen is not None:
+        raise HelperError(EXIT_ARGS, "--gen hanya untuk fence-advance/"
+                                     "fence-release")
+    if a.op in FENCED_OPS:
+        if has_mid != (a.fence is not None):
+            raise HelperError(EXIT_ARGS, "--migration-id dan --fence wajib "
+                                         "berpasangan")
+    elif a.op not in ("fence-advance", "fence-release") and \
+            (has_mid or a.fence is not None):
+        raise HelperError(EXIT_ARGS, "--migration-id/--fence tidak berlaku "
+                                     "untuk operasi ini")
+    if a.nonce is not None and a.op != "selfcheck":
+        raise HelperError(EXIT_ARGS, "--nonce hanya untuk selfcheck")
+    if a.op in GLOBAL_OPS and (a.code is not None or a.port is not None or
+                               a.provision_id is not None):
+        raise HelperError(EXIT_ARGS, "operasi global tanpa --code/--port")
 
 
 _UNCLEAN_SINK = None      # pencatat identitas proses tersisa (diisi dispatch)
