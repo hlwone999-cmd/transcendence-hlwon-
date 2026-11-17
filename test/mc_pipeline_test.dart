@@ -46,7 +46,7 @@ void main() {
     );
 
     // UI baru: aktifkan tab "Simulasi" agar kartu terlihat & hit-testable.
-    await tester.tap(find.text('Simulasi'));
+    await tester.tap(find.byTooltip('Simulasi'));
     await tester.pump();
 
     // Jalankan timer debounce MC (250ms) — timer fake async.

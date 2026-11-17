@@ -1,0 +1,40 @@
+# Kebijakan logrotate untuk log cron backup harian (hardening pre-push
+# N7 lanjutan). Log `daily-cron.log` ditulis cron via `>> 2>&1` setiap
+# hari — tanpa rotasi ia tumbuh tanpa batas di direktori backup (dir
+# 750; kehabisan disk juga mematikan backup berikutnya).
+#
+# Pemasangan di VPS (sekali, root):
+#   install -o root -g root -m 644 \
+#     /opt/transcendence-hlwon-/backend/deploy/logrotate-transcendence-backup \
+#     /etc/logrotate.d/transcendence-backup
+#
+# Uji kering (tidak memutar sungguhan):
+#   logrotate --debug /etc/logrotate.d/transcendence-backup
+#
+# Catatan desain:
+# - copytruncate: cron membuka file dengan `>>` pada TIAP run (tidak
+#   ada daemon yang memegang file descriptor), maka snapshot+truncate
+#   di tempat cukup dan tidak butuh skrip postrotate/reload apa pun;
+#   file aktif tetap milik deploy dengan mode yang sama.
+# - su deploy deploy: rotasi dijalankan atas nama pemilik direktori
+#   (deploy:deploy 750) — arsip yang dihasilkan ikut milik deploy,
+#   bukan root; logrotate cukup punya akses root untuk masuk.
+# - weekly + maxsize 5M: rotasi mingguan, TAPI dipaksa lebih cepat bila
+#   log membengkak (mis. pg_dump error berulang setiap 15 menit).
+# - rotate 12 + dateext + compress: maksimum 12 arsip bertanggal (± 3
+#   bulan riwayat) dalam gzip; delaycompress tidak diperlukan karena
+#   copytruncate mengambil snapshot yang sudah lengkap.
+# - missingok + notifempty: tidak gagal bila log belum ada / kosong
+#   (mis. sebelum run backup harian pertama).
+
+/var/backups/transcendence/daily-cron.log {
+    weekly
+    maxsize 5M
+    rotate 12
+    dateext
+    compress
+    copytruncate
+    missingok
+    notifempty
+    su deploy deploy
+}

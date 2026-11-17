@@ -25,6 +25,8 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timezone
 
+import db as dbmod
+
 
 def _dt_of(s: str | None):
     if not s:
@@ -82,8 +84,9 @@ def compute_stats(conn, account_id: int, symbol_cfg: dict,
                   symbol: str | None = None,
                   to_exclusive: bool = False) -> dict:
     meta = load_symbol_meta(conn, account_id)
+    tt = dbmod.trades_table(conn)
 
-    q = ("SELECT * FROM trades WHERE account_id=? AND status='closed'")
+    q = (f"SELECT * FROM {tt} WHERE account_id=? AND status='closed'")
     args = [account_id]
     if date_from:
         q += " AND close_time_utc >= ?"
@@ -152,7 +155,7 @@ def compute_stats(conn, account_id: int, symbol_cfg: dict,
 
     # ---- open positions ringkas -----------------------------------------
     open_rows = [dict(r) for r in conn.execute(
-        "SELECT * FROM trades WHERE account_id=? AND status='open'",
+        f"SELECT * FROM {tt} WHERE account_id=? AND status='open'",
         (account_id,))]
 
     return {
@@ -197,9 +200,10 @@ def equity_curve(conn, account_id: int, symbol_cfg: dict,
     menyebutnya drawdown equity akun.
     """
     meta = load_symbol_meta(conn, account_id)
+    tt = dbmod.trades_table(conn)
 
-    q = ("SELECT position_id, symbol, direction, close_time_utc, net_profit,"
-         " volume_out, exit_reason FROM trades"
+    q = (f"SELECT position_id, symbol, direction, close_time_utc, net_profit,"
+         f" volume_out, exit_reason FROM {tt}"
          " WHERE account_id=? AND status='closed'")
     args = [account_id]
     if date_from:
@@ -313,6 +317,7 @@ def reconciliation(conn, account_id: int,
     Endpoint ini ALAT DIAGNOSA — tidak mengubah data apa pun.
     """
     meta = load_symbol_meta(conn, account_id)
+    tt = dbmod.trades_table(conn)
 
     # --- 1) deals trading dalam interval ---------------------------------
     cond = ["account_id=?", "deal_type IN (0,1)"]
@@ -366,7 +371,7 @@ def reconciliation(conn, account_id: int,
     if pids:
         ph = ",".join("?" * len(pids))
         rows = [dict(r) for r in conn.execute(
-            f"SELECT status, net_profit FROM trades WHERE account_id=?"
+            f"SELECT status, net_profit FROM {tt} WHERE account_id=?"
             f" AND position_id IN ({ph})", [account_id] + pids)]
         by_position["net_profit"] = round(
             sum(r["net_profit"] or 0 for r in rows), 8)
@@ -386,7 +391,7 @@ def reconciliation(conn, account_id: int,
         targs.append(symbol)
     trows = [dict(r) for r in conn.execute(
         f"SELECT position_id, profit, commission, swap, fee, net_profit"
-        f" FROM trades WHERE {' AND '.join(tcond)}", targs)]
+        f" FROM {tt} WHERE {' AND '.join(tcond)}", targs)]
     by_close = {
         "trades": len(trows),
         "profit": _sum(trows, "profit"),

@@ -34,7 +34,7 @@ void main() {
     await tester.pumpAndSettle();
 
     // UI baru: tabel utama ada di tab "Matrix Risiko" — aktifkan dulu.
-    await tester.tap(find.text('Matrix Risiko').first);
+    await tester.tap(find.byTooltip('Matrix Risiko'));
     await tester.pumpAndSettle();
 
     final tableFinder = find.byKey(const Key('mainTable'));
@@ -97,7 +97,7 @@ void main() {
     await tester.pumpAndSettle();
 
     // UI baru: aktifkan tab "Matrix Risiko" dulu agar tabel bisa di-hit-test.
-    await tester.tap(find.text('Matrix Risiko').first);
+    await tester.tap(find.byTooltip('Matrix Risiko'));
     await tester.pumpAndSettle();
 
     final tableFinder = find.byKey(const Key('mainTable'));

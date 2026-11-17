@@ -681,7 +681,7 @@ void main() {
     await tester.pumpAndSettle();
 
     // buka tab Jurnal
-    await tester.tap(find.text('Jurnal').last);
+    await tester.tap(find.byTooltip('Jurnal'));
     await tester.pumpAndSettle();
 
     expect(find.text('Trading Journal'), findsOneWidget);
