@@ -50,6 +50,7 @@ plus file baru `lib/mt5_auth.dart`.
   (lama: `f25edffb25788902e604a04a7fa649bc37c15dfaa0fb792b9c55ad834e97be0b`).
 - `lib/engine.dart`, `lib/montecarlo.dart`, dan `legacy-web/script.js`
   **tidak berubah** dan tetap memakai hash baseline `fbf844f` di atas.
-- Tripwire CI (`.github/workflows/backend-lint.yml`) diperbarui dengan hash
+- Tripwire CI (`.github/workflows/backend-lint.yml` dan langkah checksum di
+  `.github/workflows/backend-tests.yml`) diperbarui dengan hash
   baru tersebut; perubahan `lib/main.dart` berikutnya kembali membuat lint
   GAGAL sampai baseline diperbarui dengan persetujuan pemilik.
