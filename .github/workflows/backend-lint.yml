@@ -12,9 +12,11 @@
 #          (/opt/transcendence-hlwon-/backend/.env) — satu sumber config;
 #        - rollback memakai PREVIOUS_COMMIT (commit ter-deploy
 #          sebelumnya), bukan reset ke origin/main.
-#   4. Tripwire file kalkulator (checksum baseline fbf844f): lib/engine.dart,
-#      lib/montecarlo.dart, lib/main.dart, legacy-web/script.js — bila
-#      satu byte pun berubah, lint GAGAL.
+#   4. Tripwire file kalkulator: lib/engine.dart, lib/montecarlo.dart,
+#      legacy-web/script.js (checksum baseline fbf844f) dan lib/main.dart
+#      (baseline UI redesign a2dfe84, disetujui pemilik — lihat
+#      docs/CHECKSUM-PROTECTED-FILES.md) — bila satu byte pun berubah,
+#      lint GAGAL.
 #
 # Test penuh berada di Backend CI (backend-tests.yml); main.yml (build
 # APK) tidak diubah tujuannya.
@@ -183,7 +185,7 @@ jobs:
         run: |
           EXPECTED="d04cfd730f9709fc4a0b9fb78f3e6c363277cca5da4b8eaa5240b2c7bbc10bf2  lib/engine.dart
           abd8edadf1716d7f1701f5eccf47a9839192e9e33fd2f1465192ca13e0ea801d  lib/montecarlo.dart
-          f25edffb25788902e604a04a7fa649bc37c15dfaa0fb792b9c55ad834e97be0b  lib/main.dart
+          ae35c9f42aa58f8a0a6c6ad7e71175596255bc75d0835a3e4cb70ead8ae7c10b  lib/main.dart
           8d553d78fec7094fd63f71f548fe2e04a80cac23eb4ac65323e4fbdcd2f39e5f  legacy-web/script.js"
           ACTUAL=$(sha256sum lib/engine.dart lib/montecarlo.dart lib/main.dart legacy-web/script.js)
           # bandingkan per baris (normalisasi indentasi EXPECTED)
@@ -193,4 +195,4 @@ jobs:
             echo "$DIFF"
             exit 1
           fi
-          echo "PROTECTED FILES IDENTIK (baseline fbf844f)"
+          echo "PROTECTED FILES IDENTIK (baseline fbf844f; lib/main.dart baseline a2dfe84)"

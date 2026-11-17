@@ -38,3 +38,18 @@ multi-customer (data jurnal MT5 berada di jalur terpisah
 solusi alternatif yang diperlukan. Satu-satunya file Flutter yang
 disentuh: `mt5_page.dart` (login/config), `pubspec.yaml` (dependency),
 plus file baru `lib/mt5_auth.dart`.
+
+## Pembaruan baseline `lib/main.dart` (UI redesign total)
+
+- `lib/main.dart` diubah oleh UI redesign total (`f7cf4bc`, `dd49746`;
+  baseline baru = `a2dfe84`), yang disetujui pemilik proyek sebagai desain
+  utama. Logika kalkulator tidak berpindah ke file itu: `lib/engine.dart`
+  dan `lib/montecarlo.dart` tetap terkunci.
+- SHA-256 baru `lib/main.dart`:
+  `ae35c9f42aa58f8a0a6c6ad7e71175596255bc75d0835a3e4cb70ead8ae7c10b`
+  (lama: `f25edffb25788902e604a04a7fa649bc37c15dfaa0fb792b9c55ad834e97be0b`).
+- `lib/engine.dart`, `lib/montecarlo.dart`, dan `legacy-web/script.js`
+  **tidak berubah** dan tetap memakai hash baseline `fbf844f` di atas.
+- Tripwire CI (`.github/workflows/backend-lint.yml`) diperbarui dengan hash
+  baru tersebut; perubahan `lib/main.dart` berikutnya kembali membuat lint
+  GAGAL sampai baseline diperbarui dengan persetujuan pemilik.
