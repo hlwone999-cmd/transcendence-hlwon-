@@ -23,6 +23,20 @@ def _bool(v: str | None) -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _pos_int(name: str, default: int) -> int:
+    """Bilangan bulat >= 1 dari env (nilai tak valid -> default)."""
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except ValueError:
+        log.warning("%s bukan angka — memakai default %s", name, default)
+        return default
+
+
+# W1: variabel lama berbasis IP — tidak lagi dipakai (diabaikan + warning).
+_LEGACY_IP_RATE_ENV = ("REGISTER_PER_IP_HOUR", "REGISTER_PER_IP_DAY",
+                       "REGISTER_PER_SUBNET_DAY")
+
+
 @dataclass
 class Config:
     # --- provider ---
@@ -64,19 +78,36 @@ class Config:
     # --- registrasi portal publik (keputusan produk #1: TETAP AKTIF) ---
     # Registrasi TIDAK memakai slot MT5 (slot = max_customers terminal,
     # dialokasikan hanya saat bind/connect terverifikasi). Perlindungan:
-    # validasi input, rate limit per IP klien tepercaya (per jam & per
-    # hari) dan per subnet (/24 IPv4, /64 IPv6) — persisten di DB.
+    # validasi input + rate limit IDENTITAS/GLOBAL (lihat W1 di bawah).
     # max_registered_customers: batas total akun PORTAL (0 = tanpa batas).
     # Rekomendasi produksi 200 (default): 4 slot MT5 -> akun portal di atas
     # itu hanya daftar tunggu; batas mencegah pertumbuhan DB tak terbatas
-    # oleh registrasi massal multi-subnet. Tidak berlaku utk self-link MT5.
+    # oleh registrasi massal. Tidak berlaku utk self-link MT5.
     public_register_enabled: bool = True
     max_registered_customers: int = 200
-    register_per_ip_hour: int = 5
-    register_per_ip_day: int = 10
-    register_per_subnet_day: int = 30
+
+    # --- W1: rate limit berbasis IDENTITAS + rem GLOBAL -----------------
+    # Di balik reverse proxy bersama (mis. proxy NAT penyedia VPS) semua
+    # request tiba dari peer yang SAMA dan tidak ada IP pengunjung yang
+    # tepercaya. Karena itu IP (REMOTE_ADDR, X-Real-IP, X-Forwarded-For)
+    # TIDAK PERNAH dipakai sebagai identitas rate limit / lockout.
+    # Identitas: email ternormalisasi (login/register), nomor akun MT5 +
+    # server (connect), job_id (connect/status). Rem GLOBAL longgar
+    # (satu ember untuk semua klien) membatasi serangan terdistribusi.
+    # Jendela (detik) tetap: login/connect/status 300, register 3600/86400.
+    rl_login_per_email: int = 10
+    rl_login_global: int = 300
+    rl_register_per_email: int = 3
+    rl_register_global_hour: int = 30
+    rl_register_global_day: int = 100
+    rl_connect_per_account: int = 10
+    rl_connect_global: int = 60
+    rl_connect_status_per_job: int = 150
+    rl_connect_status_global: int = 1500
 
     # --- IP klien di balik reverse proxy (remediasi T2) ---
+    # W1: IP ini HANYA informasional (audit log, metadata sesi) — TIDAK
+    # dipakai untuk rate limit/lockout (lihat rl_* di atas).
     # Header IP klien HANYA dipercaya bila koneksi TCP datang dari proxy
     # tepercaya (REMOTE_ADDR ada di trusted_proxies). Default cocok dgn
     # nginx terdokumentasi (proxy_set_header X-Real-IP $remote_addr):
@@ -219,12 +250,17 @@ def load_config(env_file: str | None = None) -> Config:
             os.getenv("AUTH_PUBLIC_REGISTER_ENABLED", "1")),
         max_registered_customers=max(
             0, int(os.getenv("MAX_REGISTERED_CUSTOMERS", "200"))),
-        register_per_ip_hour=max(1, int(os.getenv("REGISTER_PER_IP_HOUR",
-                                                  "5"))),
-        register_per_ip_day=max(1, int(os.getenv("REGISTER_PER_IP_DAY",
-                                                 "10"))),
-        register_per_subnet_day=max(1, int(os.getenv(
-            "REGISTER_PER_SUBNET_DAY", "30"))),
+        rl_login_per_email=_pos_int("RATE_LOGIN_PER_EMAIL", 10),
+        rl_login_global=_pos_int("RATE_LOGIN_GLOBAL", 300),
+        rl_register_per_email=_pos_int("RATE_REGISTER_PER_EMAIL", 3),
+        rl_register_global_hour=_pos_int("RATE_REGISTER_GLOBAL_HOUR", 30),
+        rl_register_global_day=_pos_int("RATE_REGISTER_GLOBAL_DAY", 100),
+        rl_connect_per_account=_pos_int("RATE_CONNECT_PER_ACCOUNT", 10),
+        rl_connect_global=_pos_int("RATE_CONNECT_GLOBAL", 60),
+        rl_connect_status_per_job=_pos_int("RATE_CONNECT_STATUS_PER_JOB",
+                                           150),
+        rl_connect_status_global=_pos_int("RATE_CONNECT_STATUS_GLOBAL",
+                                          1500),
         trusted_proxies=tuple(
             p.strip() for p in os.getenv(
                 "TRUSTED_PROXIES", "127.0.0.1,::1").split(",") if p.strip()),
@@ -276,6 +312,12 @@ def load_config(env_file: str | None = None) -> Config:
         except json.JSONDecodeError:
             log.warning("SYMBOL_CONFIG bukan JSON valid — diabaikan")
 
+    legacy = [n for n in _LEGACY_IP_RATE_ENV if os.getenv(n)]
+    if legacy:
+        log.warning(
+            "Variabel rate limit berbasis IP %s DIABAIKAN (W1): rate limit "
+            "kini berbasis identitas + rem global (RATE_*).",
+            ", ".join(legacy))
     if not cfg.api_token:
         log.warning(
             "API_TOKEN kosong: token bootstrap admin NONAKTIF. "

@@ -9,10 +9,11 @@
 - Otorisasi : require_customer menurunkan customer context dari token
               yang TERVERIFIKASI SERVER — customer_id/account_id dari
               URL/query/body tidak pernah dipercaya (brief §6).
-- Rate limit: sliding-window per IP klien tepercaya + aksi; lockout per
-              email setelah N login gagal — PERSISTEN di database
-              (auth_throttle/auth_lockouts), atomik lintas worker dan
-              bertahan setelah restart.
+- Rate limit: sliding-window per IDENTITAS + aksi (W1: email
+              ternormalisasi / akun MT5 / job_id — BUKAN IP) ditambah rem
+              GLOBAL longgar; lockout per email setelah N login gagal —
+              PERSISTEN di database (auth_throttle/auth_lockouts), atomik
+              lintas worker dan bertahan setelah restart.
 """
 from __future__ import annotations
 
@@ -119,33 +120,106 @@ class RateLimiter:
 
     def hit(self, key: str, limit: int, window_seconds: int,
             conn=None) -> bool:
-        """Catat 1 hit. Return False bila melebihi limit.
+        """Catat 1 hit BILA masih di bawah limit. Return False bila ditolak.
 
         Estimasi = hit jendela berjalan + hit jendela sebelumnya x sisa
         porsi jendela (sliding approximation) — tidak ada lonjakan 2x di
-        batas jendela. Hit yang ditolak tetap dihitung (penyalahguna yang
-        terus mencoba tidak pernah 'kembali bersih' selama terus mencoba).
+        batas jendela.
+
+        W1/D1: hit yang DITOLAK TIDAK dihitung. Penghitung hanya bertambah
+        untuk hit yang diterima, sehingga pihak yang terus mencoba setelah
+        batas tercapai tidak dapat MEMPERPANJANG pemblokiran (mis. menahan
+        ember email/akun korban tanpa akhir). Setelah batas tercapai,
+        permintaan tetap 429 sampai jendela geser membebaskan kapasitas.
+
+        Atomik: diterapkan lewat hit_all() dengan satu kunci (transaksi
+        berkunci baris/DB — lihat hit_all). Ditolak = tanpa tulis.
+        """
+        return self.hit_all([(key, limit, window_seconds)], conn=conn) is None
+
+    def hit_all(self, checks, conn=None):
+        """SEMUA-ATAU-TIDAK SAMA SEKALI untuk beberapa limit sekaligus.
+
+        [checks] = [(key, limit, window_s), ...]. Return None bila SEMUA
+        lolos (setiap penghitung +1, satu transaksi), atau indeks check
+        PERTAMA (urutan pemanggil) yang menolak — saat itu TIDAK ADA
+        penghitung yang berubah (rollback). Dengan begitu identitas yang
+        lolos tidak "terpakai" ketika rem global menolak, dan sebaliknya.
+
+        Semantik per kunci sama dengan hit(): sliding approximation
+        (cur + prev x sisa porsi <= limit) dan D1 (hit ditolak tidak
+        dihitung).
+
+        Konkurensi (lintas thread & proses):
+        - SQLite     : BEGIN IMMEDIATE — satu write-lock database untuk
+          seluruh baca-putuskan-tulis (busy_timeout 30 s antre).
+        - PostgreSQL : per kunci, BERURUTAN menurut (key_hash, window_s):
+          INSERT .. ON CONFLICT DO NOTHING (baris hits=0) lalu SELECT ..
+          FOR UPDATE. Semua transaksi mengunci baris dalam urutan global
+          yang sama -> tidak ada siklus tunggu (bebas deadlock). Penolakan
+          = ROLLBACK, baris hits=0 yang baru disisipkan ikut hilang.
+        Transaksi tertunda pada koneksi di-commit lebih dulu (perilaku
+        hit() lama: setiap hit selalu commit).
         """
         c = _db(conn)
         now = time.time()
-        w = max(1, int(window_seconds))
-        b = int(now // w)
-        kh = _key_hash(key)
-        row = c.execute(
-            "INSERT INTO auth_throttle (key_hash, window_s, bucket, hits)"
-            " VALUES (?,?,?,1) ON CONFLICT (key_hash, window_s, bucket)"
-            " DO UPDATE SET hits = auth_throttle.hits + 1 RETURNING hits",
-            (kh, w, b)).fetchone()
-        cur = int(row["hits"])
-        prev = c.execute(
-            "SELECT hits FROM auth_throttle WHERE key_hash=? AND window_s=?"
-            " AND bucket=?", (kh, w, b - 1)).fetchone()
-        c.execute("DELETE FROM auth_throttle WHERE key_hash=? AND window_s=?"
-                  " AND bucket<?", (kh, w, b - 1))
+        items = []
+        for idx, (key, limit, window) in enumerate(checks):
+            w = max(1, int(window))
+            items.append({"idx": idx, "kh": _key_hash(key), "w": w,
+                          "b": int(now // w), "limit": float(limit)})
+        if len({(it["kh"], it["w"]) for it in items}) != len(items):
+            raise ValueError("kunci throttle duplikat dalam satu panggilan")
+        pg = dbmod.is_postgres(c)
         c.commit()
-        prev_hits = int(prev["hits"]) if prev else 0
-        est = cur + prev_hits * (1.0 - (now - b * w) / w)
-        return est <= limit
+        try:
+            if not pg:
+                c.execute("BEGIN IMMEDIATE")
+            for it in sorted(items, key=lambda x: (x["kh"], x["w"])):
+                if pg:
+                    c.execute(
+                        "INSERT INTO auth_throttle (key_hash, window_s,"
+                        " bucket, hits) VALUES (?,?,?,0)"
+                        " ON CONFLICT (key_hash, window_s, bucket) DO NOTHING",
+                        (it["kh"], it["w"], it["b"]))
+                    cur = c.execute(
+                        "SELECT hits FROM auth_throttle WHERE key_hash=?"
+                        " AND window_s=? AND bucket=? FOR UPDATE",
+                        (it["kh"], it["w"], it["b"])).fetchone()
+                else:
+                    cur = c.execute(
+                        "SELECT hits FROM auth_throttle WHERE key_hash=?"
+                        " AND window_s=? AND bucket=?",
+                        (it["kh"], it["w"], it["b"])).fetchone()
+                prev = c.execute(
+                    "SELECT hits FROM auth_throttle WHERE key_hash=?"
+                    " AND window_s=? AND bucket=?",
+                    (it["kh"], it["w"], it["b"] - 1)).fetchone()
+                it["cur"] = int(cur["hits"]) if cur else 0
+                prev_hits = int(prev["hits"]) if prev else 0
+                w, b = it["w"], it["b"]
+                it["cap"] = it["limit"] - prev_hits * (1.0 - (now - b * w) / w)
+            failed = [it["idx"] for it in items if it["cur"] + 1 > it["cap"]]
+            if failed:
+                c.rollback()                 # tidak ada yang berubah
+                return min(failed)
+            for it in sorted(items, key=lambda x: (x["kh"], x["w"])):
+                c.execute(
+                    "INSERT INTO auth_throttle (key_hash, window_s, bucket,"
+                    " hits) VALUES (?,?,?,1) ON CONFLICT (key_hash, window_s,"
+                    " bucket) DO UPDATE SET hits = auth_throttle.hits + 1",
+                    (it["kh"], it["w"], it["b"]))
+                c.execute(
+                    "DELETE FROM auth_throttle WHERE key_hash=? AND window_s=?"
+                    " AND bucket<?", (it["kh"], it["w"], it["b"] - 1))
+            c.commit()
+            return None
+        except BaseException:
+            try:
+                c.rollback()
+            except Exception:  # noqa: BLE001 — pertahankan exception asli
+                pass
+            raise
 
     def reset(self, key: str, conn=None) -> None:
         c = _db(conn)
@@ -209,14 +283,18 @@ def _lockout_for(config) -> FailureLockout:
 
 
 def _account_lockout_for(config) -> FailureLockout:
-    """Lockout per AKUN (lintas IP) dengan ambang lebih tinggi (S3).
+    """Lockout per AKUN MT5 (nomor akun + server) — SATU-SATUNYA lockout
+    /mt5/connect sejak W1. Persisten di DB.
 
-    Lockout utama /mt5/connect berkunci (akun, IP klien tepercaya) —
-    penyerang dari IP lain tidak bisa mengunci pemilik sah hanya dengan
-    beberapa percobaan. Lockout per akun ini membatasi brute force
-    TERDISTRIBUSI (banyak IP) dengan ambang 4x lipat. Persisten di DB.
+    Sebelumnya ada lockout per (akun, IP) ambang N dan per akun ambang 4N.
+    Di balik proxy bersama IP tidak tepercaya (semua klien = satu peer),
+    sehingga lockout per (akun, IP) de facto sudah per akun ambang N.
+    W1 menyatakannya secara eksplisit: per akun, ambang N =
+    max_failed_logins (setara lockout login per email). Konsekuensi yang
+    disadari: pihak yang tahu nomor akun + server dapat menunda pemilik
+    selama lockout_seconds (lihat risiko residual W1).
     """
-    return FailureLockout(4 * getattr(config, "max_failed_logins", 5),
+    return FailureLockout(getattr(config, "max_failed_logins", 5),
                           getattr(config, "lockout_seconds", 900))
 
 
@@ -359,6 +437,18 @@ def register_customer(conn, config, email: str, password: str,
 
 
 # ------------------------------------------------------------------- login
+_DUMMY_HASH: str | None = None
+
+
+def _dummy_hash() -> str:
+    """Hash pbkdf2 tiruan (parameter sama dgn hash nyata) untuk login email
+    tak terdaftar. Password acak per proses; tidak pernah cocok."""
+    global _DUMMY_HASH  # noqa: PLW0603
+    if _DUMMY_HASH is None:
+        _DUMMY_HASH = generate_password_hash(secrets.token_urlsafe(32))
+    return _DUMMY_HASH
+
+
 def login(conn, config, email: str, password: str, ip: str | None) -> dict:
     email = normalize_email(email)
     lock = _lockout_for(config)
@@ -370,7 +460,15 @@ def login(conn, config, email: str, password: str, ip: str | None) -> dict:
                   c.status AS customer_status
            FROM users u JOIN customers c ON c.id = u.customer_id
            WHERE u.email=?""", (email,)).fetchone()
-    if row is None or not check_password_hash(row["password_hash"], password):
+    # W1 (anti-enumerasi waktu): email tak terdaftar tetap menjalankan SATU
+    # verifikasi PBKDF2 terhadap hash tiruan, sama seperti email terdaftar.
+    # Terukur in-process (SQLite, n=40): selisih median ~0,77 ms (sd ~11 ms;
+    # sebelumnya ~145 ms). Waktu respons TIDAK dijamin identik — belum
+    # diukur lewat jaringan/proxy; request pertama per proses membuat hash
+    # tiruan, dan hash lama dgn iterasi berbeda dapat menimbulkan selisih.
+    pw_hash = row["password_hash"] if row is not None else _dummy_hash()
+    pw_ok = check_password_hash(pw_hash, password)
+    if row is None or not pw_ok:
         lock.record_failure(email, conn=conn)
         raise AuthError(401, "Email atau password salah")
     if row["customer_status"] != "active":
@@ -406,7 +504,10 @@ def _valid_ip(value: str | None) -> str | None:
 
 
 def client_ip_from(remote_addr: str | None, headers, config) -> str | None:
-    """IP klien untuk rate-limit/lockout/audit (remediasi T2).
+    """IP klien untuk audit/metadata sesi SAJA (remediasi T2).
+
+    W1: nilai ini TIDAK BOLEH dipakai sebagai identitas rate limit atau
+    lockout — di balik proxy bersama semua klien terlihat sebagai satu IP.
 
     - Header IP klien HANYA dipercaya bila REMOTE_ADDR (peer TCP) adalah
       proxy tepercaya (config.trusted_proxies) — klien yang terhubung
@@ -444,4 +545,51 @@ def register_rate_limit(key: str, limit: int, window: int,
                         conn=None) -> None:
     """Raise AuthError(429) bila melewati batas."""
     if not limiter.hit(key, limit, window, conn=conn):
+        raise AuthError(429, "Terlalu banyak permintaan — coba lagi nanti")
+
+
+# --------------------------------------- W1: identitas, BUKAN alamat IP
+_JOB_ID_RE = None
+
+
+def email_identity(email: str) -> str | None:
+    """Email ternormalisasi untuk kunci rate limit; None bila tidak valid
+    (permintaan itu tetap dihitung rem global dan ditolak 400 kemudian)."""
+    try:
+        return normalize_email(email)
+    except AuthError:
+        return None
+
+
+def mt5_account_identity(login_val: int, server: str) -> str:
+    """Identitas akun MT5 = nomor akun + server (casefold, trim) — sama
+    dengan kunci lockout akun, sehingga varian kapital tidak lolos."""
+    return f"{int(login_val)}:{(server or '').strip().casefold()}"
+
+
+def job_identity(job_id: str) -> str:
+    """job_id valid = UUIDv4 dalam bentuk ``uuid.uuid4().hex`` (format
+    yang diterbitkan services/provisioning.py): 32 heksadesimal kecil,
+    nibble VERSI (karakter ke-13) = '4', nibble VARIAN (karakter ke-17)
+    ∈ {8, 9, a, b} (RFC 4122/9562). Nilai lain (termasuk heks 32 karakter
+    yang bukan v4, huruf besar, atau berstrip) berbagi SATU ember
+    'invalid' -> job_id acak tidak membuat baris throttle baru tanpa
+    batas."""
+    import re
+    global _JOB_ID_RE  # noqa: PLW0603
+    if _JOB_ID_RE is None:
+        _JOB_ID_RE = re.compile(
+            r"^[0-9a-f]{12}4[0-9a-f]{3}[89ab][0-9a-f]{15}$")
+    return job_id if _JOB_ID_RE.fullmatch(job_id or "") else "invalid"
+
+
+def throttle(checks, conn=None) -> None:
+    """Terapkan daftar (key, limit, window_s) sebagai SATU keputusan
+    atomik (RateLimiter.hit_all): semua limit lolos -> semua penghitung
+    +1; satu saja menolak -> AuthError 429 dan TIDAK ADA penghitung yang
+    berubah. Jadi permintaan yang ditolak ember identitasnya tidak
+    menghabiskan rem global milik semua pengguna, dan permintaan yang
+    ditolak rem global tidak menghabiskan kuota identitasnya."""
+    checks = [(k, int(lim), int(win)) for k, lim, win in checks]
+    if checks and limiter.hit_all(checks, conn=conn) is not None:
         raise AuthError(429, "Terlalu banyak permintaan — coba lagi nanti")

@@ -10,8 +10,28 @@
 - Logout = revoke di server + hapus dari secure storage perangkat.
 - Transport: header `Authorization: Bearer` **atau** `X-API-Token`
   (nama header lama dipertahankan demi kompatibilitas Flutter).
-- Rate limiting: login 10/5 menit per IP; register 5/jam per IP
-  (sliding-window in-memory). Lockout per email setelah 5 gagal (15 menit).
+- Rate limiting (W1, persisten di DB, BUKAN per IP — di balik proxy
+  bersama semua klien terlihat sebagai satu IP): login 10/5 menit per
+  email ternormalisasi + rem global 300/5 menit; register 3/jam per email
+  + rem global 30/jam & 100/hari; `/mt5/connect` 10/5 menit per akun MT5
+  + rem global 60/5 menit; `/mt5/connect/status` 150/5 menit per job_id
+  + rem global 1500/5 menit (env `RATE_*`). Hit yang DITOLAK tidak
+  dihitung, jadi percobaan terus-menerus setelah batas tidak memperpanjang
+  pemblokiran (429 sampai jendela geser membebaskan kapasitas). Batas
+  identitas + rem global diputuskan ATOMIK semua-atau-tidak (satu
+  transaksi; SQLite `BEGIN IMMEDIATE`, PostgreSQL `SELECT … FOR UPDATE`
+  berurutan menurut key_hash agar bebas deadlock): bila salah satu
+  menolak, tidak ada penghitung yang berubah. Lockout per
+  email setelah 5 gagal (15 menit); lockout `/mt5/connect` per akun MT5
+  ambang sama; permintaan yang ditolak lockout tidak menambah kegagalan.
+- Anti-enumerasi login: email terdaftar / tidak terdaftar mendapat status
+  dan isi respons yang sama, dan kedua jalur menjalankan satu verifikasi
+  PBKDF2 (hash tiruan untuk email tak terdaftar). Selisih median terukur
+  ~0,77 ms pada pengujian in-process (SQLite, n=40; sebelumnya ~145 ms).
+  Waktu respons TIDAK dijamin identik dan belum diukur lewat jaringan.
+  Catatan: `/auth/register` tetap mengembalikan 409 untuk email duplikat,
+  dan `/mt5/connect` masih memiliki selisih waktu akun aktif vs tidak
+  terdaftar (temuan D2, di luar W1).
 - Kapasitas: maksimal 4 customer aktif — ditegakkan saat register.
 
 ## 2. Otorisasi (tidak percaya input)
