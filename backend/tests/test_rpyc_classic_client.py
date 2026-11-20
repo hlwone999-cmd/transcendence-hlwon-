@@ -70,6 +70,9 @@ SERVER = textwrap.dedent('''
 
     srv = ThreadedServer(EvilSlave, hostname="127.0.0.1",
                          port=int(sys.argv[1]))
+    # Socket sudah bind+listen di konstruktor: tandai siap TANPA membuka
+    # koneksi uji (koneksi uji memicu on_connect kedua -> race).
+    open(sys.argv[2], "w").close()
     srv.start()
 ''')
 
@@ -88,14 +91,20 @@ def evil_server(tmp_path):
     out = tmp_path / "attack.jsonl"
     port = _free_port()
     env = {**os.environ, "PYTHONPATH": str(tmp_path), "TR_OUT": str(out)}
-    p = subprocess.Popen([sys.executable, "-c", SERVER, str(port)], env=env,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    for _ in range(100):
-        try:
-            socket.create_connection(("127.0.0.1", port), 0.2).close()
+    ready = tmp_path / "server.ready"
+    p = subprocess.Popen([sys.executable, "-c", SERVER, str(port), str(ready)],
+                         env=env, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+    # Tunggu penanda siap dari server — JANGAN probe dengan koneksi TCP:
+    # setiap koneksi memicu EvilSlave.on_connect, dan koneksi probe yang
+    # sudah ditutup bisa menimpa builtins._tr_evil_conn (flaky EOFError).
+    for _ in range(200):
+        if ready.exists():
             break
-        except OSError:
-            time.sleep(0.05)
+        time.sleep(0.05)
+    else:
+        p.kill()
+        pytest.fail("server rpyc uji tidak siap")
     yield port, out, p.pid
     p.kill()
     p.wait()
