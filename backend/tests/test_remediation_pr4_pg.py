@@ -156,7 +156,9 @@ def test_migrasi_tertunda_dengan_role_app_gagal_jelas(dbs):
 # ---------------------------------------------- Tahap 1: registrasi
 def test_registrasi_normal_duplikat_dan_spoof_xff(dbs):
     owner_uri, app_uri = dbs
-    c = _app(_cfg(app_uri)).test_client()
+    cfg = _cfg(app_uri)
+    cfg.rl_register_global_hour = 7   # W1: rem global (bukan per IP)
+    c = _app(cfg).test_client()
     assert _reg(c, "pg1@t.id").status_code == 201
     assert _reg(c, "PG1@t.id", ip="198.51.100.11").status_code == 409
     assert _owner(owner_uri, "SELECT COUNT(*) FROM users") == 1

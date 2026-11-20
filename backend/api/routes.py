@@ -112,24 +112,15 @@ def require_customer(fn):
     return wrapper
 
 
-def require_rate_limit(action: str, limit, window_seconds: int):
-    """Dekorator rate-limit per IP klien tepercaya + aksi (persisten di DB,
-    lintas worker). [limit] int atau nama atribut config."""
-    def deco(fn):
-        @wraps(fn)
-        def wrapper(*a, **kw):
-            import auth as authmod
-            ip = authmod.current_ip() or "?"
-            lim = limit if isinstance(limit, int) else \
-                int(getattr(cfg(), limit))
-            try:
-                authmod.register_rate_limit(f"{action}:{ip}", lim,
-                                            window_seconds)
-            except authmod.AuthError as e:
-                abort(e.code, description=e.message)
-            return fn(*a, **kw)
-        return wrapper
-    return deco
+def _throttle(checks) -> None:
+    """W1: rate limit berbasis IDENTITAS + rem GLOBAL (persisten di DB,
+    lintas worker). IP klien TIDAK PERNAH menjadi kunci: di balik proxy
+    bersama semua pengunjung tiba dari peer yang sama. 429 seragam."""
+    import auth as authmod
+    try:
+        authmod.throttle(checks)
+    except authmod.AuthError as e:
+        abort(e.code, description=e.message)
 
 
 def _own_account(conn):
@@ -354,27 +345,16 @@ def admin_health_terminals():
 
 
 # ------------------------------------------------------------------- auth
-def _subnet_of(ip: str | None) -> str:
-    """Subnet klien untuk rate-limit registrasi (/24 IPv4, /64 IPv6)."""
-    import ipaddress
-    try:
-        addr = ipaddress.ip_address(ip or "")
-    except ValueError:
-        return "?"
-    prefix = 24 if addr.version == 4 else 64
-    return str(ipaddress.ip_network(f"{addr}/{prefix}", strict=False))
-
-
 @api_bp.post("/auth/register")
 @system_route
-@require_rate_limit("register", "register_per_ip_hour", 3600)
 def auth_register():
     """Registrasi portal publik (keputusan produk #1: TETAP AKTIF).
 
-    Perlindungan (Tahap 1): validasi input (auth.normalize_email /
-    validate_password / validate_display_name), rate limit PERSISTEN per
-    IP klien tepercaya (per jam + per hari) dan per subnet (per hari) —
-    X-Forwarded-For dari klien tidak dipercaya (auth.current_ip).
+    Perlindungan: validasi input (auth.normalize_email / validate_password
+    / validate_display_name) + rate limit PERSISTEN berbasis identitas
+    (W1): per email ternormalisasi, lalu rem GLOBAL per jam & per hari;
+    batas total akun portal = MAX_REGISTERED_CUSTOMERS. IP klien tidak
+    dipakai (tidak tepercaya di balik proxy bersama).
     Registrasi TIDAK memberi terminal/slot MT5: slot hanya dialokasikan
     saat bind/connect akun MT5 yang lolos verifikasi.
     """
@@ -384,16 +364,16 @@ def auth_register():
     if not getattr(c, "public_register_enabled", True):
         abort(403, description="Registrasi publik dinonaktifkan — "
                                "hubungi admin untuk provisioning customer")
-    ip = authmod.current_ip() or "?"
-    try:
-        authmod.register_rate_limit(f"register-day:{ip}",
-                                    c.register_per_ip_day, 86400)
-        authmod.register_rate_limit(f"register-net:{_subnet_of(ip)}",
-                                    c.register_per_subnet_day, 86400)
-    except authmod.AuthError as e:
-        abort(e.code, description=e.message)
     body = request.get_json(silent=True) or {}
     email = str(body.get("email") or "")
+    ident = authmod.email_identity(email)
+    checks = []
+    if ident is not None:
+        checks.append((f"register:email:{ident}", c.rl_register_per_email,
+                       3600))
+    checks += [("register:global:hour", c.rl_register_global_hour, 3600),
+               ("register:global:day", c.rl_register_global_day, 86400)]
+    _throttle(checks)
     password = str(body.get("password") or "")
     display_name = str(body.get("display_name") or "") or None
     conn = get_db()
@@ -411,13 +391,24 @@ def auth_register():
 
 @api_bp.post("/auth/login")
 @system_route
-@require_rate_limit("login", 10, 300)
 def auth_login():
+    """Login email+password. W1: rate limit per email ternormalisasi lalu
+    rem global; lockout per email (auth.login). Anti-enumerasi: email
+    terdaftar / tidak terdaftar mendapat status & isi respons yang sama,
+    dan kedua jalur menjalankan satu verifikasi PBKDF2 (selisih median
+    terukur ~0,77 ms in-process; bukan jaminan waktu identik)."""
     import audit as auditmod
     import auth as authmod
+    c = cfg()
     body = request.get_json(silent=True) or {}
     email = str(body.get("email") or "")
     password = str(body.get("password") or "")
+    ident = authmod.email_identity(email)
+    checks = []
+    if ident is not None:
+        checks.append((f"login:email:{ident}", c.rl_login_per_email, 300))
+    checks.append(("login:global", c.rl_login_global, 300))
+    _throttle(checks)
     conn = get_db()
     try:
         result = authmod.login(conn, cfg(), email, password,
@@ -855,7 +846,6 @@ def _job_response(conn, coord, job, secret: str | None, *,
 
 @api_bp.post("/mt5/connect")
 @system_route
-@require_rate_limit("mt5_connect", 10, 300)
 def mt5_connect():
     """Self-link / reaktivasi akun MT5 dengan AUTO-PROVISIONING terminal.
 
@@ -901,18 +891,20 @@ def mt5_connect():
     if len(server) > 128 or len(password) > 256:
         abort(400, description="'server'/'password' terlalu panjang")
 
-    ip = authmod.current_ip() or "?"
-    acct_key = f"mt5-connect:{login_val}:{server.casefold()}"
-    ip_key = f"{acct_key}:{ip}"
-    lock_ip = authmod._lockout_for(c)
+    # W1: identitas = akun MT5 (nomor + server), BUKAN IP. Rate limit per
+    # akun lalu rem global (melindungi provisioning dari banjir akun acak);
+    # lockout kegagalan per akun (ambang max_failed_logins).
+    ident = authmod.mt5_account_identity(login_val, server)
+    _throttle([(f"mt5-connect:acct:{ident}", c.rl_connect_per_account, 300),
+               ("mt5-connect:global", c.rl_connect_global, 300)])
+    acct_key = f"mt5-connect:{ident}"
     lock_acct = authmod._account_lockout_for(c)
-    if lock_ip.is_locked(ip_key) or lock_acct.is_locked(acct_key):
+    if lock_acct.is_locked(acct_key):
         abort(429, description="Terlalu banyak percobaan gagal — coba lagi "
                                "nanti")
     conn = get_db()
 
     def _fail(reason: str, customer_id=None):
-        lock_ip.record_failure(ip_key)
         lock_acct.record_failure(acct_key)
         # B12.1: penulis audit dipilih audit() sendiri (koneksi audit role
         # sistem bila scope koneksi ini bukan milik customer_id audit).
@@ -994,7 +986,6 @@ def mt5_connect():
                                        "password investor yang baru.")
             abort(401, description=GENERIC_VERIFY_FAIL)
         live_ok = klass == "ok"
-        lock_ip.clear(ip_key)
         lock_acct.clear(acct_key)
         token = authmod.issue_token(conn, c, user_id=int(urow["id"]),
                                     customer_id=cust_id,
@@ -1055,7 +1046,7 @@ def mt5_connect():
             user_id=int(urow["id"]), account_id=int(existing["id"]),
             terminal=term, created_customer=False, created_account=False,
             prev_account_state=prev_state, require_real=False,
-            lock_ip_hash=authmod._key_hash(ip_key),
+            lock_ip_hash=None,          # W1: tidak ada lockout per IP
             lock_acct_hash=authmod._key_hash(acct_key))
         coord.start(job_id)
         job = coord.wait(conn, job_id, c.mt5_connect_sync_wait_seconds)
@@ -1136,7 +1127,7 @@ def mt5_connect():
         account_id=acc_id, terminal=term, created_customer=created_customer,
         created_account=True, prev_account_state=None,
         require_real=getattr(c, "mt5_self_link_require_real", True),
-        lock_ip_hash=authmod._key_hash(ip_key),
+        lock_ip_hash=None,              # W1: tidak ada lockout per IP
         lock_acct_hash=authmod._key_hash(acct_key))
     coord.start(job_id)
     job = coord.wait(conn, job_id, c.mt5_connect_sync_wait_seconds)
@@ -1152,17 +1143,24 @@ def mt5_connect():
 
 @api_bp.post("/mt5/connect/status")
 @system_route
-@require_rate_limit("mt5_connect_status", 120, 300)
 def mt5_connect_status():
     """Polling job aktivasi: body {"job_id", "job_secret"}.
 
     job_secret (32 byte acak, disimpan sebagai SHA-256) adalah kapabilitas
     — tanpanya status tidak dapat dibaca. Token sesi diterbitkan SEKALI
     saat job 'connected' (klaim atomik); polling berikutnya 410.
+    W1: rate limit per job_id (format uuid4 hex; nilai lain berbagi satu
+    ember) lalu rem global — tidak bergantung IP klien.
     """
+    import auth as authmod
+    c = cfg()
     body = request.get_json(silent=True) or {}
     job_id = str(body.get("job_id") or "")[:64]
     secret = str(body.get("job_secret") or "")[:128]
+    _throttle([
+        (f"mt5-connect-status:job:{authmod.job_identity(job_id)}",
+         c.rl_connect_status_per_job, 300),
+        ("mt5-connect-status:global", c.rl_connect_status_global, 300)])
     conn = get_db()
     coord = current_app.extensions["mt5_coordinator"]
     coord.recover_expired(conn)

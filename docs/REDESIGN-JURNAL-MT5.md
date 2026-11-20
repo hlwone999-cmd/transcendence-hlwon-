@@ -60,7 +60,7 @@ Guard keamanan (semua diuji):
 |---|---|
 | Kapasitas maks 4 customer aktif | `MAX_CUSTOMERS` (default 4) + `capacity_guard` (PG advisory lock / SQLite BEGIN IMMEDIATE — TOCTOU tertutup) |
 | Unique constraint akun | `UNIQUE(login, server)` `mt5_accounts` — balapan → 409 rapi + customer yatim dibersihkan |
-| Rate limit | 10 permintaan / 5 menit per IP (sliding window) |
+| Rate limit | W1: 10 permintaan / 5 menit per akun MT5 (login + server) + rem global 60 / 5 menit (sliding window, DB). Bukan per IP |
 | Lockout | Per (login, server) setelah 5 kegagalan verifikasi → 429 |
 | Audit | `mt5_connect` / `mt5_connect_gagal` di `audit_logs` (TANPA password) |
 | Nonaktif oleh admin | Env `MT5_SELF_LINK_ENABLED=false` → 403 |

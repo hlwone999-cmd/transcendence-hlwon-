@@ -471,7 +471,9 @@ def test_t4_cleanup_job_tidak_menyentuh_terminal_yang_tidak_dibuatnya():
 
 # ===================================================== T2 lewat connect
 def test_t2_spoof_xff_tidak_melewati_rate_limit_connect():
-    cfg = _cfg()
+    """W1: rem GLOBAL /mt5/connect (banyak akun acak, header IP palsu
+    berganti) — melindungi provisioning dari banjir akun acak."""
+    cfg = _cfg(rl_connect_global=10)
     app = _app(cfg)
     codes = []
     for i in range(12):
@@ -503,14 +505,28 @@ def test_s2_pesan_seragam_terdaftar_vs_tidak_vs_varian_kapital():
 
 # ======================================================= S3: lockout
 def test_s3_penyerang_dari_ip_lain_tidak_mengunci_pemilik():
+    """W1 (perilaku BARU, disengaja): lockout /mt5/connect berkunci AKUN
+    MT5 (nomor + server), bukan IP — IP tidak tepercaya di balik proxy
+    bersama. Di bawah ambang pemilik tetap bisa masuk; setelah ambang
+    akun terkunci untuk SEMUA (header IP apa pun); akun lain tidak."""
     cfg = _cfg()
     app = _app(cfg)
     assert _post(app, 80808080, ip="203.0.113.60").status_code == 201
-    for _ in range(5):
-        _post(app, 80808080, password="salah", ip="198.51.100.66")
-    assert _post(app, 80808080, password="salah",
-                 ip="198.51.100.66").status_code == 429
+    assert _post(app, 80808082, ip="203.0.113.62").status_code == 201
+    for i in range(cfg.max_failed_logins - 1):
+        assert _post(app, 80808080, password="salah",
+                     ip=f"198.51.100.{i}").status_code == 401
+    # di bawah ambang: pemilik sah masih bisa masuk (kegagalan di-reset)
     assert _post(app, 80808080, ip="203.0.113.60").status_code == 200
+    for i in range(cfg.max_failed_logins):
+        _post(app, 80808080, password="salah", ip=f"198.51.101.{i}")
+    # ambang tercapai: terkunci walau header IP berganti / password benar
+    for ip in ("198.51.100.66", "203.0.113.60"):
+        assert _post(app, 80808080, ip=ip).status_code == 429
+    # variasi kapital/spasi server = identitas yang sama
+    assert _post(app, 80808080, server=f" {SRV.upper()} ").status_code == 429
+    # akun lain tidak terpengaruh
+    assert _post(app, 80808082, ip="198.51.100.66").status_code == 200
 
 
 def test_s3_brute_force_terdistribusi_dibatasi_dan_bertahan_restart():

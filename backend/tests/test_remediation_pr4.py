@@ -217,16 +217,25 @@ def test_t2_xff_hanya_entri_paling_kanan_bila_dikonfigurasi():
 
 
 def test_t2_spoof_xff_tidak_melewati_rate_limit_login():
-    cfg = _cfg()
+    """W1: identitas rate limit login = email ternormalisasi. Header IP
+    (XFF / X-Real-IP) yang berganti-ganti TIDAK menciptakan identitas
+    baru; varian kapital/spasi email = identitas sama."""
+    cfg = _cfg(max_failed_logins=1000)     # isolasi: uji rate limit saja
     c = _client(cfg)
     codes = []
     for i in range(12):
+        email = "Korban@T.id" if i % 2 else "  korban@t.id "
         r = c.post("/api/v1/auth/login",
-                   json={"email": f"x{i}@t.id", "password": "salah-salah"},
-                   headers={"X-Forwarded-For": f"10.9.{i}.{i}"})
+                   json={"email": email, "password": "salah-salah"},
+                   headers={"X-Forwarded-For": f"10.9.{i}.{i}",
+                            "X-Real-IP": f"198.51.100.{i + 1}"})
         codes.append(r.status_code)
     assert codes[:10] == [401] * 10, codes
     assert codes[10:] == [429, 429], codes
+    # email LAIN tidak ikut terblokir (bukan ember per-IP bersama)
+    r = c.post("/api/v1/auth/login",
+               json={"email": "lain@t.id", "password": "salah-salah"})
+    assert r.status_code == 401
 
 
 # ===================================== Tahap 1: registrasi publik aman
@@ -283,34 +292,39 @@ def test_reg_validasi_input_ditolak_tanpa_efek(email, password, name):
 
 
 def test_reg_spoof_xff_tidak_melewati_limit_per_ip():
-    cfg = _cfg()
+    """W1: rem GLOBAL registrasi per jam berlaku untuk semua klien — header
+    IP palsu (XFF / X-Real-IP berganti) tidak menciptakan kuota baru."""
+    cfg = _cfg(rl_register_global_hour=5)
     c = _client(cfg)
     codes = []
     for i in range(7):
         r = c.post("/api/v1/auth/register",
                    json={"email": f"sp{i}@t.id", "password": "rahasia123"},
-                   headers={"X-Forwarded-For": f"203.0.{i}.{i}"})
+                   headers={"X-Forwarded-For": f"203.0.{i}.{i}",
+                            "X-Real-IP": f"198.51.100.{i + 1}"})
         codes.append(r.status_code)
-    # limit 5/jam per IP: XFF palsu tidak menciptakan IP baru
     assert codes == [201] * 5 + [429, 429], codes
     assert _n(cfg, "SELECT COUNT(*) AS n FROM customers") == 5
 
 
 def test_reg_massal_dari_satu_subnet_dibatasi_subnet_lain_tidak_terkunci():
-    cfg = _cfg(register_per_subnet_day=3)
+    """W1: batas per EMAIL ternormalisasi — percobaan berulang satu email
+    (varian kapital) dibatasi tanpa mengunci registrasi email lain."""
+    cfg = _cfg(rl_register_per_email=3)
     c = _client(cfg)
-    codes = [_register(c, f"m{i}@t.id", ip=f"203.0.113.{i + 1}").status_code
-             for i in range(5)]
-    assert codes == [201, 201, 201, 429, 429], codes
-    # satu sumber penyalahgunaan TIDAK mengunci registrasi dari subnet lain
-    assert _register(c, "lain@t.id", ip="198.18.7.7").status_code == 201
-    assert _n(cfg, "SELECT COUNT(*) AS n FROM customers") == 4
+    codes = [_register(c, e).status_code for e in
+             ("m@t.id", "M@t.id", " m@T.ID ", "m@t.id")]
+    # 1 sukses, duplikat 409 (perilaku lama), lalu batas per email 429
+    assert codes == [201, 409, 409, 429], codes
+    assert _register(c, "lain@t.id").status_code == 201
+    assert _n(cfg, "SELECT COUNT(*) AS n FROM customers") == 2
 
 
 def test_reg_limit_harian_per_ip():
-    cfg = _cfg(register_per_ip_hour=100, register_per_ip_day=2)
+    """W1: rem GLOBAL harian registrasi (bukan per IP)."""
+    cfg = _cfg(rl_register_global_hour=100, rl_register_global_day=2)
     c = _client(cfg)
-    codes = [_register(c, f"d{i}@t.id", ip="198.18.1.1").status_code
+    codes = [_register(c, f"d{i}@t.id", ip=f"198.18.1.{i}").status_code
              for i in range(3)]
     assert codes == [201, 201, 429], codes
 
@@ -500,7 +514,9 @@ def test_s3_lockout_bertahan_setelah_restart_proses():
 
 
 def test_s3_percobaan_login_bersamaan_terhitung_atomik():
-    cfg = _cfg()
+    """W1: rem GLOBAL login atomik di bawah konkurensi (12 thread, email
+    berbeda, IP sama) — tepat [limit] lolos, tidak ada hit yang hilang."""
+    cfg = _cfg(rl_login_global=10)
     c = _client(cfg)
     assert _register(c, "cc@t.id").status_code == 201
     barrier = threading.Barrier(12)
@@ -535,6 +551,7 @@ _WORKER = textwrap.dedent("""
     c.api_token = "T"
     c.cred_key = Fernet.generate_key().decode()
     c.term_base_dir = sys.argv[2] + ".term"
+    c.rl_login_global = 10          # W1: rem global kecil agar teruji
     app = create_app(c, provider_factory=lambda *a, **k: MockMT5Client())
     cl = app.test_client()
     out = []
@@ -550,7 +567,8 @@ _WORKER = textwrap.dedent("""
 
 def run_workers(db_path: str, db_url: str, n_proc: int, per_proc: int):
     """Jalankan [n_proc] PROSES backend terpisah (worker) pada DB yang
-    sama, masing-masing [per_proc] percobaan login dari IP yang sama."""
+    sama, masing-masing [per_proc] percobaan login (email berbeda) —
+    rem global login (10 / 5 menit di worker) dibagi lintas proses."""
     procs = [subprocess.Popen(
         [sys.executable, "-c", _WORKER, str(BACKEND), db_path, db_url,
          str(per_proc), str(i)], stdout=subprocess.PIPE,
@@ -568,7 +586,7 @@ def test_rate_limit_konsisten_lintas_banyak_proses_worker():
     dbmod.close_db()
     codes = run_workers(cfg.db_path, "", 3, 6)
     assert len(codes) == 18
-    # limit login 10 / 5 menit per IP berlaku GLOBAL lintas proses
+    # W1: rem global login 10 / 5 menit berlaku lintas proses
     assert codes.count(401) == 10 and codes.count(429) == 8, codes
 
 
@@ -712,6 +730,7 @@ _REG_WORKER = textwrap.dedent("""
     c.cred_key = Fernet.generate_key().decode()
     c.term_base_dir = sys.argv[2] + ".term"
     c.max_registered_customers = int(sys.argv[5])
+    c.rl_register_global_hour = int(sys.argv[7])
     app = create_app(c, provider_factory=lambda *a, **k: MockMT5Client())
     cl = app.test_client()
     out = []
@@ -726,10 +745,10 @@ _REG_WORKER = textwrap.dedent("""
 """)
 
 
-def _reg_procs(db_path, n_proc, per_proc, cap, ip_fmt):
+def _reg_procs(db_path, n_proc, per_proc, cap, ip_fmt, global_hour=30):
     procs = [subprocess.Popen(
         [sys.executable, "-c", _REG_WORKER, str(BACKEND), db_path,
-         str(per_proc), str(i), str(cap), ip_fmt],
+         str(per_proc), str(i), str(cap), ip_fmt, str(global_hour)],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
         for i in range(n_proc)]
     codes = []
@@ -743,11 +762,13 @@ def test_reg_limit_per_ip_konsisten_lintas_proses_dan_restart():
     cfg = _cfg()
     _client(cfg)
     dbmod.close_db()
-    # 3 proses worker, IP SAMA (XFF palsu diabaikan): total sukses = 5/jam
-    codes = _reg_procs(cfg.db_path, 3, 4, 0, "198.18.9.9")
+    # W1: 3 proses worker, IP berbeda-beda: rem GLOBAL 5/jam dibagi
+    # lintas proses -> total sukses = 5
+    codes = _reg_procs(cfg.db_path, 3, 4, 0, "198.18.%d.9", global_hour=5)
     assert codes.count(201) == 5 and codes.count(429) == 7, codes
     # "restart": proses baru, memori bersih -> tetap 429
-    assert _reg_procs(cfg.db_path, 1, 1, 0, "198.18.9.9") == [429]
+    assert _reg_procs(cfg.db_path, 1, 1, 0, "198.18.99.9",
+                      global_hour=5) == [429]
 
 
 def test_reg_massal_multi_subnet_dibatasi_batas_portal():
