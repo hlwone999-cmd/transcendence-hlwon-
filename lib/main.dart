@@ -87,6 +87,12 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   // input (nilai default = sama seperti web)
   final balance = TextEditingController(text: '10.000.000');
+  // Modal bisa diketik dalam IDR atau USD. Kalkulator SELALU membaca
+  // `balance` (IDR); di mode USD, `balance` diisi otomatis = USD × kurs.
+  final balanceUsd = TextEditingController();
+  String balCur = 'IDR'; // 'IDR' | 'USD'
+  double? _usdExact; // USD persis saat beralih dari IDR (tanpa pembulatan)
+  String? _usdExactText; // teks 2 desimal yang ditampilkan untuk _usdExact
   final kurs = TextEditingController(text: '17.934');
   final risk = TextEditingController(text: '2');
   final ratio = TextEditingController(text: '2');
@@ -145,6 +151,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _mcTimer?.cancel();
     for (final c in [
       balance,
+      balanceUsd,
       kurs,
       risk,
       ratio,
@@ -176,7 +183,15 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       final o = jsonDecode(sp.getString('lotxau2') ?? 'null');
       if (o is Map<String, dynamic>) {
-        fill('lotxau2', o, ['balance', 'kurs', 'risk', 'ratio', 'plan']);
+        fill('lotxau2', o, [
+          'balance',
+          'balanceUsd',
+          'kurs',
+          'risk',
+          'ratio',
+          'plan',
+        ]);
+        if (o['balCur'] == 'USD') balCur = 'USD';
       }
     } catch (_) {}
     try {
@@ -218,6 +233,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   TextEditingController _ctrl(String k) => {
     'balance': balance,
+    'balanceUsd': balanceUsd,
     'kurs': kurs,
     'risk': risk,
     'ratio': ratio,
@@ -235,6 +251,8 @@ class _HomeScreenState extends State<HomeScreen> {
         'lotxau2',
         jsonEncode({
           'balance': balance.text,
+          'balanceUsd': balanceUsd.text,
+          'balCur': balCur,
           'kurs': kurs.text,
           'risk': risk.text,
           'ratio': ratio.text,
@@ -370,6 +388,7 @@ class _HomeScreenState extends State<HomeScreen> {
   void _applyRuleMode({bool persist = true}) {
     if (ruleSel == null) return;
     final d = ruleData(ruleSel!);
+    balCur = 'IDR'; // tabel Rules didefinisikan dalam Rupiah
     if (ruleMode == 'rec') {
       balance.text = _groupPlain(d.after);
       risk.text = d.x.toStringAsFixed(2).replaceFirst('.', ',');
@@ -408,7 +427,43 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ---------------- hitung utama (calc) ------------------------------------
 
+  /// Mode USD: isi `balance` (IDR, dibaca kalkulator) = modal USD × kurs.
+  /// Kurs/USD tidak valid -> `balance` dikosongkan agar kalkulator meminta
+  /// input lengkap (tidak memakai nilai IDR lama yang sudah basi).
+  void _syncBalanceFromUsd() {
+    // Selama teks USD hasil konversi belum diubah pengguna, pakai nilai USD
+    // persis (bukan 2 desimal) agar IDR -> USD -> IDR tidak bergeser.
+    final exact = _usdExactText != null && balanceUsd.text == _usdExactText;
+    final u = exact ? _usdExact : numMoney(balanceUsd.text);
+    final ks = numMoney(kurs.text);
+    final ok = u != null && u.isFinite && u > 0 &&
+        ks != null && ks.isFinite && ks > 0;
+    final next = ok ? _groupPlain((u * ks).round()) : '';
+    if (balance.text != next) balance.text = next;
+  }
+
+  /// Ganti mata uang input modal. Nilai dibawa ke mata uang baru memakai
+  /// kurs acuan saat ini, sehingga modal tidak berubah saat sekadar ganti.
+  void _setBalCur(String cur) {
+    if (cur == balCur) return;
+    final ks = numMoney(kurs.text);
+    if (cur == 'USD') {
+      final b = numMoney(balance.text);
+      if (b != null && b.isFinite && b > 0 &&
+          ks != null && ks.isFinite && ks > 0) {
+        _usdExact = b / ks;
+        _usdExactText = _usdExact!.toStringAsFixed(2);
+        balanceUsd.text = _usdExactText!;
+      }
+    } else {
+      _syncBalanceFromUsd(); // IDR = hasil konversi terakhir
+    }
+    setState(() => balCur = cur);
+    recalcAll();
+  }
+
   void recalcAll() {
+    if (balCur == 'USD') _syncBalanceFromUsd();
     final bal = numMoney(balance.text);
     final ks = numMoney(kurs.text);
     final rp = numPlain(risk.text);
@@ -593,6 +648,39 @@ class _HomeScreenState extends State<HomeScreen> {
   // ---------------- util kecil UI -------------------------------------------
 
   double? get bal => numMoney(balance.text);
+
+  /// Hint di bawah input modal: tafsiran angka yang diketik + (mode USD)
+  /// hasil konversi ke Rupiah yang benar-benar dipakai kalkulator.
+  String _balanceHint(double? b0) {
+    final okIdr = b0 != null && b0.isFinite;
+    if (balCur == 'IDR') {
+      return okIdr
+          ? 'Terbaca: ${idr(b0)}${b0 < 100000 ? ' — pastikan nominalnya benar (bisa ketik 1.500.000 atau 1,5jt)' : ''}'
+          : 'Contoh: 10.000.000 atau 10jt';
+    }
+    final u = numMoney(balanceUsd.text);
+    final ks = numMoney(kurs.text);
+    if (u == null || !u.isFinite || u <= 0) {
+      return 'Contoh: 300, 1.250,50 atau 2,5k (dalam USD)';
+    }
+    if (ks == null || !ks.isFinite || ks <= 0) {
+      return 'Terbaca: ${usd(u)} — isi kurs acuan USD/IDR di bawah agar bisa '
+          'dikonversi ke Rupiah';
+    }
+    return 'Terbaca: ${usd(u)} ≈ ${okIdr ? idr(b0) : '–'} '
+        '(kurs ${idr(ks)})'
+        '${okIdr && b0 < 100000 ? ' — pastikan nominalnya benar' : ''}';
+  }
+
+  bool _balanceHintBad(double? b0) {
+    final okIdr = b0 != null && b0.isFinite;
+    if (balCur == 'IDR') return okIdr && b0 < 100000;
+    final u = numMoney(balanceUsd.text);
+    final ks = numMoney(kurs.text);
+    final uOk = u != null && u.isFinite && u > 0;
+    final kOk = ks != null && ks.isFinite && ks > 0;
+    return uOk && (!kOk || (okIdr && b0 < 100000));
+  }
 
   /// Footer angka pembantu di param MC (semua dari input yang sama).
   void recalcMcOnly() {
@@ -1385,10 +1473,16 @@ class _HomeScreenState extends State<HomeScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   LabeledField(
-                    label: 'MODAL BERSIH AKUN (IDR)',
-                    controller: balance,
-                    prefix: 'Rp',
+                    key: ValueKey('modal-$balCur'),
+                    label: 'MODAL BERSIH AKUN ($balCur)',
+                    controller: balCur == 'USD' ? balanceUsd : balance,
+                    prefix: balCur == 'USD' ? '\$' : 'Rp',
                     onChanged: (_) => recalcAll(),
+                    suffix: CurrencyToggle(
+                      options: const ['IDR', 'USD'],
+                      value: balCur,
+                      onChanged: _setBalCur,
+                    ),
                     labelTrailing: ruleSel != null
                         ? BadgePill(
                             'RULE $ruleSel',
@@ -1396,12 +1490,8 @@ class _HomeScreenState extends State<HomeScreen> {
                             bg: p.goldsoft,
                           )
                         : null,
-                    hint: b0 != null && b0.isFinite
-                        ? 'Terbaca: ${idr(b0)}${b0 < 100000 ? ' — pastikan nominalnya benar (bisa ketik 1.500.000 atau 1,5jt)' : ''}'
-                        : 'Contoh: 10.000.000 atau 10jt',
-                    hintColor: b0 != null && b0.isFinite && b0 < 100000
-                        ? p.red
-                        : null,
+                    hint: _balanceHint(b0),
+                    hintColor: _balanceHintBad(b0) ? p.red : null,
                   ),
                   const SizedBox(height: 12),
                   LabeledField(

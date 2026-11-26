@@ -374,6 +374,68 @@ class PresetChip extends StatelessWidget {
   }
 }
 
+/// Pemilih mata uang ringkas (mis. IDR | USD) untuk dipasang sebagai
+/// `suffix` LabeledField. Segmen aktif memakai warna aksen.
+class CurrencyToggle extends StatelessWidget {
+  final List<String> options;
+  final String value;
+  final ValueChanged<String> onChanged;
+  const CurrencyToggle({
+    super.key,
+    required this.options,
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final p = Palette.of(context);
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: p.cardHi,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          for (final o in options)
+            Semantics(
+              button: true,
+              selected: o == value,
+              label: 'Mata uang $o',
+              child: Material(
+                color: o == value ? p.goldSolid : Colors.transparent,
+                borderRadius: BorderRadius.circular(999),
+                child: InkWell(
+                  onTap: o == value ? null : () => onChanged(o),
+                  borderRadius: BorderRadius.circular(999),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 11,
+                      vertical: 6,
+                    ),
+                    child: Text(
+                      o,
+                      style: TextStyle(
+                        fontFamily: kMonoFont,
+                        fontSize: 12,
+                        fontWeight: o == value
+                            ? FontWeight.w600
+                            : FontWeight.w500,
+                        color: o == value ? p.onGold : p.muted,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 /// Baris toggle gaya iOS (Mode Recovery / Compounding).
 class ToggleRow extends StatelessWidget {
   final String title;
